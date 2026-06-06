@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "translation-services"
+version = "0.1.0"
+description = "FastAPI service for queued OCR/translation jobs, with PaddleOCR, llm-pool translation routing, artifacts, and metrics."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "fastapi>=0.110",
+  "paddleocr==3.6.0",
+  "paddlex[ocr]==3.6.1",
+  "pillow>=10",
+  "uvicorn>=0.30",
+  "pydantic>=2.6",
+  "python-multipart>=0.0.9",
+]
+
+[tool.setuptools.packages.find]
+include = ["app*"]

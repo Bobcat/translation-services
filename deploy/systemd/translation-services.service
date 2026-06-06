@@ -1,0 +1,17 @@
+[Unit]
+Description=translation-services
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/gunnar/projects/translation-services
+Environment=TRANSLATION_SERVICES_SETTINGS_PATH=/home/gunnar/projects/translation-services/config/settings.json
+Environment=DEFAULT_PORT=8030
+ExecStart=/home/gunnar/projects/translation-services/deploy/systemd/start-translation-services.sh
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=default.target
+

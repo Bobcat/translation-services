@@ -1,0 +1,36 @@
+{
+  "service": {
+    "host": "127.0.0.1",
+    "port": 8030,
+    "log_level": "info",
+    "work_root": "data/requests"
+  },
+  "scheduler": {
+    "runner_slots": 2,
+    "queue_limit": 20,
+    "records_max": 10000,
+    "records_ttl_s": {
+      "completed": 900,
+      "failed": 1800,
+      "cancelled": 600
+    }
+  },
+  "llm_pool": {
+    "base_url": "http://127.0.0.1:8011",
+    "translator_model": "translategemma-4b-it-q5-k-m-gguf",
+    "translator_mode": "auto",
+    "literal_translator_model": "google_gemma-4-26B-A4B-it-Q4_K_M-gguf",
+    "literal_translator_mode": "generic",
+    "request_timeout_s": 120
+  },
+  "ocr": {
+    "backend": "paddleocr",
+    "language": "en",
+    "min_confidence": 0.35,
+    "device": "gpu:0",
+    "ocr_version": "PP-OCRv5",
+    "use_doc_orientation_classify": false,
+    "use_doc_unwarping": false,
+    "use_textline_orientation": false
+  }
+}

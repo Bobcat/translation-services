@@ -1,0 +1,60 @@
+from __future__ import annotations
+
+from typing import Any
+from typing import Literal
+
+from pydantic import BaseModel
+from pydantic import Field
+
+
+TaskName = Literal["translate_image"]
+RequestState = Literal["queued", "running", "completed", "failed", "cancelled", "cancel_requested"]
+TranslatorMode = Literal["translategemma", "generic", "auto"]
+OcrRoute = Literal["scene", "document"]
+
+
+class RequestPayload(BaseModel):
+    request_id: str | None = None
+    task: TaskName
+    source_lang_code: str | None = None
+    target_lang_code: str | None = None
+    ocr_route: OcrRoute | None = None
+    ocr_unwarp: bool | None = None
+    translator_model: str | None = None
+    translator_mode: TranslatorMode | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class RequestLifecycle(BaseModel):
+    request_id: str
+    state: RequestState
+    task: TaskName
+    queue_position: int | None = None
+    submitted_at_utc: str
+    started_at_utc: str | None = None
+    finished_at_utc: str | None = None
+    stage: str | None = None
+    timings: dict[str, float] = Field(default_factory=dict)
+    response: dict[str, Any] | None = None
+    error: dict[str, Any] | None = None
+
+
+class RequestSubmitEnvelope(RequestLifecycle):
+    pass
+
+
+class CompletionEvent(BaseModel):
+    seq: int
+    event: str
+    request_id: str
+    state: RequestState
+    task: TaskName
+    submitted_at_utc: str
+    finished_at_utc: str | None = None
+    response: dict[str, Any] | None = None
+    error: dict[str, Any] | None = None
+
+
+class CompletionsEnvelope(BaseModel):
+    events: list[CompletionEvent] = Field(default_factory=list)
+    next_seq: int = Field(default=0, ge=0)
