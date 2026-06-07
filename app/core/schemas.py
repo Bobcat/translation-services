@@ -9,8 +9,10 @@ from pydantic import Field
 
 TaskName = Literal["translate_image"]
 RequestState = Literal["queued", "running", "completed", "failed", "cancelled", "cancel_requested"]
-TranslatorMode = Literal["translategemma", "generic", "auto"]
-OcrRoute = Literal["scene", "document"]
+TranslatorMode = Literal["translategemma", "generic"]
+# Only "scene" remains (the document route was removed). Kept for forward-compat
+# with the planned adaptive "auto" route; REMOVAL CANDIDATE if that never lands.
+OcrRoute = Literal["scene"]
 
 
 class RequestPayload(BaseModel):
@@ -22,6 +24,7 @@ class RequestPayload(BaseModel):
     ocr_unwarp: bool | None = None
     translator_model: str | None = None
     translator_mode: TranslatorMode | None = None
+    grouping_model: str | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 

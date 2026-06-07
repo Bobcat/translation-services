@@ -12,7 +12,7 @@ OCR runs locally via **PaddleOCR**.
 
 | Task | In → out | Status |
 |---|---|---|
-| `translate_image` | image → translated image | in development (OCR phase) |
+| `translate_image` | image → translated image | in development (grouping + translation wired; rendering next) |
 | `translate_text` | text → translated text | planned (reuses routing + translation core) |
 | `translate_pdf` | pdf → translated pdf | later |
 
@@ -30,8 +30,9 @@ app/
   runtime/           # job execution: FIFO queue, runner loop, lifecycle store
   tasks/             # feature pipelines — one module per task (the readable flows)
     translate_image.py
-  ocr/               # OCR component: paddle backend, merge, overlay, doc-unwarp
-  translation/       # translation component: language-pair routing
+  ocr/               # OCR component: paddle backend, merge, overlay
+  grouping/          # grouping component: VLM hint + aligner -> translation units
+  translation/       # translation component: language-pair routing + llm-pool translate
 ```
 
 To see how a feature works, open `tasks/<task>.py` — it reads as a recipe that
@@ -40,28 +41,31 @@ calls named stages.
 ## The translate_image pipeline
 
 Vocabulary: a **cell** is one OCR box (text + bbox + confidence); a **translation
-unit** is a group of cells; a **route** is the OCR mode (`scene` / `document`).
+unit** is a group of cells; a **route** is the OCR mode (`scene`).
 
 | # | Stage | What | Status |
 |---|---|---|---|
 | 1 | **Ingest** | store canonical input (EXIF-transposed) | ✅ done (`app/main.py`) |
-| 2 | **OCR** | PaddleOCR; `scene` (default) or `document` route → cells | ✅ done (`ocr/`, route per request; adaptive `auto` planned) |
+| 2 | **OCR** | PaddleOCR `scene` route → cells (detection resolution via `text_det_limit_side_len`) | ✅ done (`ocr/`; adaptive `auto` planned) |
 | 3 | **Orientation rescue** | re-recognise low-confidence cells by cropping + rotating (fixes garbled rotated text) | ⏳ planned |
-| 4 | **Coverage gate** (VLM) | ask a VLM "is visible text missing from the cells?"; escalate the OCR route if so | ⏳ planned |
-| 5 | **Grouping** (VLM-based) | cluster cells into translation units + reading order | ⏳ planned (replaces the removed geometric heuristic) |
-| 6 | **Routing** | per unit: pick the translator model by source→target language pair | ✅ present (`translation/routing.py`), not yet wired in |
-| 7 | **Translation** | call `llm-pool` per unit | ⏳ to (re)build |
-| 8 | **Re-placement** | render translated text back into the image | ⏳ to (re)build |
+| 4 | **Coverage gate** | compare the VLM transcription (#5) to the cells; escalate OCR (higher `text_det_limit_side_len`) when much is missing | 🟡 byproduct of #5 available; gate itself parked |
+| 5 | **Grouping** (VLM-based) | VLM transcribes + groups the image; aligned back onto the OCR cells → translation units (`flow`/`field`) in reading order | ✅ done (`grouping/`) |
+| 6 | **Routing** | single direct A→B path: the configured translator model + mode (seam for richer routing later) | ✅ done (`translation/routing.py`) |
+| 7 | **Translation** | call `llm-pool` (`/v1/responses`) per unit | ✅ done (`translation/translate.py`) |
+| 8 | **Re-placement** | render translated text back into the image | ⏳ to build |
 
-Stages 4 and 5 may become a single multimodal call (coverage + grouping
-together).
+OCR cells stay **authoritative** for text + bbox; the VLM is only a grouping
+*hint*, so a weak/incomplete VLM lowers quality but does not fail the job. That
+same VLM transcription doubles as the coverage reference for #4.
 
 ## Current status
 
-Phase: **OCR tuning.** `translate_image` runs ingest → OCR and returns the raw
-OCR cells plus a debug overlay (boxes drawn on the input). Grouping, translation
-and rendering (stages 5–8) are intentionally disabled while the OCR routes and
-the grouping approach are designed.
+Phase: **translation wired; rendering next.** `translate_image` runs ingest → OCR
+→ VLM grouping → per-unit routing + translation, and returns the OCR cells, the
+translation units (each with `translated_text`, `kind`, members) and a grouping
+debug overlay. Re-placement (#8) is not done yet, so the **output image is still
+the debug overlay**; the translations live in the response JSON
+(`ocr.translation_units`, `metadata.full_translated_text`).
 
 ## Topology
 
@@ -83,8 +87,9 @@ live.
 | GET | `/v1/status` | queue / runner status |
 
 `request_json` fields: `task`, `source_lang_code`, `target_lang_code`,
-`ocr_route` (`scene`/`document`), `ocr_unwarp` (bool), optional `translator_model`
-/ `translator_mode`, optional `request_id`.
+`ocr_route` (`scene` only — the `document` route was removed; field kept for the
+planned `auto` route and is a removal candidate), `ocr_unwarp` (bool), optional
+`translator_model` / `translator_mode`, optional `grouping_model`, optional `request_id`.
 
 ```bash
 curl -sS -X POST http://127.0.0.1:8030/v1/requests \
@@ -97,11 +102,13 @@ curl -sS -X POST http://127.0.0.1:8030/v1/requests \
 `config/settings.json` (version-controlled) + optional `config/local.json`
 (per-machine, gitignored, deep-merged). Key sections: `service`, `scheduler`
 (`runner_slots`, `queue_limit`), `ocr` (`backend`, `language`, `device`,
-`ocr_version`, `min_confidence`), `llm_pool` (`base_url`, `translator_model`,
-`translator_mode`, `translation_routes`).
+`ocr_version`, `min_confidence`, `text_det_limit_side_len`, `text_det_limit_type`),
+`llm_pool` (`base_url`, `translator_model`, `translator_mode`, `grouping_model`).
 
-Language-pair routing (`translator_mode: auto`): `translation_routes` maps
-`source:target` (with `en:*`, `*:nl`, `default` wildcards) to a translator model.
+Translation is a single A→B path: `translator_model` is called in `translator_mode`
+(`generic` = a target-language prompt, auto-detects the source; `translategemma` =
+the dedicated model, needs `source_lang_code`). Per-pair/content routing was removed
+and will be reintroduced in `translation/routing.py` if testing shows the need.
 
 ## Development
 

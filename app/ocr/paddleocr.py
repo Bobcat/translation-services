@@ -22,7 +22,7 @@ _PADDLEOCR_LANGUAGE_BY_SOURCE = {
 
 
 _PADDLEOCR_LOCK = threading.Lock()
-_PADDLEOCR_CACHE: dict[tuple[str, str, str, bool, bool, bool], Any] = {}
+_PADDLEOCR_CACHE: dict[tuple[Any, ...], Any] = {}
 
 
 def resolve_paddleocr_language(settings: OcrSettings, source_lang_code: str | None) -> str:
@@ -95,6 +95,8 @@ def _get_paddleocr_engine(settings: OcrSettings, language: str, *, use_doc_unwar
         bool(settings.use_doc_orientation_classify),
         doc_unwarping,
         bool(settings.use_textline_orientation),
+        int(settings.text_det_limit_side_len),
+        str(settings.text_det_limit_type),
     )
     with _PADDLEOCR_LOCK:
         cached = _PADDLEOCR_CACHE.get(key)
@@ -113,6 +115,8 @@ def _get_paddleocr_engine(settings: OcrSettings, language: str, *, use_doc_unwar
                 use_doc_orientation_classify=key[3],
                 use_doc_unwarping=key[4],
                 use_textline_orientation=key[5],
+                text_det_limit_side_len=key[6],
+                text_det_limit_type=key[7],
             )
         except Exception as exc:
             raise RuntimeError(f"failed to initialize paddleocr: {exc}") from exc

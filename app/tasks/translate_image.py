@@ -1,14 +1,15 @@
-"""Task pipeline: image in -> translated image out.
+"""Task pipeline: image in -> translated units out (re-placement not done yet).
 
-Current stages (OCR-inspection phase):
+Current stages:
 
     ingest (canonical input, done in app.main)
-    -> OCR            app.ocr.run_raw_ocr     (scene route, or document route)
-    -> overlay debug  app.ocr.overlay         (boxes drawn on the input)
+    -> OCR             app.ocr.run_raw_ocr        (scene route -> cells)
+    -> grouping        app.grouping               (VLM hint -> translation units)
+    -> routing+xlate   app.translation.translate  (per unit -> translated_text)
+    -> overlay debug   app.grouping.overlay       (units drawn on the input)
 
-Planned stages (rebuild): orientation rescue -> coverage gate -> grouping
--> routing (app.translation.routing) -> translation -> re-placement (render).
-Grouping, translation and rendering are intentionally disabled for now.
+Not done yet: orientation rescue, coverage gate, and re-placement (rendering the
+translated text back into the image). The output image is still the debug overlay.
 """
 from __future__ import annotations
 
@@ -19,11 +20,13 @@ import time
 from typing import Any
 
 from app.core.config import AppSettings
-from app.ocr.document_unwarp import render_paddle_document_unwarped_debug
+from app.grouping import group_cells_into_units
+from app.grouping.overlay import render_grouping_overlay_debug
 from app.ocr import resolve_ocr_language
 from app.ocr import run_raw_ocr
 from app.ocr.overlay import render_original_ocr_overlay_debug
 from app.ocr.segment import OcrSegment
+from app.translation.translate import translate_units
 
 
 @dataclass(frozen=True)
@@ -39,10 +42,9 @@ class TranslateImageResult:
     rectified_debug_mime_type: str = "image/png"
     projected_overlay_debug_image: bytes | None = None
     projected_overlay_debug_mime_type: str = "image/png"
-    document_unwarped_debug_image: bytes | None = None
-    document_unwarped_debug_mime_type: str = "image/png"
+    grouping_overlay_debug_image: bytes | None = None
+    grouping_overlay_debug_mime_type: str = "image/png"
     ocr: dict[str, Any] | None = None
-    document: dict[str, Any] | None = None
 
 
 def run_translate_image_pipeline(
@@ -59,22 +61,14 @@ def run_translate_image_pipeline(
     if not source_lang:
         raise RuntimeError("source_lang_code is required for OCR inspection")
 
+    # ocr_route is kept for forward-compat with the planned adaptive "auto" route;
+    # only "scene" remains. REMOVAL CANDIDATE if "auto" never lands (see README).
     requested_ocr_route = str(request.get("ocr_route") or "scene").strip().lower()
-    if requested_ocr_route not in {"scene", "document"}:
+    if requested_ocr_route != "scene":
         raise RuntimeError(f"unsupported ocr_route: {requested_ocr_route or 'unknown'}")
 
     ocr_language = resolve_ocr_language(settings.ocr, source_lang)
     ocr_unwarp = bool(request.get("ocr_unwarp"))
-    if requested_ocr_route == "document":
-        return _run_document_route(
-            settings=settings,
-            input_path=input_path,
-            ocr_language=ocr_language,
-            ocr_unwarp=ocr_unwarp,
-            source_lang=source_lang,
-            target_lang=target_lang,
-            started_at=started_at,
-        )
 
     ocr_started_at = time.perf_counter()
     ocr_segments = run_raw_ocr(
@@ -90,6 +84,46 @@ def run_translate_image_pipeline(
         ocr_segments=ocr_segments,
     )
     cells = _ocr_cells(ocr_segments)
+
+    grouping_model = str(request.get("grouping_model") or "").strip() or settings.llm_pool.grouping_model
+    grouping = group_cells_into_units(
+        settings=settings,
+        input_path=input_path,
+        cells=cells,
+        model=grouping_model,
+    )
+    grouping_overlay_debug = render_grouping_overlay_debug(
+        input_path=input_path,
+        result=grouping,
+        cells=cells,
+    )
+
+    translator_model = str(request.get("translator_model") or "").strip() or settings.llm_pool.translator_model
+    translator_mode = str(request.get("translator_mode") or "").strip() or settings.llm_pool.translator_mode
+    translation_started = time.perf_counter()
+    translations = translate_units(
+        settings=settings,
+        units=grouping.units,
+        source_lang_code=source_lang,
+        target_lang_code=target_lang,
+        translator_model=translator_model,
+        translator_mode=translator_mode,
+    )
+    translation_wall_ms = _elapsed_ms(translation_started)
+    translation_by_id = {item.unit_id: item for item in translations}
+    translation_units: list[dict[str, Any]] = []
+    for unit in grouping.units:
+        unit_dict = unit.to_dict()
+        translated = translation_by_id.get(unit.id)
+        if translated is not None:
+            unit_dict["translated_text"] = translated.translated_text
+            unit_dict["translator_model"] = translated.translator_model
+            unit_dict["translation_route"] = translated.translation_route
+        translation_units.append(unit_dict)
+    translated_unit_count = sum(1 for item in translations if item.translated_text)
+    translation_call_count = sum(1 for item in translations if item.translation_route != "skipped_empty")
+    full_translated_text = "\n".join(item.translated_text for item in translations if item.translated_text)
+
     image = projected_overlay_debug.image or _input_png_bytes(input_path)
     metadata = {
         "ocr_backend": settings.ocr.backend,
@@ -97,15 +131,19 @@ def run_translate_image_pipeline(
         "ocr_route": requested_ocr_route,
         "ocr_unwarp": ocr_unwarp,
         "effective_ocr_route": "scene",
-        "translation_alignment": "ocr_inspect_only",
+        "translation_alignment": "units_translated_no_render",
         "translation_ocr_space": "original",
         "translation_ocr_segment_count": len(ocr_segments),
-        "full_translated_text": "",
+        "full_translated_text": full_translated_text,
         "source_lang_code": source_lang,
         "target_lang_code": target_lang,
-        "note": "OCR inspection mode returns raw OCR cells only; grouping, translation, and translated rendering are intentionally disabled.",
+        "translator_model": translator_model,
+        "translator_mode": translator_mode,
+        "note": "Returns OCR cells, VLM grouping and per-unit translations; translated rendering (re-placement) is not done yet.",
     }
     metadata.update(projected_overlay_debug.metadata)
+    metadata["grouping_model"] = grouping.model
+    metadata.update(grouping_overlay_debug.metadata)
     metadata.update(
         {
             "rectified_ocr_applied": False,
@@ -119,84 +157,28 @@ def run_translate_image_pipeline(
         mime_type="image/png",
         projected_overlay_debug_image=projected_overlay_debug.image,
         projected_overlay_debug_mime_type=projected_overlay_debug.mime_type,
+        grouping_overlay_debug_image=grouping_overlay_debug.image,
+        grouping_overlay_debug_mime_type=grouping_overlay_debug.mime_type,
         segments=cells,
         metadata=metadata,
         metrics={
             "ocr_wall_ms": ocr_wall_ms,
+            "grouping_wall_ms": float(grouping.metrics.get("grouping_wall_ms", 0.0)),
+            "translation_wall_ms": translation_wall_ms,
             "llm_pool_wall_ms": 0.0,
             "translate_image_total_wall_ms": _elapsed_ms(started_at),
             "ocr_segment_count": len(ocr_segments),
             "translation_ocr_segment_count": len(ocr_segments),
-            "translation_unit_count": 0,
-            "llm_pool_request_count": 0,
+            "translation_unit_count": len(grouping.units),
+            "translated_unit_count": translated_unit_count,
+            "ignored_cell_count": len(grouping.ignored_cell_ids),
+            "llm_pool_request_count": (1 if cells else 0) + translation_call_count,
         },
         ocr={
             "route": "scene",
             "cells": cells,
-            "layout_regions": [],
-        },
-    )
-
-
-def _run_document_route(
-    *,
-    settings: AppSettings,
-    input_path: Path,
-    ocr_language: str,
-    ocr_unwarp: bool,
-    source_lang: str,
-    target_lang: str,
-    started_at: float,
-) -> TranslateImageResult:
-    document_started_at = time.perf_counter()
-    document_unwarped_debug = render_paddle_document_unwarped_debug(
-        settings=settings.ocr,
-        input_path=input_path,
-        language=ocr_language,
-        use_doc_unwarping=ocr_unwarp,
-    )
-    document_wall_ms = _elapsed_ms(document_started_at)
-    output_image = document_unwarped_debug.image or _input_png_bytes(input_path)
-
-    metadata = {
-        "ocr_backend": settings.ocr.backend,
-        "ocr_language": ocr_language,
-        "ocr_route": "document",
-        "ocr_unwarp": ocr_unwarp,
-        "effective_ocr_route": "document",
-        "source_lang_code": source_lang,
-        "target_lang_code": target_lang,
-        "translation_alignment": "document_inspect",
-        "translation_ocr_space": "document_unwarped",
-        "translation_ocr_segment_count": 0,
-        "full_translated_text": "",
-        "output_rendering_space": "document_unwarped_debug",
-        "note": "Document route currently returns PPStructure document OCR/layout inspection only; translation and rendering are intentionally disabled.",
-    }
-    metadata.update(document_unwarped_debug.metadata)
-
-    return TranslateImageResult(
-        image=output_image,
-        mime_type="image/png",
-        segments=[],
-        metadata=metadata,
-        metrics={
-            "document_route_wall_ms": document_wall_ms,
-            "translate_image_total_wall_ms": _elapsed_ms(started_at),
-            "document_cell_count": len(document_unwarped_debug.cells),
-            "document_layout_region_count": len(document_unwarped_debug.layout_regions),
-            "llm_pool_request_count": 0,
-        },
-        document_unwarped_debug_image=document_unwarped_debug.image,
-        document_unwarped_debug_mime_type=document_unwarped_debug.mime_type,
-        ocr={
-            "route": "document",
-            "cells": document_unwarped_debug.cells,
-            "layout_regions": document_unwarped_debug.layout_regions,
-        },
-        document={
-            "cells": document_unwarped_debug.cells,
-            "layout_regions": document_unwarped_debug.layout_regions,
+            "translation_units": translation_units,
+            "ignored_cell_ids": list(grouping.ignored_cell_ids),
         },
     )
 
