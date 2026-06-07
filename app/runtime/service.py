@@ -322,9 +322,9 @@ class RequestRuntime:
         projected_overlay_debug_path = (job_root / "projected_overlay_debug.png").resolve()
         if result.projected_overlay_debug_image is not None:
             projected_overlay_debug_path.write_bytes(result.projected_overlay_debug_image)
-        document_unwarped_debug_path = (job_root / "document_unwarped_debug.png").resolve()
-        if result.document_unwarped_debug_image is not None:
-            document_unwarped_debug_path.write_bytes(result.document_unwarped_debug_image)
+        grouping_overlay_debug_path = (job_root / "grouping_overlay_debug.png").resolve()
+        if result.grouping_overlay_debug_image is not None:
+            grouping_overlay_debug_path.write_bytes(result.grouping_overlay_debug_image)
         segments_path = (job_root / "segments.json").resolve()
         segments_path.write_text(
             json.dumps({"segments": result.segments}, ensure_ascii=False, indent=2),
@@ -359,10 +359,10 @@ class RequestRuntime:
                 "path": str(projected_overlay_debug_path),
                 "mime_type": result.projected_overlay_debug_mime_type,
             }
-        if result.document_unwarped_debug_image is not None:
-            artifacts["document_unwarped_debug"] = {
-                "path": str(document_unwarped_debug_path),
-                "mime_type": result.document_unwarped_debug_mime_type,
+        if result.grouping_overlay_debug_image is not None:
+            artifacts["grouping_overlay_debug"] = {
+                "path": str(grouping_overlay_debug_path),
+                "mime_type": result.grouping_overlay_debug_mime_type,
             }
         response = {
             "task": request["task"],
@@ -373,8 +373,6 @@ class RequestRuntime:
         }
         if result.ocr is not None:
             response["ocr"] = dict(result.ocr)
-        if result.document is not None:
-            response["document"] = dict(result.document)
         return response
 
     def _to_lifecycle(self, rec: RequestRecord) -> dict[str, Any]:

@@ -8,9 +8,7 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 
 from app.core.config import AppSettings
-from app.core.config import LlmPoolSettings
 from app.core.config import OcrSettings
-from app.core.config import TranslationRouteSettings
 from app.main import create_app
 from app.ocr import OcrSegment
 from app.ocr import resolve_ocr_language
@@ -323,47 +321,19 @@ def test_merge_same_line_segments_preserves_skewed_row_polygon() -> None:
     assert segments[0].polygon[1]["y"] > segments[0].polygon[0]["y"]
 
 
-def test_resolve_translation_route_uses_source_target_overrides() -> None:
-    settings = AppSettings(
-        llm_pool=LlmPoolSettings(
-            literal_translator_model="google_gemma-4-E4B-it-Q8_0-gguf",
-            literal_translator_mode="generic",
-            translation_routes={
-                "*:nl": TranslationRouteSettings(
-                    literal_translator_model="eurollm-9b-instruct-q5-k-m-gguf",
-                    literal_translator_mode="generic",
-                ),
-                "en:nl": TranslationRouteSettings(
-                    literal_translator_model="eurollm-22b-instruct-2512-q5-k-m-gguf",
-                    literal_translator_mode="generic",
-                ),
-            },
-        )
-    )
-
-    exact = resolve_translation_route(
-        settings=settings,
-        translator_model="translategemma-4b-it-q5-k-m-gguf",
-        translator_mode="auto",
+def test_resolve_translation_route_returns_configured_model_and_mode() -> None:
+    # Single direct A->B path: routing just echoes the configured model + mode.
+    decision = resolve_translation_route(
+        settings=AppSettings(),
+        translator_model="google_gemma-4-26B-A4B-it-Q4_K_M-gguf",
+        translator_mode="generic",
         source_lang_code="en",
         target_lang_code="nl",
         source_text="THE SHOE WORKS IF YOU DO.",
     )
-    wildcard = resolve_translation_route(
-        settings=settings,
-        translator_model="translategemma-4b-it-q5-k-m-gguf",
-        translator_mode="auto",
-        source_lang_code="de",
-        target_lang_code="nl",
-        source_text="THE SHOE WORKS IF YOU DO.",
-    )
-
-    assert exact.translator_model == "eurollm-22b-instruct-2512-q5-k-m-gguf"
-    assert exact.translator_mode == "generic"
-    assert exact.translation_route == "literal_generic"
-    assert exact.route_key == "en:nl"
-    assert wildcard.translator_model == "eurollm-9b-instruct-q5-k-m-gguf"
-    assert wildcard.route_key == "*:nl"
+    assert decision.translator_model == "google_gemma-4-26B-A4B-it-Q4_K_M-gguf"
+    assert decision.translator_mode == "generic"
+    assert decision.translation_route == "configured_generic"
 
 
 def test_original_ocr_overlay_debug_draws_original_boxes(tmp_path: Path) -> None:
