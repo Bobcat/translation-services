@@ -40,8 +40,10 @@ calls named stages.
 
 ## The translate_image pipeline
 
-Vocabulary: a **cell** is one OCR box (text + bbox + confidence); a **translation
-unit** is a group of cells.
+Vocabulary: a **cell** is one OCR box (text + bbox + confidence). A **translation
+unit** is a group of cells that are translated together, tagged **`flow`** (lines
+of one continuous text, e.g. a wrapped heading or paragraph) or **`field`** (a
+standalone label or value, e.g. a price or a table cell).
 
 | # | Stage | What | Status |
 |---|---|---|---|
@@ -49,7 +51,7 @@ unit** is a group of cells.
 | 2 | **OCR** | PaddleOCR → cells (detection resolution via `text_det_limit_side_len`) | ✅ done (`ocr/`) |
 | 3 | **Orientation rescue** | re-recognise low-confidence cells by cropping + rotating (fixes garbled rotated text) | ⏳ planned |
 | 4 | **Coverage gate** | compare the VLM transcription (#5) to the cells; escalate OCR (higher `text_det_limit_side_len`) when much is missing | 🟡 byproduct of #5 available; gate itself parked |
-| 5 | **Grouping** (VLM-based) | VLM transcribes + groups the image; aligned back onto the OCR cells → translation units (`flow`/`field`) in reading order | ✅ done (`grouping/`) |
+| 5 | **Grouping** (VLM-based) | a VLM groups text that belongs together (a heading, paragraph or item) so each coherent piece is translated as one unit; an aligner maps the groups onto the OCR cells | ✅ done (`grouping/`) |
 | 6 | **Routing** | single direct A→B path: the configured translator model + mode (seam for richer routing later) | ✅ done (`translation/routing.py`) |
 | 7 | **Translation** | call `llm-pool` (`/v1/responses`) per unit | ✅ done (`translation/translate.py`) |
 | 8 | **Re-placement** | render translated text back into the image | ⏳ to build |
@@ -57,6 +59,10 @@ unit** is a group of cells.
 OCR cells stay **authoritative** for text + bbox; the VLM is only a grouping
 *hint*, so a weak/incomplete VLM lowers quality but does not fail the job. That
 same VLM transcription doubles as the coverage reference for #4.
+
+Translation (#7) is **one `llm-pool` call per unit**, so dense images (receipts,
+menus) are costly. Batching several units into one call — if the translator
+handles it well without cross-talk — is a future optimization, not yet tried.
 
 ## Current status
 
