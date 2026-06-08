@@ -325,6 +325,9 @@ class RequestRuntime:
         grouping_overlay_debug_path = (job_root / "grouping_overlay_debug.png").resolve()
         if result.grouping_overlay_debug_image is not None:
             grouping_overlay_debug_path.write_bytes(result.grouping_overlay_debug_image)
+        rendered_path = (job_root / "rendered.png").resolve()
+        if result.rendered_image is not None:
+            rendered_path.write_bytes(result.rendered_image)
         segments_path = (job_root / "segments.json").resolve()
         segments_path.write_text(
             json.dumps({"segments": result.segments}, ensure_ascii=False, indent=2),
@@ -363,6 +366,11 @@ class RequestRuntime:
             artifacts["grouping_overlay_debug"] = {
                 "path": str(grouping_overlay_debug_path),
                 "mime_type": result.grouping_overlay_debug_mime_type,
+            }
+        if result.rendered_image is not None:
+            artifacts["rendered"] = {
+                "path": str(rendered_path),
+                "mime_type": result.rendered_mime_type,
             }
         response = {
             "task": request["task"],

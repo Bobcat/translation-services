@@ -26,6 +26,7 @@ from app.ocr import resolve_ocr_language
 from app.ocr import run_raw_ocr
 from app.ocr.overlay import render_original_ocr_overlay_debug
 from app.ocr.segment import OcrSegment
+from app.replacement import render_translated_image
 from app.translation.translate import translate_units
 
 
@@ -44,6 +45,8 @@ class TranslateImageResult:
     projected_overlay_debug_mime_type: str = "image/png"
     grouping_overlay_debug_image: bytes | None = None
     grouping_overlay_debug_mime_type: str = "image/png"
+    rendered_image: bytes | None = None
+    rendered_mime_type: str = "image/png"
     ocr: dict[str, Any] | None = None
 
 
@@ -116,11 +119,15 @@ def run_translate_image_pipeline(
     translation_call_count = sum(1 for item in translations if item.translation_route != "skipped_empty")
     full_translated_text = "\n".join(item.translated_text for item in translations if item.translated_text)
 
+    replacement_started = time.perf_counter()
+    rendered_image = render_translated_image(input_path, translation_units)
+    replacement_wall_ms = _elapsed_ms(replacement_started)
+
     image = projected_overlay_debug.image or _input_png_bytes(input_path)
     metadata = {
         "ocr_backend": settings.ocr.backend,
         "ocr_language": ocr_language,
-        "translation_alignment": "units_translated_no_render",
+        "translation_alignment": "units_translated_rendered",
         "translation_ocr_space": "original",
         "translation_ocr_segment_count": len(ocr_segments),
         "full_translated_text": full_translated_text,
@@ -128,7 +135,7 @@ def run_translate_image_pipeline(
         "target_lang_code": target_lang,
         "translator_model": translator_model,
         "translator_mode": translator_mode,
-        "note": "Returns OCR cells, VLM grouping and per-unit translations; translated rendering (re-placement) is not done yet.",
+        "note": "Returns OCR cells, VLM grouping, per-unit translations, and a Tier-1 re-placement rendering (model-free simple replace).",
     }
     metadata.update(projected_overlay_debug.metadata)
     metadata["grouping_model"] = grouping.model
@@ -148,12 +155,15 @@ def run_translate_image_pipeline(
         projected_overlay_debug_mime_type=projected_overlay_debug.mime_type,
         grouping_overlay_debug_image=grouping_overlay_debug.image,
         grouping_overlay_debug_mime_type=grouping_overlay_debug.mime_type,
+        rendered_image=rendered_image,
+        rendered_mime_type="image/png",
         segments=cells,
         metadata=metadata,
         metrics={
             "ocr_wall_ms": ocr_wall_ms,
             "grouping_wall_ms": float(grouping.metrics.get("grouping_wall_ms", 0.0)),
             "translation_wall_ms": translation_wall_ms,
+            "replacement_wall_ms": replacement_wall_ms,
             "llm_pool_wall_ms": 0.0,
             "translate_image_total_wall_ms": _elapsed_ms(started_at),
             "ocr_segment_count": len(ocr_segments),
