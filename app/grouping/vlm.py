@@ -1,17 +1,24 @@
-"""Stage #5 grouping hint: ask a VLM which text belongs together.
+"""Stage #5 grouping hint: ask a VLM which text belongs together (+ a category).
 
-The VLM (qwen-vl) reads the image and returns the groups of text as plain text,
-one group per line, in reading order — the format it is actually good at (a small
-VLM groups a menu correctly this way, even reading prices our OCR missed). It does
+The VLM (small Gemma) reads the image and returns, in reading order, an image
+**category** plus the groups of text as plain text — the format it is actually good
+at (it groups a menu correctly this way, even reading prices our OCR missed). It does
 NOT do cell-id bookkeeping; that brittle burden is gone.
 
-The returned lines are only a *hint*: ``app.grouping.align`` maps them back onto
-the authoritative OCR cells (text + bbox) and builds the units. A weak or
-incomplete hint therefore lowers quality but does not fail the job.
+The returned units are only a *hint*: ``app.grouping.align`` maps them back onto the
+authoritative OCR cells (text + bbox) and builds the units. A weak or incomplete hint
+therefore lowers quality but does not fail the job. The category is near-free extra
+context (e.g. feeds the translation prompt: "restaurant menu" stops gemma rendering
+"hoofdgerechten" as "fundamental rights").
+
+We deliberately do NOT ask the VLM for font sizes: the same small model cannot do
+good grouping *and* sizes in one call (asking for sizes pushes it to per-line units,
+and the size field comes back as the price). Sizing is done from the OCR polygon.
 """
 from __future__ import annotations
 
 import base64
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -23,16 +30,24 @@ from app.core.config import AppSettings
 _RESPONSES_PATH = "/v1/responses"
 _MAX_OUTPUT_TOKENS = 4096
 
-# A short instruction works best for the small VLM. It groups text into units; for
-# tabular regions it separates the fields with "|". parse_hint_lines then drops the
-# "----------" unit separators and splits "|" rows into per-field hint units.
-# Sent as the user turn; the system role stays blank (llm-pool uses " ").
+# Sent as the user turn; the system role stays blank (llm-pool uses " "). Kept generic
+# on purpose — no wording tied to a specific image type. Two load-bearing details for
+# this small, prompt-sensitive model, both measured on the user's real uploads:
+#   - "Remove the newlines from the unit" makes it emit each semantic block as ONE
+#     unit instead of one-per-line; consistently fewer, cleaner units across every test
+#     image (menukaart raw hint 22 vs 53, danger 2 vs 7), no over-merge.
+#   - the blank line before "# OUTPUT FORMAT" keeps grouping stable on dense layouts.
+# Residual fragmentation in the pipeline is align's token-overlap mapping, not the
+# prompt (see docs). parse_grouping_output reads the category line and splits on "###".
 _SYSTEM_PROMPT = " "
 
 _USER_INSTRUCTION = (
-    "Group text and numbers into semantically related units. If a unit has a tabular "
-    "structure, put a '|' between the fields. Output only the units separated by "
-    "'\\n----------\\n'"
+    "# TASKS\n"
+    "1) Categorize the image in a few words.\n"
+    "2) Group ALL text and numbers into semantically related units. "
+    "Remove the newlines from the unit.\n\n"
+    "# OUTPUT FORMAT\n"
+    "CATEGORY: <category>\n###\n<unit 1>\n###\n<unit 2>\n###\n..."
 )
 
 _MIME_BY_SUFFIX = {
@@ -47,12 +62,18 @@ class GroupingHintError(RuntimeError):
     """Raised when the grouping VLM call itself fails (transport / empty)."""
 
 
+@dataclass(frozen=True)
+class GroupingHint:
+    category: str
+    units: list[str]
+
+
 def request_grouping_hint(
     *,
     settings: AppSettings,
     input_path: Path,
     model: str,
-) -> list[str]:
+) -> GroupingHint:
     content = [
         {"type": "text", "text": _USER_INSTRUCTION},
         {"type": "image_url", "image_url": {"url": _data_uri(input_path)}},
@@ -78,34 +99,36 @@ def request_grouping_hint(
         payload=payload,
         timeout=settings.llm_pool.request_timeout_s,
     )
-    return parse_hint_lines(output_text)
+    return parse_grouping_output(output_text)
 
 
-def parse_hint_lines(output_text: str) -> list[str]:
-    """Split the VLM transcription into hint units.
+def parse_grouping_output(output_text: str) -> GroupingHint:
+    """Split the VLM output into the image category and the hint units.
 
-    A plain line is one unit. A markdown table row (``| a | b | c |``) is split on
-    ``|`` into one unit per non-empty column, so tabular fields stay separate; the
-    dashes-only separator row is dropped.
+    The leading ``CATEGORY:`` line becomes the category; every other non-empty line is
+    one unit (the model puts each unit on its own line). Separator lines (``###`` /
+    ``-----``) and leading bullet/markdown markers are dropped.
     """
+    category = ""
     units: list[str] = []
     for raw in str(output_text or "").splitlines():
-        line = raw.strip().lstrip("-*•").strip().strip("*").strip()
+        line = raw.strip()
         if not line:
             continue
-        if "|" in line:
-            cells = [cell.strip().strip("*").strip() for cell in line.split("|")]
-            cells = [cell for cell in cells if cell]
-            if not cells or _is_separator_row(cells):
-                continue
-            units.extend(cells)
-        else:
-            units.append(line)
-    return units
+        if not category and line.lower().startswith("category:"):
+            category = line.split(":", 1)[1].strip()
+            continue
+        if _is_separator(line):
+            continue
+        cleaned = line.lstrip("-*•#").strip().strip("*").strip()
+        if cleaned:
+            units.append(cleaned)
+    return GroupingHint(category=category, units=units)
 
 
-def _is_separator_row(cells: list[str]) -> bool:
-    return all(set(cell) <= {"-", ":"} for cell in cells)
+def _is_separator(line: str) -> bool:
+    compact = line.replace(" ", "")
+    return len(compact) >= 3 and set(compact) <= {"#", "-", "=", "*", ":"}
 
 
 def _call_llm_pool(*, base_url: str, payload: dict[str, Any], timeout: float) -> str:

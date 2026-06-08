@@ -1,9 +1,10 @@
 """Sample background/foreground colour from a cell region (Tier-1, simple).
 
-Text is sparse within a cell box, so the per-channel **median** of the region is a
-robust estimate of the background. The foreground is taken as black or white,
-whichever contrasts with the background luminance. Real text-colour sampling is a
-later refinement (see docs/re-placement.md).
+Text concentrates in the centre of a region, so the per-channel **median of a thin
+border ring** (the box edges) is a cleaner background estimate than the median of
+the whole box, which mixes in the text strokes and comes out muddy. The foreground
+is taken as black or white, whichever contrasts with the background luminance. Real
+text-colour sampling is a later refinement (see docs/re-placement.md).
 """
 from __future__ import annotations
 
@@ -24,13 +25,23 @@ def sample_region_colors(image: Image.Image, bbox: dict[str, Any]) -> tuple[Colo
     if width <= 0 or height <= 0:
         return (255, 255, 255), (0, 0, 0)
 
-    crop = image.crop((left, top, left + width, top + height)).convert("RGB")
-    pixels = np.asarray(crop).reshape(-1, 3)
-    if pixels.size == 0:
+    crop = np.asarray(image.crop((left, top, left + width, top + height)).convert("RGB"))
+    if crop.size == 0:
         return (255, 255, 255), (0, 0, 0)
 
-    bg = tuple(int(channel) for channel in np.median(pixels, axis=0))
+    bg = tuple(int(channel) for channel in np.median(_border_pixels(crop), axis=0))
     return bg, _contrasting_fg(bg)
+
+
+def _border_pixels(crop: np.ndarray) -> np.ndarray:
+    """Pixels from a thin frame around the region — background-dominated, text-light."""
+    h, w = crop.shape[:2]
+    band = max(1, min(h, w) // 6)
+    edges = [
+        crop[:band], crop[h - band:],
+        crop[:, :band], crop[:, w - band:],
+    ]
+    return np.concatenate([edge.reshape(-1, 3) for edge in edges], axis=0)
 
 
 def _contrasting_fg(bg: Color) -> Color:

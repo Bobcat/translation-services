@@ -31,15 +31,19 @@ class UnitMember:
     translate: bool
     bbox: dict[str, int]
     order: int
+    polygon: list[dict[str, int]] | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        member: dict[str, Any] = {
             "cell_id": self.cell_id,
             "text": self.text,
             "translate": self.translate,
             "bbox": dict(self.bbox),
             "order": self.order,
         }
+        if self.polygon is not None:
+            member["polygon"] = [dict(point) for point in self.polygon]
+        return member
 
 
 @dataclass(frozen=True)

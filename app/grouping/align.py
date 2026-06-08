@@ -91,6 +91,7 @@ def _build_unit(*, cells: list[dict[str, Any]], indices: list[int], unit_id: int
     for order, cell_index in enumerate(indices, start=1):
         cell = cells[cell_index]
         text = str(cell.get("text") or "")
+        polygon = cell.get("polygon")
         members.append(
             UnitMember(
                 cell_id=int(cell["id"]),
@@ -98,6 +99,7 @@ def _build_unit(*, cells: list[dict[str, Any]], indices: list[int], unit_id: int
                 translate=not _is_nontranslatable(text),
                 bbox=dict(cell.get("bbox") or {}),
                 order=order,
+                polygon=[dict(point) for point in polygon] if polygon else None,
             )
         )
     bbox = union_bbox([member.bbox for member in members if member.bbox]) if members else {}

@@ -17,9 +17,9 @@
   },
   "llm_pool": {
     "base_url": "http://127.0.0.1:8011",
-    "translator_model": "google_gemma-4-26B-A4B-it-Q4_K_M-gguf",
+    "translator_model": "gemma-4-26b-a4b-it-nvfp4-vllm",
     "translator_mode": "generic",
-    "grouping_model": "gemma-4-e4b-it-qat-w4a16-ct-vllm",
+    "grouping_model": "gemma-4-26b-a4b-it-nvfp4-vllm",
     "request_timeout_s": 120
   },
   "ocr": {

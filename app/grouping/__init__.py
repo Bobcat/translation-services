@@ -54,16 +54,20 @@ def group_cells_into_units(
         )
 
     started = time.perf_counter()
-    hint_units = request_grouping_hint(
+    hint = request_grouping_hint(
         settings=settings,
         input_path=input_path,
         model=resolved_model,
     )
     grouping_wall_ms = max(0.0, (time.perf_counter() - started) * 1000.0)
 
-    result = build_units_from_hint(cells=cells, hint_units=hint_units, model=resolved_model)
+    result = build_units_from_hint(cells=cells, hint_units=hint.units, model=resolved_model)
     return replace(
         result,
         metrics={**result.metrics, "grouping_wall_ms": grouping_wall_ms},
-        metadata={**result.metadata, "grouping_hint_block_count": len(hint_units)},
+        metadata={
+            **result.metadata,
+            "grouping_hint_block_count": len(hint.units),
+            "category": hint.category,
+        },
     )

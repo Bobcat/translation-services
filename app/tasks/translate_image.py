@@ -93,6 +93,7 @@ def run_translate_image_pipeline(
         cells=cells,
     )
 
+    image_category = str(grouping.metadata.get("category") or "")
     translator_model = str(request.get("translator_model") or "").strip() or settings.llm_pool.translator_model
     translator_mode = str(request.get("translator_mode") or "").strip() or settings.llm_pool.translator_mode
     translation_started = time.perf_counter()
@@ -103,6 +104,7 @@ def run_translate_image_pipeline(
         target_lang_code=target_lang,
         translator_model=translator_model,
         translator_mode=translator_mode,
+        category=image_category,
     )
     translation_wall_ms = _elapsed_ms(translation_started)
     translation_by_id = {item.unit_id: item for item in translations}
@@ -116,7 +118,20 @@ def run_translate_image_pipeline(
             unit_dict["translation_route"] = translated.translation_route
         translation_units.append(unit_dict)
     translated_unit_count = sum(1 for item in translations if item.translated_text)
-    translation_call_count = sum(1 for item in translations if item.translation_route != "skipped_empty")
+    # Actual llm-pool calls: one shared batch call (if any unit was batched) + one per
+    # batch-fallback + one per plain per-unit (translategemma) translation.
+    routes = [item.translation_route for item in translations]
+    translation_call_count = (
+        (1 if any(route.endswith("_batch") for route in routes) else 0)
+        + sum(1 for route in routes if route.endswith("_batch_fallback"))
+        + sum(
+            1
+            for route in routes
+            if route and route != "skipped_empty"
+            and not route.endswith("_batch")
+            and not route.endswith("_batch_fallback")
+        )
+    )
     full_translated_text = "\n".join(item.translated_text for item in translations if item.translated_text)
 
     replacement_started = time.perf_counter()
@@ -139,6 +154,7 @@ def run_translate_image_pipeline(
     }
     metadata.update(projected_overlay_debug.metadata)
     metadata["grouping_model"] = grouping.model
+    metadata["image_category"] = image_category
     metadata.update(grouping_overlay_debug.metadata)
     metadata.update(
         {

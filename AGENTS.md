@@ -29,5 +29,7 @@ wired into the task in `tasks/`.
 ## Verification
 
 - `.venv/bin/python -m pytest tests/test_api.py` after changes.
-- Restart `translation-services.service` (dc1) when testing live; smoke a
+- **Always restart the service after changing service code** so the user can test:
+  `systemctl --user restart translation-services.service` (dc1). uvicorn runs
+  without `--reload`, so edits are not picked up until restart. Then smoke a
   request against `/v1/requests` and check `/v1/status`.
