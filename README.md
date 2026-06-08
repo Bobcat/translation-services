@@ -54,7 +54,7 @@ standalone label or value, e.g. a price or a table cell).
 | 5 | **Grouping** (VLM-based) | a VLM groups text that belongs together (a heading, paragraph or item) so each coherent piece is translated as one unit; an aligner maps the groups onto the OCR cells | ✅ done (`grouping/`) |
 | 6 | **Routing** | single direct A→B path: the configured translator model + mode (seam for richer routing later) | ✅ done (`translation/routing.py`) |
 | 7 | **Translation** | call `llm-pool` (`/v1/responses`) per unit | ✅ done (`translation/translate.py`) |
-| 8 | **Re-placement** | render translated text back into the image | ⏳ to build |
+| 8 | **Re-placement** | render translated text back into the image ([design directions](docs/re-placement.md)) | ⏳ to build |
 
 OCR cells stay **authoritative** for text + bbox; the VLM is only a grouping
 *hint*, so a weak/incomplete VLM lowers quality but does not fail the job. That
