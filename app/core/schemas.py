@@ -10,9 +10,6 @@ from pydantic import Field
 TaskName = Literal["translate_image"]
 RequestState = Literal["queued", "running", "completed", "failed", "cancelled", "cancel_requested"]
 TranslatorMode = Literal["translategemma", "generic"]
-# Only "scene" remains (the document route was removed). Kept for forward-compat
-# with the planned adaptive "auto" route; REMOVAL CANDIDATE if that never lands.
-OcrRoute = Literal["scene"]
 
 
 class RequestPayload(BaseModel):
@@ -20,8 +17,6 @@ class RequestPayload(BaseModel):
     task: TaskName
     source_lang_code: str | None = None
     target_lang_code: str | None = None
-    ocr_route: OcrRoute | None = None
-    ocr_unwarp: bool | None = None
     translator_model: str | None = None
     translator_mode: TranslatorMode | None = None
     grouping_model: str | None = None

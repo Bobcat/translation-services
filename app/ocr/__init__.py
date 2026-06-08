@@ -13,7 +13,6 @@ def run_raw_ocr(
     input_path: Path,
     *,
     language: str | None = None,
-    use_doc_unwarping: bool | None = None,
 ) -> list[OcrSegment]:
     _require_paddleocr(settings)
     return run_paddleocr(
@@ -21,7 +20,6 @@ def run_raw_ocr(
         input_path,
         language=language,
         merge_lines=False,
-        use_doc_unwarping=use_doc_unwarping,
     )
 
 

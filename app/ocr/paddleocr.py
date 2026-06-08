@@ -43,10 +43,9 @@ def run_paddleocr(
     *,
     language: str | None = None,
     merge_lines: bool = True,
-    use_doc_unwarping: bool | None = None,
 ) -> list[OcrSegment]:
     resolved_language = str(language or settings.language or "").strip() or "en"
-    engine = _get_paddleocr_engine(settings, resolved_language, use_doc_unwarping=use_doc_unwarping)
+    engine = _get_paddleocr_engine(settings, resolved_language)
     try:
         with _PADDLEOCR_LOCK:
             results = engine.predict(str(input_path))
@@ -86,15 +85,11 @@ def run_paddleocr(
     return merge_same_line_segments(segments)
 
 
-def _get_paddleocr_engine(settings: OcrSettings, language: str, *, use_doc_unwarping: bool | None = None) -> Any:
-    doc_unwarping = bool(settings.use_doc_unwarping if use_doc_unwarping is None else use_doc_unwarping)
+def _get_paddleocr_engine(settings: OcrSettings, language: str) -> Any:
     key = (
         str(language or "en"),
         str(settings.ocr_version or "PP-OCRv5"),
         str(settings.device or "cpu"),
-        bool(settings.use_doc_orientation_classify),
-        doc_unwarping,
-        bool(settings.use_textline_orientation),
         int(settings.text_det_limit_side_len),
         str(settings.text_det_limit_type),
     )
@@ -112,11 +107,11 @@ def _get_paddleocr_engine(settings: OcrSettings, language: str, *, use_doc_unwar
                 lang=key[0],
                 ocr_version=key[1],
                 device=key[2],
-                use_doc_orientation_classify=key[3],
-                use_doc_unwarping=key[4],
-                use_textline_orientation=key[5],
-                text_det_limit_side_len=key[6],
-                text_det_limit_type=key[7],
+                use_doc_orientation_classify=False,
+                use_doc_unwarping=False,
+                use_textline_orientation=False,
+                text_det_limit_side_len=key[3],
+                text_det_limit_type=key[4],
             )
         except Exception as exc:
             raise RuntimeError(f"failed to initialize paddleocr: {exc}") from exc

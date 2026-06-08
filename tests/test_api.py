@@ -248,8 +248,7 @@ def test_paddleocr_backend_normalizes_chunks_to_visual_lines(tmp_path: Path, mon
 
     languages: list[str] = []
 
-    def fake_get_paddleocr_engine(settings, language, *, use_doc_unwarping=None):
-        del use_doc_unwarping
+    def fake_get_paddleocr_engine(settings, language):
         languages.append(language)
         return FakePaddleOCR()
 
