@@ -91,15 +91,71 @@ background colour, erase that region, draw the fitted translation (single-line f
 ignored cells are left untouched. Verified on the testset (nike clean; menu dishes
 translated with prices kept in their columns; sign bodies translated).
 
-Known Tier-1 artifacts / next improvements:
+Applied refinements (after the first cut):
 
-- OCR-noise cells (a stray "i" / "E") become tiny `field` units → small filled
-  boxes; filter tiny/low-confidence/single-char cells before rendering.
-- densely packed per-field units (a multilingual sign) can overlap.
-- uniform sans font, no style/weight match; **upright only** (no rotation/perspective).
-- colour is bg-median + black/white contrast; real text-colour sampling later.
-- erase fills the unit region (covers peek-through); LaMa (Tier 2) for textured
-  backgrounds.
+- font size from the **original cell height** (not the region) → consistent,
+  natural sizes instead of huge text in roomy regions;
+- **two-pass** draw (cover all regions, then draw all text) → no original text
+  peeking through behind a later unit;
+- left-aligned.
+
+### Tier-1 v2 — background-matched box (Google Lens look)
+
+The user anchored the quality bar to **Google Lens / Translate camera mode** on the
+`menukaart` photo. Reverse-read, Lens does exactly Tier-1: per text block, an
+**opaque, rounded box filled with the locally-sampled background colour** (so it
+reads as erased on a flat surface) with the translation drawn **horizontally**
+inside. Crucially it does **not** correct perspective — the menu is tilted, the
+boxes and text are axis-aligned, the box just covers the slanted original. And no
+inpainting. So the model-free ceiling is higher than the first cut suggested; the
+two real gaps were our own bugs:
+
+- `color.sample_region_colors` took the **median of the whole box**, which mixes in
+  the text strokes → a muddy fill. Now it medians a **thin border ring** of the
+  region (`color._border_pixels`) → a clean background colour that blends (paper on
+  the menu, blue on the afstand sign, red on the danger sign).
+- the renderer covered the region with a sharp rectangle and could overflow. Now
+  `render._plan_unit` draws an **opaque rounded box sized to cover the original *and*
+  fit the translation**, with padding; single-char/empty units are skipped (kills
+  the stray-`i`/`E` boxes). Verified offline on the testset via the source-text
+  stand-in harness (no live translation needed to judge erase/box/fit).
+
+### Tier-1 v3 — polygon-aware (perspective), DeepL bar
+
+Correction to v2: the reference photo is **DeepL** image translation, and the v2
+"perspective is secondary" call was wrong. DeepL renders **regular-weight text at the
+original size, rotated to follow the page tilt**. Two render bugs were exposed on the
+tilted `menukaart`:
+
+- **size** — sizing from the axis-aligned bbox height is wrong: a tilted line's bbox
+  height is inflated by `h·cosθ + w·sinθ`, so long/slanted lines went huge and short
+  ones tiny *for the same original size* (the user's "Portion of fries" vs "Pointed
+  cabbage and carrots"). Fix: the OCR **polygon** gives the tilt-invariant true line
+  height (`geometry.line_height`); size from that.
+- **angle** — text was upright. Fix: the polygon gives the angle; render each unit to
+  a flat RGBA tile and **warp it onto the oriented region with OpenCV**
+  (`render._composite`, `cv2.getPerspectiveTransform`).
+
+Plumbing: the OCR cell polygon now propagates into `UnitMember.polygon`
+(`grouping/units.py`, `grouping/align.py`); the renderer reads it (falls back to the
+bbox quad when absent). Font is regular DejaVu, sized `true_height * 0.9`. Block
+height is bounded to the original region (+slack) so a longer translation **shrinks**
+rather than exploding into one giant word per line (the nike headline failure).
+Verified live (the polygon path can't be exercised by the offline source-text harness
+— the saved `units.json` predates the plumbing).
+
+Known Tier-1 ceiling / next improvements:
+
+- **Textured / photographic backgrounds**: a flat box still scars where the text
+  sits on a *non-flat* surface (the `bol-philips` battery / blue circle, photo
+  behind text). This is the real Tier-1 limit → **LaMa (Tier 2)**.
+- **Grouping**: dense menus pack units close together, and one dish is sometimes
+  split into a `field` + a `flow` (different sizes) — a grouping-quality concern, not
+  a render bug. True perspective is approximated as **per-unit rotation** (oriented
+  bbox), not a per-line trapezoid; revisit if strong perspective shows up.
+- uniform sans font (DejaVu — no Roboto/Liberation installed), no style/weight match;
+  colour is border-median bg + black/white contrast text (real text-colour sampling
+  later).
 
 ## References
 

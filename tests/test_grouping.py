@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from app.grouping.align import build_units_from_hint
-from app.grouping.vlm import parse_hint_lines
+from app.grouping.vlm import parse_grouping_output
 
 
 def _cells() -> list[dict]:
@@ -79,27 +79,21 @@ def test_accent_and_case_tolerant_matching() -> None:
     assert [m.cell_id for m in result.units[0].members] == [1]
 
 
-def test_parse_hint_lines_strips_bullets_and_markdown() -> None:
-    raw = "- Alpha\n* Beta\n**Voorgerechten:**\n\n  Gamma  \n"
-    assert parse_hint_lines(raw) == ["Alpha", "Beta", "Voorgerechten:", "Gamma"]
-
-
-def test_parse_hint_lines_splits_markdown_table_into_fields() -> None:
+def test_parse_grouping_output_extracts_category_and_units() -> None:
     raw = (
-        "| AANTAL | OMSCHRIJVING | PRIJS |\n"
-        "|--------|--------------|-------|\n"
-        "| 1 | KARNEMELK | 1,69 |\n"
-        "| 1 | AH YOGHURT | |\n"  # empty trailing column is dropped
+        "CATEGORY: Restaurant Menu\n"
+        "###\nFranse vissoep met venkel € 8,50\n"
+        "###\nPâté de Campagne € 7,25\n###\n"
     )
-    assert parse_hint_lines(raw) == [
-        "AANTAL", "OMSCHRIJVING", "PRIJS",
-        "1", "KARNEMELK", "1,69",
-        "1", "AH YOGHURT",
-    ]
+    hint = parse_grouping_output(raw)
+    assert hint.category == "Restaurant Menu"
+    assert hint.units == ["Franse vissoep met venkel € 8,50", "Pâté de Campagne € 7,25"]
 
 
-def test_parse_hint_lines_drops_dashed_unit_separators() -> None:
-    # The grouping prompt separates units with a "----------" line and uses "|" for
-    # tabular fields; the separator is dropped, the row splits into fields.
-    raw = "AH Brouwer\nNieuwehorne\n----------\n1|KARNEMELK|1,69|B\n"
-    assert parse_hint_lines(raw) == ["AH Brouwer", "Nieuwehorne", "1", "KARNEMELK", "1,69", "B"]
+def test_parse_grouping_output_strips_bullets_and_separators() -> None:
+    # No category line -> empty category; bullets, markdown and ### / ----- separators
+    # are dropped; every other non-empty line is one unit.
+    raw = "- Alpha\n* Beta\n-----\n**Voorgerechten:**\n###\n  Gamma  \n"
+    hint = parse_grouping_output(raw)
+    assert hint.category == ""
+    assert hint.units == ["Alpha", "Beta", "Voorgerechten:", "Gamma"]
