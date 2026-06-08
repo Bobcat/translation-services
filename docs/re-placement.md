@@ -83,6 +83,11 @@ Its post-translation stages *are* our #8 (`mask refinement → inpainting → re
 
 ## References
 
+- [ImageTra — Real-Time Translation for Texts in Image (IJCNLP 2025 demo)](https://aclanthology.org/2025.ijcnlp-demo.1/) —
+  modular toolkit with **the same stack we already have**: PaddleOCR + LLM
+  translation + **LaMa** inpainting + render (font selection, colour sampling from
+  surrounding pixels, orientation preservation, layout-fit for length variation).
+  Code: `github.com/hour/imagetra`. Best concrete reference for #8.
 - [SRNet — Editing Text in the Wild](https://www.arxiv-vanity.com/papers/1908.03047/)
 - [Towards Scene-Text to Scene-Text Translation](https://www.semanticscholar.org/paper/Towards-Scene-Text-to-Scene-Text-Translation-Susladkar-Gatti/2162ca1d06f299c99e18f3e5f292bc6d529bb4a9)
 - [MOSTEL — Stroke-Level Scene Text Editing](https://www.semanticscholar.org/paper/Exploring-Stroke-Level-Modifications-for-Scene-Text-Qu-Tan/b8fe2b02776208670906c89f8b8d361074fc87d5)
