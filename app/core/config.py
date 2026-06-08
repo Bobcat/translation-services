@@ -46,9 +46,6 @@ class OcrSettings:
     min_confidence: float = 0.35
     device: str = "cpu"
     ocr_version: str = "PP-OCRv5"
-    use_doc_orientation_classify: bool = False
-    use_doc_unwarping: bool = False
-    use_textline_orientation: bool = False
     text_det_limit_side_len: int = 2048
     text_det_limit_type: str = "max"
 
@@ -116,9 +113,6 @@ def load_settings(path: str | Path | None = None) -> AppSettings:
             min_confidence=min(1.0, max(0.0, float(ocr_payload.get("min_confidence", 0.35)))),
             device=str(ocr_payload.get("device", "cpu") or "").strip() or "cpu",
             ocr_version=str(ocr_payload.get("ocr_version", "PP-OCRv5") or "").strip() or "PP-OCRv5",
-            use_doc_orientation_classify=bool(ocr_payload.get("use_doc_orientation_classify", False)),
-            use_doc_unwarping=bool(ocr_payload.get("use_doc_unwarping", False)),
-            use_textline_orientation=bool(ocr_payload.get("use_textline_orientation", False)),
             text_det_limit_side_len=max(64, int(ocr_payload.get("text_det_limit_side_len", 2048))),
             text_det_limit_type=_text_det_limit_type(ocr_payload.get("text_det_limit_type", "max")),
         ),

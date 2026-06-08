@@ -28,9 +28,6 @@
     "min_confidence": 0.35,
     "device": "gpu:0",
     "ocr_version": "PP-OCRv5",
-    "use_doc_orientation_classify": false,
-    "use_doc_unwarping": false,
-    "use_textline_orientation": false,
     "text_det_limit_side_len": 2048,
     "text_det_limit_type": "max"
   }

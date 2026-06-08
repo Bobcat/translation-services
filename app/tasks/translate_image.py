@@ -61,21 +61,13 @@ def run_translate_image_pipeline(
     if not source_lang:
         raise RuntimeError("source_lang_code is required for OCR inspection")
 
-    # ocr_route is kept for forward-compat with the planned adaptive "auto" route;
-    # only "scene" remains. REMOVAL CANDIDATE if "auto" never lands (see README).
-    requested_ocr_route = str(request.get("ocr_route") or "scene").strip().lower()
-    if requested_ocr_route != "scene":
-        raise RuntimeError(f"unsupported ocr_route: {requested_ocr_route or 'unknown'}")
-
     ocr_language = resolve_ocr_language(settings.ocr, source_lang)
-    ocr_unwarp = bool(request.get("ocr_unwarp"))
 
     ocr_started_at = time.perf_counter()
     ocr_segments = run_raw_ocr(
         settings.ocr,
         input_path,
         language=ocr_language,
-        use_doc_unwarping=ocr_unwarp,
     )
     ocr_wall_ms = _elapsed_ms(ocr_started_at)
 
@@ -128,9 +120,6 @@ def run_translate_image_pipeline(
     metadata = {
         "ocr_backend": settings.ocr.backend,
         "ocr_language": ocr_language,
-        "ocr_route": requested_ocr_route,
-        "ocr_unwarp": ocr_unwarp,
-        "effective_ocr_route": "scene",
         "translation_alignment": "units_translated_no_render",
         "translation_ocr_space": "original",
         "translation_ocr_segment_count": len(ocr_segments),
@@ -175,7 +164,6 @@ def run_translate_image_pipeline(
             "llm_pool_request_count": (1 if cells else 0) + translation_call_count,
         },
         ocr={
-            "route": "scene",
             "cells": cells,
             "translation_units": translation_units,
             "ignored_cell_ids": list(grouping.ignored_cell_ids),

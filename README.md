@@ -41,12 +41,12 @@ calls named stages.
 ## The translate_image pipeline
 
 Vocabulary: a **cell** is one OCR box (text + bbox + confidence); a **translation
-unit** is a group of cells; a **route** is the OCR mode (`scene`).
+unit** is a group of cells.
 
 | # | Stage | What | Status |
 |---|---|---|---|
 | 1 | **Ingest** | store canonical input (EXIF-transposed) | ✅ done (`app/main.py`) |
-| 2 | **OCR** | PaddleOCR `scene` route → cells (detection resolution via `text_det_limit_side_len`) | ✅ done (`ocr/`; adaptive `auto` planned) |
+| 2 | **OCR** | PaddleOCR → cells (detection resolution via `text_det_limit_side_len`) | ✅ done (`ocr/`) |
 | 3 | **Orientation rescue** | re-recognise low-confidence cells by cropping + rotating (fixes garbled rotated text) | ⏳ planned |
 | 4 | **Coverage gate** | compare the VLM transcription (#5) to the cells; escalate OCR (higher `text_det_limit_side_len`) when much is missing | 🟡 byproduct of #5 available; gate itself parked |
 | 5 | **Grouping** (VLM-based) | VLM transcribes + groups the image; aligned back onto the OCR cells → translation units (`flow`/`field`) in reading order | ✅ done (`grouping/`) |
@@ -70,7 +70,7 @@ the debug overlay**; the translations live in the response JSON
 ## Topology
 
 Runs on **dc1** (RTX 5070 Ti, port 8030). OCR runs locally on the GPU
-(PaddleOCR / PP-OCRv5, paddlepaddle-gpu cu130, ~2.5 GB for the scene route).
+(PaddleOCR / PP-OCRv5, paddlepaddle-gpu cu130, ~2.5 GB).
 Translation is delegated to **`llm-pool` on dc2** via the existing SSH tunnel
 (`llm-pool-dc2-tunnel`, `127.0.0.1:8011`), where the larger translation models
 live.
@@ -86,14 +86,12 @@ live.
 | GET | `/v1/completions` | recent completion events |
 | GET | `/v1/status` | queue / runner status |
 
-`request_json` fields: `task`, `source_lang_code`, `target_lang_code`,
-`ocr_route` (`scene` only — the `document` route was removed; field kept for the
-planned `auto` route and is a removal candidate), `ocr_unwarp` (bool), optional
+`request_json` fields: `task`, `source_lang_code`, `target_lang_code`, optional
 `translator_model` / `translator_mode`, optional `grouping_model`, optional `request_id`.
 
 ```bash
 curl -sS -X POST http://127.0.0.1:8030/v1/requests \
-  -F 'request_json={"task":"translate_image","source_lang_code":"en","target_lang_code":"nl","ocr_route":"scene"};type=application/json' \
+  -F 'request_json={"task":"translate_image","source_lang_code":"en","target_lang_code":"nl"};type=application/json' \
   -F 'image_file=@input.jpg;type=image/jpeg'
 ```
 
