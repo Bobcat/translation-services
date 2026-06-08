@@ -81,6 +81,26 @@ Its post-translation stages *are* our #8 (`mask refinement → inpainting → re
 2. **Upgrades:** Tier 2 LaMa inpaint for textured backgrounds; overlay/callout mode as
    a robustness fallback; a better colour sampler.
 
+## v1 status (Tier 1, built)
+
+Implemented in `app/replacement/` (`color` sampling, `fit` font-sizing, `render`)
+and wired into the pipeline; the rendered image is exposed as the **`rendered`**
+artifact. Per unit: take the union region of the translatable members, sample the
+background colour, erase that region, draw the fitted translation (single-line for
+`field`, wrapped for `flow`) in a contrasting colour. `translate: false` members and
+ignored cells are left untouched. Verified on the testset (nike clean; menu dishes
+translated with prices kept in their columns; sign bodies translated).
+
+Known Tier-1 artifacts / next improvements:
+
+- OCR-noise cells (a stray "i" / "E") become tiny `field` units → small filled
+  boxes; filter tiny/low-confidence/single-char cells before rendering.
+- densely packed per-field units (a multilingual sign) can overlap.
+- uniform sans font, no style/weight match; **upright only** (no rotation/perspective).
+- colour is bg-median + black/white contrast; real text-colour sampling later.
+- erase fills the unit region (covers peek-through); LaMa (Tier 2) for textured
+  backgrounds.
+
 ## References
 
 - [ImageTra — Real-Time Translation for Texts in Image (IJCNLP 2025 demo)](https://aclanthology.org/2025.ijcnlp-demo.1/) —

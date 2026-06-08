@@ -54,7 +54,7 @@ standalone label or value, e.g. a price or a table cell).
 | 5 | **Grouping** (VLM-based) | a VLM groups text that belongs together (a heading, paragraph or item) so each coherent piece is translated as one unit; an aligner maps the groups onto the OCR cells | ✅ done (`grouping/`) |
 | 6 | **Routing** | single direct A→B path: the configured translator model + mode (seam for richer routing later) | ✅ done (`translation/routing.py`) |
 | 7 | **Translation** | call `llm-pool` (`/v1/responses`) per unit | ✅ done (`translation/translate.py`) |
-| 8 | **Re-placement** | render translated text back into the image ([design directions](docs/re-placement.md)) | ⏳ to build |
+| 8 | **Re-placement** | render translated text back into the image ([design directions](docs/re-placement.md)) | 🟡 Tier-1 done (model-free simple replace) |
 
 OCR cells stay **authoritative** for text + bbox; the VLM is only a grouping
 *hint*, so a weak/incomplete VLM lowers quality but does not fail the job. That
@@ -66,12 +66,13 @@ handles it well without cross-talk — is a future optimization, not yet tried.
 
 ## Current status
 
-Phase: **translation wired; rendering next.** `translate_image` runs ingest → OCR
-→ VLM grouping → per-unit routing + translation, and returns the OCR cells, the
-translation units (each with `translated_text`, `kind`, members) and a grouping
-debug overlay. Re-placement (#8) is not done yet, so the **output image is still
-the debug overlay**; the translations live in the response JSON
-(`ocr.translation_units`, `metadata.full_translated_text`).
+Phase: **Tier-1 re-placement.** `translate_image` runs ingest → OCR → VLM grouping
+→ per-unit routing + translation → re-placement, and returns the OCR cells, the
+translation units (each with `translated_text`, `kind`, members), a grouping debug
+overlay, and the **`rendered`** artifact — the translated image (Tier-1 model-free
+simple replace; see [docs/re-placement.md](docs/re-placement.md) for the upgrade
+path). Translations also live in the response JSON (`ocr.translation_units`,
+`metadata.full_translated_text`).
 
 ## Topology
 
