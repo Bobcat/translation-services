@@ -38,6 +38,7 @@ def group_cells_into_units(
     input_path: Path,
     cells: list[dict[str, Any]],
     model: str,
+    call_log: list[dict[str, Any]] | None = None,
 ) -> GroupingResult:
     resolved_model = str(model or "").strip()
     if not resolved_model:
@@ -58,6 +59,7 @@ def group_cells_into_units(
         settings=settings,
         input_path=input_path,
         model=resolved_model,
+        call_log=call_log,
     )
     grouping_wall_ms = max(0.0, (time.perf_counter() - started) * 1000.0)
 

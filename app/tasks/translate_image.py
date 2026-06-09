@@ -48,6 +48,7 @@ class TranslateImageResult:
     rendered_image: bytes | None = None
     rendered_mime_type: str = "image/png"
     ocr: dict[str, Any] | None = None
+    debug: dict[str, Any] | None = None  # per-request stage records persisted for review
 
 
 def run_translate_image_pipeline(
@@ -81,11 +82,13 @@ def run_translate_image_pipeline(
     cells = _ocr_cells(ocr_segments)
 
     grouping_model = str(request.get("grouping_model") or "").strip() or settings.llm_pool.grouping_model
+    llm_calls: list[dict[str, Any]] = []  # payload + response of every VLM/LLM call, in order
     grouping = group_cells_into_units(
         settings=settings,
         input_path=input_path,
         cells=cells,
         model=grouping_model,
+        call_log=llm_calls,
     )
     grouping_overlay_debug = render_grouping_overlay_debug(
         input_path=input_path,
@@ -107,6 +110,7 @@ def run_translate_image_pipeline(
         category=image_category,
         hint_raw=grouping.hint_raw,
         hint_units=grouping.hint_units,
+        call_log=llm_calls,
     )
     translation_wall_ms = _elapsed_ms(translation_started)
     translation_by_id = {item.unit_id: item for item in translations}
@@ -139,6 +143,38 @@ def run_translate_image_pipeline(
     replacement_started = time.perf_counter()
     rendered_image = render_translated_image(input_path, translation_units)
     replacement_wall_ms = _elapsed_ms(replacement_started)
+
+    debug = {
+        "request": {
+            "source_lang_code": source_lang,
+            "target_lang_code": target_lang,
+            "grouping_model": grouping_model,
+            "translator_model": translator_model,
+            "translator_mode": translator_mode,
+            "timings_ms": {
+                "ocr": ocr_wall_ms,
+                "grouping": float(grouping.metrics.get("grouping_wall_ms", 0.0)),
+                "translation": translation_wall_ms,
+                "replacement": replacement_wall_ms,
+            },
+        },
+        "grouping": {
+            "category": image_category,
+            "raw": grouping.hint_raw,
+            "hint_units": list(grouping.hint_units),
+            "units": [unit.to_dict() for unit in grouping.units],
+        },
+        "translation": [
+            {
+                "unit_id": item.unit_id,
+                "source_text": item.source_text,
+                "translated_text": item.translated_text,
+                "route": item.translation_route,
+            }
+            for item in translations
+        ],
+        "llm_calls": llm_calls,
+    }
 
     image = projected_overlay_debug.image or _input_png_bytes(input_path)
     metadata = {
@@ -196,6 +232,7 @@ def run_translate_image_pipeline(
             "translation_units": translation_units,
             "ignored_cell_ids": list(grouping.ignored_cell_ids),
         },
+        debug=debug,
     )
 
 

@@ -18,6 +18,7 @@ and the size field comes back as the price). Sizing is done from the OCR polygon
 from __future__ import annotations
 
 import base64
+import copy
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -78,6 +79,7 @@ def request_grouping_hint(
     settings: AppSettings,
     input_path: Path,
     model: str,
+    call_log: list[dict[str, Any]] | None = None,
 ) -> GroupingHint:
     content = [
         {"type": "text", "text": _USER_INSTRUCTION},
@@ -103,6 +105,7 @@ def request_grouping_hint(
         base_url=settings.llm_pool.base_url,
         payload=payload,
         timeout=settings.llm_pool.request_timeout_s,
+        call_log=call_log,
     )
     return parse_grouping_output(output_text)
 
@@ -136,7 +139,26 @@ def _is_separator(line: str) -> bool:
     return len(compact) >= 3 and set(compact) <= {"#", "-", "=", "*", ":"}
 
 
-def _call_llm_pool(*, base_url: str, payload: dict[str, Any], timeout: float) -> str:
+def _redact_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    """A copy of the request payload with the base64 image data-URI replaced by a short note
+    (the image is saved separately as a PNG), so the saved payload stays readable."""
+    redacted = copy.deepcopy(payload)
+    for item in redacted.get("input") or []:
+        if isinstance(item, dict) and item.get("type") == "image_url":
+            url = str((item.get("image_url") or {}).get("url") or "")
+            if url.startswith("data:"):
+                item["image_url"]["url"] = f"<image data-uri, {len(url)} chars - redacted>"
+    return redacted
+
+
+def _call_llm_pool(
+    *,
+    base_url: str,
+    payload: dict[str, Any],
+    timeout: float,
+    call_log: list[dict[str, Any]] | None = None,
+    role: str = "grouping_vlm",
+) -> str:
     url = f"{base_url}{_RESPONSES_PATH}"
     try:
         response = httpx.post(url, json=payload, timeout=timeout)
@@ -152,6 +174,8 @@ def _call_llm_pool(*, base_url: str, payload: dict[str, Any], timeout: float) ->
 
     if not isinstance(data, dict):
         raise GroupingHintError("llm-pool /v1/responses returned a non-object response")
+    if call_log is not None:
+        call_log.append({"role": role, "payload": _redact_payload(payload), "response": data})
     output_text = str(data.get("output_text") or "").strip()
     if not output_text:
         raise GroupingHintError("llm-pool /v1/responses returned empty output_text")
