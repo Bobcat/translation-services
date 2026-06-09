@@ -70,6 +70,7 @@ class GroupingHintError(RuntimeError):
 class GroupingHint:
     category: str
     units: list[str]
+    raw: str = ""
 
 
 def request_grouping_hint(
@@ -127,7 +128,7 @@ def parse_grouping_output(output_text: str) -> GroupingHint:
         cleaned = line.lstrip("-*•#").strip().strip("*").strip()
         if cleaned:
             units.append(cleaned)
-    return GroupingHint(category=category, units=units)
+    return GroupingHint(category=category, units=units, raw=str(output_text or ""))
 
 
 def _is_separator(line: str) -> bool:
