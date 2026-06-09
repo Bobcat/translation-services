@@ -90,10 +90,10 @@ def test_parse_grouping_output_extracts_category_and_units() -> None:
     assert hint.units == ["Franse vissoep met venkel € 8,50", "Pâté de Campagne € 7,25"]
 
 
-def test_parse_grouping_output_strips_bullets_and_joins_blocks() -> None:
-    # No category line -> empty category; bullets/markdown stripped; ### / ----- split
-    # blocks and each block's lines join into one unit (Alpha + Beta share a block).
+def test_parse_grouping_output_strips_bullets_and_separators() -> None:
+    # No category line -> empty category; bullets, markdown and ### / ----- separators
+    # are dropped; every other non-empty line is one unit.
     raw = "- Alpha\n* Beta\n-----\n**Voorgerechten:**\n###\n  Gamma  \n"
     hint = parse_grouping_output(raw)
     assert hint.category == ""
-    assert hint.units == ["Alpha Beta", "Voorgerechten:", "Gamma"]
+    assert hint.units == ["Alpha", "Beta", "Voorgerechten:", "Gamma"]
