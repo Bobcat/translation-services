@@ -105,6 +105,8 @@ def run_translate_image_pipeline(
         translator_model=translator_model,
         translator_mode=translator_mode,
         category=image_category,
+        hint_raw=grouping.hint_raw,
+        hint_units=grouping.hint_units,
     )
     translation_wall_ms = _elapsed_ms(translation_started)
     translation_by_id = {item.unit_id: item for item in translations}

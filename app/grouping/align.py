@@ -34,12 +34,16 @@ def build_units_from_hint(
     model: str,
 ) -> GroupingResult:
     hint_token_sets = [set(_tokens(text)) for text in hint_units]
-    labels = [_best_hint(cell, hint_token_sets) for cell in cells]
+    positions = _reading_positions(cells, len(hint_units))
+    labels = [
+        _best_hint(cell, hint_token_sets, preferred_index=pos)
+        for cell, pos in zip(cells, positions)
+    ]
 
     groups = _group_consecutive(labels)
     units = [
-        _build_unit(cells=cells, indices=indices, unit_id=order)
-        for order, (_, indices) in enumerate(groups, start=1)
+        _build_unit(cells=cells, indices=indices, unit_id=order, hint_index=label)
+        for order, (label, indices) in enumerate(groups, start=1)
     ]
     leftover = sum(1 for label, _ in groups if label is None)
 
@@ -59,20 +63,40 @@ def build_units_from_hint(
     )
 
 
-def _best_hint(cell: dict[str, Any], hint_token_sets: list[set[str]]) -> int | None:
+def _best_hint(
+    cell: dict[str, Any], hint_token_sets: list[set[str]], *, preferred_index: float = 0.0
+) -> int | None:
     cell_tokens = _tokens(str(cell.get("text") or ""))
     if not cell_tokens:
         return None
-    best_index: int | None = None
-    best_score = 0.0
+    matched_by_index: list[tuple[int, int]] = []
+    best_matched = 0
     for index, hint_set in enumerate(hint_token_sets):
         if not hint_set:
             continue
-        score = sum(1 for token in cell_tokens if token in hint_set) / len(cell_tokens)
-        if score > best_score:
-            best_score = score
-            best_index = index
-    return best_index if best_score >= _MATCH_THRESHOLD else None
+        matched = sum(1 for token in cell_tokens if token in hint_set)
+        if matched:
+            matched_by_index.append((index, matched))
+            if matched > best_matched:
+                best_matched = matched
+    if best_matched / len(cell_tokens) < _MATCH_THRESHOLD:
+        return None
+    # Several hint lines can match a short cell equally (two dishes ending "en frites").
+    # Break the tie by reading position: bind the cell to the hint nearest its place on the
+    # page, not just the first in the list.
+    tied = [index for index, matched in matched_by_index if matched == best_matched]
+    return min(tied, key=lambda index: abs(index - preferred_index))
+
+
+def _reading_positions(cells: list[dict[str, Any]], n_hints: int) -> list[float]:
+    """Each cell's expected hint index from its vertical position on the page — used only to
+    break ties in ``_best_hint`` (the lower cell takes the lower hint line)."""
+    tops = [float((cell.get("bbox") or {}).get("top", 0.0)) for cell in cells]
+    if not tops or n_hints <= 1:
+        return [0.0] * len(cells)
+    y_min, y_max = min(tops), max(tops)
+    span = (y_max - y_min) or 1.0
+    return [((top - y_min) / span) * (n_hints - 1) for top in tops]
 
 
 def _group_consecutive(labels: list[int | None]) -> list[tuple[int | None, list[int]]]:
@@ -85,7 +109,9 @@ def _group_consecutive(labels: list[int | None]) -> list[tuple[int | None, list[
     return groups
 
 
-def _build_unit(*, cells: list[dict[str, Any]], indices: list[int], unit_id: int) -> TranslationUnit:
+def _build_unit(
+    *, cells: list[dict[str, Any]], indices: list[int], unit_id: int, hint_index: int | None = None
+) -> TranslationUnit:
     members: list[UnitMember] = []
     for order, cell_index in enumerate(indices, start=1):
         cell = cells[cell_index]
@@ -109,6 +135,7 @@ def _build_unit(*, cells: list[dict[str, Any]], indices: list[int], unit_id: int
         members=members,
         bbox=bbox,
         source_text=source_text,
+        hint_index=hint_index,
     )
 
 

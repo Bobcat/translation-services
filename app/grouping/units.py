@@ -42,6 +42,10 @@ class TranslationUnit:
     members: list[UnitMember]
     bbox: dict[str, int]
     source_text: str
+    # Index of the VLM hint line this unit matched (into GroupingResult.hint_units), so
+    # the structured translation can map each translated line back onto its unit. None
+    # for leftover cells that matched no hint.
+    hint_index: int | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -60,6 +64,10 @@ class GroupingResult:
     model: str
     metadata: dict[str, Any] = field(default_factory=dict)
     metrics: dict[str, float | int] = field(default_factory=dict)
+    # The raw VLM grouping output and its per-line hint units — carried through so the
+    # structured translation can re-translate the whole block structure in one call.
+    hint_raw: str = ""
+    hint_units: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {

@@ -64,6 +64,8 @@ def group_cells_into_units(
     result = build_units_from_hint(cells=cells, hint_units=hint.units, model=resolved_model)
     return replace(
         result,
+        hint_raw=hint.raw,
+        hint_units=list(hint.units),
         metrics={**result.metrics, "grouping_wall_ms": grouping_wall_ms},
         metadata={
             **result.metadata,
