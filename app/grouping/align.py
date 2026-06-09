@@ -123,7 +123,12 @@ def _group_by_label(
 
     heights = [int((cell.get("bbox") or {}).get("height") or 0) for cell in cells]
     positive = [height for height in heights if height > 0]
-    gap = 2.5 * median(positive) if positive else 1.0
+    unit_h = median(positive) if positive else 1.0
+    # Horizontal gap is the tight axis: a different column / a stray edge fragment is far
+    # to the side, while a multi-line block only needs vertical reach (its lines stack one
+    # line-height apart). So split columns (small gap_x) but keep multi-line blocks (gap_y).
+    gap_x = max(1.0, unit_h)
+    gap_y = max(1.0, 2.5 * unit_h)
 
     by_label: dict[int, list[int]] = {}
     groups: list[tuple[int | None, list[int]]] = []
@@ -134,7 +139,7 @@ def _group_by_label(
             by_label.setdefault(label, []).append(index)
 
     for label, indices in by_label.items():
-        for cluster in _spatial_clusters(cells, indices, gap):
+        for cluster in _spatial_clusters(cells, indices, gap_x, gap_y):
             cluster.sort(key=lambda index: (top(index), left(index)))
             groups.append((label, cluster))
 
@@ -142,9 +147,12 @@ def _group_by_label(
     return groups
 
 
-def _spatial_clusters(cells: list[dict[str, Any]], indices: list[int], gap: float) -> list[list[int]]:
-    """Single-linkage clusters of cells whose bboxes lie within ``gap`` in BOTH axes, so a
-    spatially isolated cell (a far edge fragment, a different column) lands on its own."""
+def _spatial_clusters(
+    cells: list[dict[str, Any]], indices: list[int], gap_x: float, gap_y: float
+) -> list[list[int]]:
+    """Single-linkage clusters of cells whose bboxes lie within ``gap_x`` horizontally and
+    ``gap_y`` vertically, so a spatially isolated cell (a far edge fragment, a different
+    column) lands on its own while a multi-line block stays whole."""
     remaining = list(indices)
     clusters: list[list[int]] = []
     while remaining:
@@ -153,7 +161,7 @@ def _spatial_clusters(cells: list[dict[str, Any]], indices: list[int], gap: floa
         while added:
             added = False
             for index in list(remaining):
-                if any(_near(cells[index], cells[other], gap) for other in cluster):
+                if any(_near(cells[index], cells[other], gap_x, gap_y) for other in cluster):
                     cluster.append(index)
                     remaining.remove(index)
                     added = True
@@ -161,7 +169,7 @@ def _spatial_clusters(cells: list[dict[str, Any]], indices: list[int], gap: floa
     return clusters
 
 
-def _near(a: dict[str, Any], b: dict[str, Any], gap: float) -> bool:
+def _near(a: dict[str, Any], b: dict[str, Any], gap_x: float, gap_y: float) -> bool:
     ba, bb = a.get("bbox") or {}, b.get("bbox") or {}
     ax0, ay0 = int(ba.get("left") or 0), int(ba.get("top") or 0)
     ax1, ay1 = ax0 + int(ba.get("width") or 0), ay0 + int(ba.get("height") or 0)
@@ -169,7 +177,7 @@ def _near(a: dict[str, Any], b: dict[str, Any], gap: float) -> bool:
     bx1, by1 = bx0 + int(bb.get("width") or 0), by0 + int(bb.get("height") or 0)
     horizontal_gap = max(0, max(ax0, bx0) - min(ax1, bx1))
     vertical_gap = max(0, max(ay0, by0) - min(ay1, by1))
-    return horizontal_gap <= gap and vertical_gap <= gap
+    return horizontal_gap <= gap_x and vertical_gap <= gap_y
 
 
 def _build_unit(*, cells: list[dict[str, Any]], indices: list[int], unit_id: int) -> TranslationUnit:
