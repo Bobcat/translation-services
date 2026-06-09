@@ -31,24 +31,32 @@ _RESPONSES_PATH = "/v1/responses"
 _MAX_OUTPUT_TOKENS = 4096
 
 # Sent as the user turn; the system role stays blank (llm-pool uses " "). Kept generic
-# on purpose — no wording tied to a specific image type. Two load-bearing details for
-# this small, prompt-sensitive model, both measured on the user's real uploads:
-#   - "Remove the newlines from the unit" makes it emit each semantic block as ONE
-#     unit instead of one-per-line; consistently fewer, cleaner units across every test
-#     image (menukaart raw hint 22 vs 53, danger 2 vs 7), no over-merge.
+# on purpose — no wording tied to a specific image type. The strong 26B VLM groups
+# reliably, so we let its STRUCTURE lead and read it back faithfully:
+#   - "Preserve newlines" keeps each original line, so a heading and its explanation
+#     stay on separate lines; parse_grouping_output then splits a block into one unit per
+#     SENTENCE (heading and explanation become separate units, each re-placed at its own
+#     position/size) instead of one mashed paragraph.
+#   - the table-row "|" marks field boundaries (e.g. a receipt's qty/desc/price columns),
+#     which line up with the separate OCR boxes; parse splits a "|" line into one unit
+#     per field so each maps to its own box.
 #   - the blank line before "# OUTPUT FORMAT" keeps grouping stable on dense layouts.
-# Residual fragmentation in the pipeline is align's token-overlap mapping, not the
-# prompt (see docs). parse_grouping_output reads the category line and splits on "###".
+# parse_grouping_output reads the category line, splits blocks on "###", then into units.
 _SYSTEM_PROMPT = " "
 
 _USER_INSTRUCTION = (
     "# TASKS\n"
     "1) Categorize the image in a few words.\n"
-    "2) Group ALL text and numbers into semantically related units. "
-    "Remove the newlines from the unit.\n\n"
+    "2) Group ALL text and numbers into semantically related units. Preserve newlines.\n"
+    "3) If a line appears to be a table row put '|' between the fields.\n\n"
     "# OUTPUT FORMAT\n"
     "CATEGORY: <category>\n###\n<unit 1>\n###\n<unit 2>\n###\n..."
 )
+
+# A hint line ending in one of these closes a unit; a line ending otherwise (e.g. a
+# wrapped line ending in a comma) joins the next — so a sentence wrapped across two lines
+# stays one unit while a heading and its explanation, stacked on consecutive lines, split.
+_SENTENCE_END = (".", "!", "?")
 
 _MIME_BY_SUFFIX = {
     ".jpg": "image/jpeg",
@@ -105,25 +113,57 @@ def request_grouping_hint(
 def parse_grouping_output(output_text: str) -> GroupingHint:
     """Split the VLM output into the image category and the hint units.
 
-    The leading ``CATEGORY:`` line becomes the category; every other non-empty line is
-    one unit (the model puts each unit on its own line). Separator lines (``###`` /
-    ``-----``) and leading bullet/markdown markers are dropped.
+    The leading ``CATEGORY:`` line becomes the category. The rest is split into blocks on
+    separator lines (``###`` / ``-----``); each block is then split into units by
+    :func:`_segment_block` (one unit per sentence, one per ``|`` field) so a heading and
+    its explanation — or a table row's columns — become separate units even when the model
+    keeps them in one block. Leading bullet/markdown markers are dropped.
     """
     category = ""
-    units: list[str] = []
+    blocks: list[list[str]] = [[]]
     for raw in str(output_text or "").splitlines():
         line = raw.strip()
-        if not line:
-            continue
         if not category and line.lower().startswith("category:"):
             category = line.split(":", 1)[1].strip()
             continue
         if _is_separator(line):
+            if blocks[-1]:
+                blocks.append([])
             continue
         cleaned = line.lstrip("-*•#").strip().strip("*").strip()
         if cleaned:
-            units.append(cleaned)
+            blocks[-1].append(cleaned)
+    units: list[str] = []
+    for block in blocks:
+        units.extend(_segment_block(block))
     return GroupingHint(category=category, units=units)
+
+
+def _segment_block(lines: list[str]) -> list[str]:
+    """Split a block into hint units: each ``|``-separated field is its own unit (table
+    columns map 1:1 to the separate OCR boxes), and prose lines break at sentence ends
+    (``_SENTENCE_END``) while a wrapped line ending mid-sentence joins the next. So a
+    heading and its explanation split, a table row splits into its columns, but a single
+    sentence wrapped across lines stays one unit. The block's trailing lines close a unit.
+    """
+    units: list[str] = []
+    current: list[str] = []
+
+    def flush() -> None:
+        if current:
+            units.append(" ".join(current))
+            current.clear()
+
+    for line in lines:
+        if "|" in line:
+            flush()
+            units.extend(field.strip() for field in line.split("|") if field.strip())
+            continue
+        current.append(line)
+        if line.endswith(_SENTENCE_END):
+            flush()
+    flush()
+    return units
 
 
 def _is_separator(line: str) -> bool:

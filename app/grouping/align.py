@@ -1,12 +1,16 @@
-"""Align the VLM grouping hint onto the authoritative OCR cells and build units.
+"""Align the VLM grouping hint onto the OCR cells and build units.
 
-OCR cells are the source of truth (text + bbox). The VLM hint is a list of
-text-block strings in reading order. This module assigns each cell to the hint
-block it best matches (normalised token overlap), groups consecutive cells with
-the same assignment into a unit, and turns every unmatched cell into its own
-``field`` unit. Because we build the units, coverage is guaranteed: every cell
-ends up in exactly one unit, so a weak/incomplete hint lowers quality but never
-fails the job.
+The strong VLM groups reliably, so its hint LEADS the structure: each hint unit (a
+sentence or a table field, in reading order) becomes one translation unit. OCR cells
+supply the text + position; this module assigns each cell to the hint unit it belongs to
+and groups consecutive same-assignment cells into a unit.
+
+Assignment is by DISTINCTIVE tokens (each weighted by how rare it is across the hint
+units): common words ("de"/"the", in many units) can't mis-assign a cell, and a cell with
+no distinctive token (a stopword fragment, OCR noise) inherits the current run instead of
+splintering into its own block. Grouping stays CONSECUTIVE so repeated text (a price or
+product that recurs on a receipt) forms a separate unit per row, not one merged blob.
+Coverage is guaranteed: every cell ends up in exactly one unit.
 
 ``translate`` (a whole-cell price/URL/number is not translatable) and ``kind``
 (a multi-cell block flows; a single cell is a field) are decided here by small
@@ -16,6 +20,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
+from statistics import median
 from typing import Any
 
 from app.grouping.units import GroupingResult
@@ -24,7 +29,6 @@ from app.grouping.units import UnitMember
 from app.grouping.units import union_bbox
 
 
-_MATCH_THRESHOLD = 0.4
 _URL_SUFFIX = re.compile(r"\.(com|nl|org|net|io|de|fr|co|eu)\b")
 
 
@@ -35,9 +39,19 @@ def build_units_from_hint(
     model: str,
 ) -> GroupingResult:
     hint_token_sets = [set(_tokens(text)) for text in hint_units]
-    labels = [_best_hint(cell, hint_token_sets) for cell in cells]
+    df = _token_df(hint_token_sets)
 
-    groups = _group_consecutive(labels)
+    labels: list[int | None] = []
+    prev: int | None = None
+    for cell in cells:
+        label = _best_hint(cell, hint_token_sets, df)
+        if label is None:
+            label = prev  # ambiguous / unmatched cell continues the run it sits in
+        else:
+            prev = label
+        labels.append(label)
+
+    groups = _group_by_label(cells, labels)
     units = [
         _build_unit(cells=cells, indices=indices, unit_id=order)
         for order, (_, indices) in enumerate(groups, start=1)
@@ -60,30 +74,102 @@ def build_units_from_hint(
     )
 
 
-def _best_hint(cell: dict[str, Any], hint_token_sets: list[set[str]]) -> int | None:
-    cell_tokens = _tokens(str(cell.get("text") or ""))
+def _token_df(hint_token_sets: list[set[str]]) -> dict[str, int]:
+    """Document frequency: how many hint units contain each token."""
+    df: dict[str, int] = {}
+    for token_set in hint_token_sets:
+        for token in token_set:
+            df[token] = df.get(token, 0) + 1
+    return df
+
+
+def _best_hint(cell: dict[str, Any], hint_token_sets: list[set[str]], df: dict[str, int]) -> int | None:
+    """The hint unit a cell UNIQUELY belongs to, or ``None`` when ambiguous. Tokens are
+    weighted 1/df, so a rare word points strongly to its one unit; a common word ("de",
+    in many units) scores equally for all of them → a tie → ``None``, so the caller keeps
+    the cell in the run where it sits geometrically instead of snapping it to the first
+    unit that happens to contain that word."""
+    cell_tokens = set(_tokens(str(cell.get("text") or "")))
     if not cell_tokens:
         return None
-    best_index: int | None = None
-    best_score = 0.0
-    for index, hint_set in enumerate(hint_token_sets):
-        if not hint_set:
-            continue
-        score = sum(1 for token in cell_tokens if token in hint_set) / len(cell_tokens)
-        if score > best_score:
-            best_score = score
-            best_index = index
-    return best_index if best_score >= _MATCH_THRESHOLD else None
+    scores = [
+        sum(1.0 / df[token] for token in cell_tokens if token in hint_set)
+        for hint_set in hint_token_sets
+    ]
+    best = max(scores, default=0.0)
+    if best <= 0.0:
+        return None
+    winners = [index for index, score in enumerate(scores) if best - score < 1e-9]
+    return winners[0] if len(winners) == 1 else None
 
 
-def _group_consecutive(labels: list[int | None]) -> list[tuple[int | None, list[int]]]:
+def _group_by_label(
+    cells: list[dict[str, Any]], labels: list[int | None]
+) -> list[tuple[int | None, list[int]]]:
+    """Group cells by hint-unit label into spatially-contiguous units. Same-label cells
+    that sit close together (in BOTH axes) form one unit; a cell isolated from the rest —
+    a stray edge fragment, or a price/product that recurs on another row — splits into its
+    own unit, so it can't drag the unit's anchor across the page or merge two rows. A
+    scrambled OCR order therefore can't fragment a unit, yet genuine repeats stay separate.
+    Unmatched cells (label ``None``) stay singletons. Cells inside a unit are read
+    top-then-left (local to the unit, so a page tilt doesn't scramble them); units come out
+    top-to-bottom.
+    """
+    def top(index: int) -> int:
+        return int((cells[index].get("bbox") or {}).get("top") or 0)
+
+    def left(index: int) -> int:
+        return int((cells[index].get("bbox") or {}).get("left") or 0)
+
+    heights = [int((cell.get("bbox") or {}).get("height") or 0) for cell in cells]
+    positive = [height for height in heights if height > 0]
+    gap = 2.5 * median(positive) if positive else 1.0
+
+    by_label: dict[int, list[int]] = {}
     groups: list[tuple[int | None, list[int]]] = []
-    for cell_index, label in enumerate(labels):
-        if label is not None and groups and groups[-1][0] == label:
-            groups[-1][1].append(cell_index)
+    for index, label in enumerate(labels):
+        if label is None:
+            groups.append((None, [index]))
         else:
-            groups.append((label, [cell_index]))
+            by_label.setdefault(label, []).append(index)
+
+    for label, indices in by_label.items():
+        for cluster in _spatial_clusters(cells, indices, gap):
+            cluster.sort(key=lambda index: (top(index), left(index)))
+            groups.append((label, cluster))
+
+    groups.sort(key=lambda group: min(top(index) for index in group[1]))
     return groups
+
+
+def _spatial_clusters(cells: list[dict[str, Any]], indices: list[int], gap: float) -> list[list[int]]:
+    """Single-linkage clusters of cells whose bboxes lie within ``gap`` in BOTH axes, so a
+    spatially isolated cell (a far edge fragment, a different column) lands on its own."""
+    remaining = list(indices)
+    clusters: list[list[int]] = []
+    while remaining:
+        cluster = [remaining.pop(0)]
+        added = True
+        while added:
+            added = False
+            for index in list(remaining):
+                if any(_near(cells[index], cells[other], gap) for other in cluster):
+                    cluster.append(index)
+                    remaining.remove(index)
+                    added = True
+        clusters.append(cluster)
+    return clusters
+
+
+def _near(a: dict[str, Any], b: dict[str, Any], gap: float) -> bool:
+    ba, bb = a.get("bbox") or {}, b.get("bbox") or {}
+    ax0, ay0 = int(ba.get("left") or 0), int(ba.get("top") or 0)
+    ax1, ay1 = ax0 + int(ba.get("width") or 0), ay0 + int(ba.get("height") or 0)
+    bx0, by0 = int(bb.get("left") or 0), int(bb.get("top") or 0)
+    bx1, by1 = bx0 + int(bb.get("width") or 0), by0 + int(bb.get("height") or 0)
+    horizontal_gap = max(0, max(ax0, bx0) - min(ax1, bx1))
+    vertical_gap = max(0, max(ay0, by0) - min(ay1, by1))
+    return horizontal_gap <= gap and vertical_gap <= gap
 
 
 def _build_unit(*, cells: list[dict[str, Any]], indices: list[int], unit_id: int) -> TranslationUnit:
