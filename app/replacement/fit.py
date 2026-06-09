@@ -12,8 +12,8 @@ from PIL import ImageFont
 
 
 _MIN_SIZE = 6
-# Regular weight first — matches the look of menu/sign body text (DeepL/Lens use a
-# regular sans); bold is the fallback only if regular is missing.
+# Regular weight first — matches the look of menu/sign body text (a regular sans);
+# bold is the fallback only if regular is missing.
 _FONT_NAMES = ("DejaVuSans.ttf", "DejaVuSans-Bold.ttf")
 
 

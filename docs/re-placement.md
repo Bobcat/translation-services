@@ -99,16 +99,15 @@ Applied refinements (after the first cut):
   peeking through behind a later unit;
 - left-aligned.
 
-### Tier-1 v2 — background-matched box (Google Lens look)
+### Tier-1 v2 — background-matched box
 
-The user anchored the quality bar to **Google Lens / Translate camera mode** on the
-`menukaart` photo. Reverse-read, Lens does exactly Tier-1: per text block, an
-**opaque, rounded box filled with the locally-sampled background colour** (so it
-reads as erased on a flat surface) with the translation drawn **horizontally**
-inside. Crucially it does **not** correct perspective — the menu is tilted, the
+The quality bar is a clean camera-translation look on the `menukaart` photo: per text
+block, an **opaque, rounded box filled with the locally-sampled background colour** (so
+it reads as erased on a flat surface) with the translation drawn **horizontally**
+inside. Crucially the v2 box does **not** correct perspective — the menu is tilted, the
 boxes and text are axis-aligned, the box just covers the slanted original. And no
-inpainting. So the model-free ceiling is higher than the first cut suggested; the
-two real gaps were our own bugs:
+inpainting. So the model-free ceiling is higher than the first cut suggested; the two
+real gaps were our own bugs:
 
 - `color.sample_region_colors` took the **median of the whole box**, which mixes in
   the text strokes → a muddy fill. Now it medians a **thin border ring** of the
@@ -120,12 +119,12 @@ two real gaps were our own bugs:
   the stray-`i`/`E` boxes). Verified offline on the testset via the source-text
   stand-in harness (no live translation needed to judge erase/box/fit).
 
-### Tier-1 v3 — polygon-aware (perspective), DeepL bar
+### Tier-1 v3 — polygon-aware (perspective)
 
-Correction to v2: the reference photo is **DeepL** image translation, and the v2
-"perspective is secondary" call was wrong. DeepL renders **regular-weight text at the
-original size, rotated to follow the page tilt**. Two render bugs were exposed on the
-tilted `menukaart`:
+Correction to v2: the reference render corrects perspective, so the v2 "perspective is
+secondary" call was wrong. The target is **regular-weight text at the original size,
+rotated to follow the page tilt**. Two render bugs were exposed on the tilted
+`menukaart`:
 
 - **size** — sizing from the axis-aligned bbox height is wrong: a tilted line's bbox
   height is inflated by `h·cosθ + w·sinθ`, so long/slanted lines went huge and short
