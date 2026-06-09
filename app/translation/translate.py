@@ -77,6 +77,7 @@ def translate_units(
     category: str = "",
     hint_raw: str = "",
     hint_units: list[str] | None = None,
+    call_log: list[dict[str, Any]] | None = None,
 ) -> list[TranslatedUnit]:
     decision = resolve_translation_route(
         settings=settings,
@@ -105,6 +106,7 @@ def translate_units(
                 source_hint_count=len(hint_units),
                 target_lang_code=target_lang_code,
                 category=category,
+                call_log=call_log,
             )
         if not batch:
             batch = _translate_batch(
@@ -113,6 +115,7 @@ def translate_units(
                 items=translatable,
                 target_lang_code=target_lang_code,
                 category=category,
+                call_log=call_log,
             )
 
     results: list[TranslatedUnit] = []
@@ -140,6 +143,7 @@ def translate_units(
                 source_lang_code=source_lang_code,
                 target_lang_code=target_lang_code,
                 category=category,
+                call_log=call_log,
             )
             route = f"{decision.translation_route}_batch_fallback" if batched else decision.translation_route
         results.append(
@@ -161,6 +165,7 @@ def _translate_batch(
     items: list[tuple[int, str]],
     target_lang_code: str,
     category: str,
+    call_log: list[dict[str, Any]] | None = None,
 ) -> dict[int, str]:
     """Translate every item in one call; return ``{unit_id: translation}`` (may be partial)."""
     if not str(model or "").strip():
@@ -185,6 +190,8 @@ def _translate_batch(
         raise TranslationError(f"llm-pool /v1/responses unavailable: {exc}") from exc
     if not isinstance(data, dict):
         raise TranslationError("llm-pool /v1/responses returned a non-object response")
+    if call_log is not None:
+        call_log.append({"role": "translation_main_numbered", "payload": payload, "response": data})
 
     out: dict[int, str] = {}
     for number, translation in _parse_numbered(str(data.get("output_text") or "")).items():
@@ -224,6 +231,7 @@ def _translate_one(
     source_lang_code: str,
     target_lang_code: str,
     category: str = "",
+    call_log: list[dict[str, Any]] | None = None,
 ) -> str:
     if not str(model or "").strip():
         raise TranslationError("translator_model is required to translate a unit")
@@ -262,6 +270,8 @@ def _translate_one(
 
     if not isinstance(data, dict):
         raise TranslationError("llm-pool /v1/responses returned a non-object response")
+    if call_log is not None:
+        call_log.append({"role": f"translation_fallback: {text[:40]!r}", "payload": payload, "response": data})
     return str(data.get("output_text") or "").strip()
 
 
@@ -298,6 +308,7 @@ def _translate_structured(
     source_hint_count: int,
     target_lang_code: str,
     category: str,
+    call_log: list[dict[str, Any]] | None = None,
 ) -> dict[int, str]:
     """Translate the whole VLM grouping output in ONE call, preserving its
     ``###`` / newline / ``|`` structure, then map each translated line back onto its unit
@@ -324,6 +335,8 @@ def _translate_structured(
         raise TranslationError(f"llm-pool /v1/responses unavailable: {exc}") from exc
     if not isinstance(data, dict):
         raise TranslationError("llm-pool /v1/responses returned a non-object response")
+    if call_log is not None:
+        call_log.append({"role": "translation_main", "payload": payload, "response": data})
 
     source_blocks = _parse_blocks(hint_raw)
     translated_blocks = _parse_blocks(str(data.get("output_text") or ""))

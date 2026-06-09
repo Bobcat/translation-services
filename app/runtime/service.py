@@ -333,6 +333,22 @@ class RequestRuntime:
             json.dumps({"segments": result.segments}, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
+        debug = result.debug or {}
+        for name in ("request", "grouping", "translation"):
+            if debug.get(name) is not None:
+                (job_root / f"{name}.json").write_text(
+                    json.dumps(debug[name], ensure_ascii=False, indent=2), encoding="utf-8"
+                )
+        calls = debug.get("llm_calls") or []
+        if calls:
+            calls_dir = (job_root / "llm_calls").resolve()
+            calls_dir.mkdir(parents=True, exist_ok=True)
+            for index, call in enumerate(calls, start=1):
+                role = str(call.get("role") or "call")
+                safe = "".join(c if (c.isalnum() or c in "._-") else "_" for c in role)[:60]
+                (calls_dir / f"{index:02d}_{safe}.json").write_text(
+                    json.dumps(call, ensure_ascii=False, indent=2), encoding="utf-8"
+                )
         artifacts = {
             "input": {
                 "path": str(input_path),
