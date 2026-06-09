@@ -30,18 +30,12 @@ from app.core.config import AppSettings
 _RESPONSES_PATH = "/v1/responses"
 _MAX_OUTPUT_TOKENS = 4096
 
-# Sent as the user turn; the system role stays blank (llm-pool uses " "). Kept generic
-# on purpose — no wording tied to a specific image type. The strong 26B VLM groups
-# reliably, so we let its STRUCTURE lead and read it back faithfully:
-#   - "Preserve newlines" keeps each original line, so a heading and its explanation
-#     stay on separate lines; parse_grouping_output then splits a block into one unit per
-#     SENTENCE (heading and explanation become separate units, each re-placed at its own
-#     position/size) instead of one mashed paragraph.
-#   - the table-row "|" marks field boundaries (e.g. a receipt's qty/desc/price columns),
-#     which line up with the separate OCR boxes; parse splits a "|" line into one unit
-#     per field so each maps to its own box.
-#   - the blank line before "# OUTPUT FORMAT" keeps grouping stable on dense layouts.
-# parse_grouping_output reads the category line, splits blocks on "###", then into units.
+# Sent as the user turn; the system role stays blank (llm-pool uses " "). Kept generic on
+# purpose — no wording tied to a specific image type. "Preserve newlines" + the table-row
+# "|" keep the original line/field structure visible in the hint, and the blank line before
+# "# OUTPUT FORMAT" keeps grouping stable on dense layouts. parse_grouping_output reads the
+# category line and joins each "###" block into ONE unit (the model already groups one
+# semantic block per "###"); the kept newlines/"|" survive only as text, for later use.
 _SYSTEM_PROMPT = " "
 
 _USER_INSTRUCTION = (
@@ -52,11 +46,6 @@ _USER_INSTRUCTION = (
     "# OUTPUT FORMAT\n"
     "CATEGORY: <category>\n###\n<unit 1>\n###\n<unit 2>\n###\n..."
 )
-
-# A hint line ending in one of these closes a unit; a line ending otherwise (e.g. a
-# wrapped line ending in a comma) joins the next — so a sentence wrapped across two lines
-# stays one unit while a heading and its explanation, stacked on consecutive lines, split.
-_SENTENCE_END = (".", "!", "?")
 
 _MIME_BY_SUFFIX = {
     ".jpg": "image/jpeg",
@@ -114,10 +103,10 @@ def parse_grouping_output(output_text: str) -> GroupingHint:
     """Split the VLM output into the image category and the hint units.
 
     The leading ``CATEGORY:`` line becomes the category. The rest is split into blocks on
-    separator lines (``###`` / ``-----``); each block is then split into units by
-    :func:`_segment_block` (one unit per sentence, one per ``|`` field) so a heading and
-    its explanation — or a table row's columns — become separate units even when the model
-    keeps them in one block. Leading bullet/markdown markers are dropped.
+    separator lines (``###`` / ``-----``) and each block's lines are joined into ONE unit
+    (the model already puts one semantic block per ``###``). Leading bullet/markdown markers
+    are dropped; the preserved newlines/``|`` survive only as spaces in the unit text, which
+    the token-based alignment ignores.
     """
     category = ""
     blocks: list[list[str]] = [[]]
@@ -133,37 +122,8 @@ def parse_grouping_output(output_text: str) -> GroupingHint:
         cleaned = line.lstrip("-*•#").strip().strip("*").strip()
         if cleaned:
             blocks[-1].append(cleaned)
-    units: list[str] = []
-    for block in blocks:
-        units.extend(_segment_block(block))
+    units = [" ".join(block) for block in blocks if block]
     return GroupingHint(category=category, units=units)
-
-
-def _segment_block(lines: list[str]) -> list[str]:
-    """Split a block into hint units: each ``|``-separated field is its own unit (table
-    columns map 1:1 to the separate OCR boxes), and prose lines break at sentence ends
-    (``_SENTENCE_END``) while a wrapped line ending mid-sentence joins the next. So a
-    heading and its explanation split, a table row splits into its columns, but a single
-    sentence wrapped across lines stays one unit. The block's trailing lines close a unit.
-    """
-    units: list[str] = []
-    current: list[str] = []
-
-    def flush() -> None:
-        if current:
-            units.append(" ".join(current))
-            current.clear()
-
-    for line in lines:
-        if "|" in line:
-            flush()
-            units.extend(field.strip() for field in line.split("|") if field.strip())
-            continue
-        current.append(line)
-        if line.endswith(_SENTENCE_END):
-            flush()
-    flush()
-    return units
 
 
 def _is_separator(line: str) -> bool:
