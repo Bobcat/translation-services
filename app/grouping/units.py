@@ -1,15 +1,8 @@
 """Datamodel for stage #5 (grouping): cells -> translation units.
 
 A **cell** is one OCR box. A **translation unit** is a group of cells that form
-one coherent translatable piece of text. ``kind`` tells stage #8 how to put the
-translation back:
-
-- ``flow``  : the translatable members are one continuous text broken across
-              lines by layout; translate as one ``source_text`` and re-place into
-              the union bbox (re-wrapping).
-- ``field`` : a standalone translatable field (e.g. a product name in a table
-              column); translate and re-place inside its own bbox, never merged
-              with neighbours.
+one coherent translatable piece of text: translate its ``source_text`` as one and
+re-place it into the union bbox, scaling the translation to fit.
 
 Re-placement granularity is always the cell: every member keeps its own bbox.
 """
@@ -18,10 +11,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from dataclasses import field
 from typing import Any
-from typing import Literal
-
-
-UnitKind = Literal["flow", "field"]
 
 
 @dataclass(frozen=True)
@@ -50,7 +39,6 @@ class UnitMember:
 class TranslationUnit:
     id: int
     order: int
-    kind: UnitKind
     members: list[UnitMember]
     bbox: dict[str, int]
     source_text: str
@@ -59,7 +47,6 @@ class TranslationUnit:
         return {
             "id": self.id,
             "order": self.order,
-            "kind": self.kind,
             "bbox": dict(self.bbox),
             "source_text": self.source_text,
             "members": [member.to_dict() for member in self.members],

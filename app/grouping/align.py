@@ -4,13 +4,12 @@ OCR cells are the source of truth (text + bbox). The VLM hint is a list of
 text-block strings in reading order. This module assigns each cell to the hint
 block it best matches (normalised token overlap), groups consecutive cells with
 the same assignment into a unit, and turns every unmatched cell into its own
-``field`` unit. Because we build the units, coverage is guaranteed: every cell
+unit. Because we build the units, coverage is guaranteed: every cell
 ends up in exactly one unit, so a weak/incomplete hint lowers quality but never
 fails the job.
 
-``translate`` (a whole-cell price/URL/number is not translatable) and ``kind``
-(a multi-cell block flows; a single cell is a field) are decided here by small
-rules, not by the model.
+``translate`` (a whole-cell price/URL/number is not translatable) is decided here
+by small rules, not by the model.
 """
 from __future__ import annotations
 
@@ -104,11 +103,9 @@ def _build_unit(*, cells: list[dict[str, Any]], indices: list[int], unit_id: int
         )
     bbox = union_bbox([member.bbox for member in members if member.bbox]) if members else {}
     source_text = " ".join(member.text for member in members if member.translate and member.text)
-    kind = "flow" if len(members) > 1 else "field"
     return TranslationUnit(
         id=unit_id,
         order=unit_id,
-        kind=kind,  # type: ignore[arg-type]
         members=members,
         bbox=bbox,
         source_text=source_text,

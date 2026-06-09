@@ -43,7 +43,6 @@ def test_render_translated_image_draws_into_translatable_member(tmp_path) -> Non
     Image.new("RGB", (200, 100), (255, 255, 255)).save(input_path)
     units = [
         {
-            "kind": "field",
             "translated_text": "Hallo",
             "members": [
                 {"cell_id": 1, "text": "Hi", "translate": True,
@@ -65,9 +64,9 @@ def test_render_skips_units_without_translation(tmp_path) -> None:
     input_path = tmp_path / "input.png"
     Image.new("RGB", (60, 60), (10, 10, 10)).save(input_path)
     units = [
-        {"kind": "field", "translated_text": "", "members": [
+        {"translated_text": "", "members": [
             {"cell_id": 1, "text": "x", "translate": True, "bbox": {"left": 5, "top": 5, "width": 40, "height": 20}}]},
-        {"kind": "field", "translated_text": "skip", "members": [
+        {"translated_text": "skip", "members": [
             {"cell_id": 2, "text": "9", "translate": False, "bbox": {"left": 5, "top": 30, "width": 40, "height": 20}}]},
     ]
     png = render_translated_image(input_path, units)
