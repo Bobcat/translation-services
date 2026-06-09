@@ -31,23 +31,27 @@ _RESPONSES_PATH = "/v1/responses"
 _MAX_OUTPUT_TOKENS = 4096
 
 # Sent as the user turn; the system role stays blank (llm-pool uses " "). Kept generic
-# on purpose — no wording tied to a specific image type. Two load-bearing details for
-# this small, prompt-sensitive model, both measured on the user's real uploads:
-#   - "Remove the newlines from the unit" makes it emit each semantic block as ONE
-#     unit instead of one-per-line; consistently fewer, cleaner units across every test
-#     image (menukaart raw hint 22 vs 53, danger 2 vs 7), no over-merge.
-#   - the blank line before "# OUTPUT FORMAT" keeps grouping stable on dense layouts.
-# Residual fragmentation in the pipeline is align's token-overlap mapping, not the
-# prompt (see docs). parse_grouping_output reads the category line and splits on "###".
+# on purpose — no wording tied to a specific image type. Design:
+#   - "Preserve newlines" keeps each ORIGINAL line as its own line, so
+#     parse_grouping_output yields one hint unit per line. align then maps each OCR cell
+#     onto its line ~1:1 (it does NOT merge a multi-line dish into one block), so every
+#     line re-places onto its own cell at its own size — faithful to the original layout,
+#     no re-wrapping or cramming.
+#   - "table row -> '|' between fields" marks tabular layout (receipt columns, a menu
+#     price) so a row's fields stay distinct.
+#   - the blank line before "# OUTPUT FORMAT" keeps output stable on dense layouts.
+# parse_grouping_output reads the category line, drops "###"/separators, and yields one
+# unit per remaining line. Price/number cells are flagged non-translatable in align
+# (_is_nontranslatable); the '|' itself is not yet parsed into field structure.
 _SYSTEM_PROMPT = " "
 
 _USER_INSTRUCTION = (
     "# TASKS\n"
     "1) Categorize the image in a few words.\n"
-    "2) Group ALL text and numbers into semantically related units. "
-    "Remove the newlines from the unit.\n\n"
+    "2) Group ALL text and numbers into semantically related units. Preserve newlines.\n"
+    "3) If a line appears to be a table row put '|' between the fields.\n\n"
     "# OUTPUT FORMAT\n"
-    "CATEGORY: <category>\n###\n<unit 1>\n###\n<unit 2>\n###\n..."
+    "CATEGORY: <category>\n###\n<unit 1>\n###\n..."
 )
 
 _MIME_BY_SUFFIX = {
