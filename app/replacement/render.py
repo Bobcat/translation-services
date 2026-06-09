@@ -50,9 +50,10 @@ class _Job:
 def render_translated_image(input_path: Path, translation_units: list[dict[str, Any]]) -> bytes:
     base = Image.open(input_path).convert("RGB")
 
+    budgets = _vertical_budgets(translation_units, base.height)
     jobs: list[_Job] = []
-    for unit in translation_units:
-        job = _plan_unit(base, unit)
+    for unit, budget in zip(translation_units, budgets):
+        job = _plan_unit(base, unit, budget)
         if job is not None:
             jobs.append(job)
 
@@ -71,7 +72,7 @@ def render_translated_image(input_path: Path, translation_units: list[dict[str, 
     return out.getvalue()
 
 
-def _plan_unit(base: Image.Image, unit: dict[str, Any]) -> _Job | None:
+def _plan_unit(base: Image.Image, unit: dict[str, Any], budget: float | None) -> _Job | None:
     translated = str(unit.get("translated_text") or "").strip()
     if len(translated) <= 1:  # empty / OCR-noise single char -> leave the original alone
         return None
@@ -89,29 +90,30 @@ def _plan_unit(base: Image.Image, unit: dict[str, Any]) -> _Job | None:
     region_w = xmax - xmin
     region_h = ymax - ymin
     bg, fg = sample_region_colors(base, geo.axis_bbox(quads))
-    line_boxes = _line_boxes(members)
-    n_lines = max(1, len(line_boxes))
-    align = _alignment(line_boxes)
+    align = _alignment(_line_boxes(members))
 
-    # Cadence: render the translation in at most the ORIGINAL number of lines, at the
-    # largest size that still fits the original block width — so the block keeps the
-    # original shape/position and the font only shrinks to absorb a longer translation
-    # (no extra lines, no overflow into the next item).
+    # Per-block font size from this block's own local (de-skewed) line height, so the text
+    # matches the original's apparent size here on the page: under a camera tilt the print
+    # grows toward the lens, and one document-wide size would make lower blocks read too
+    # small. A longer translation reflows onto more lines and shrinks only if it must.
+    #
+    # Height is bounded to the SMALLER of (a) the original block's own footprint
+    # (``region_h``) and (b) the gap to the next block below (``slot``). (a) keeps the
+    # translation ON its original text plane so it never spills onto adjacent imagery (a
+    # poster headline can't grow down over the photo beneath it); (b) stops it overprinting
+    # a neighbouring block where the rows are tightly packed.
+    slot = budget if budget is not None else float(base.height)
+    max_height = max(true_height, min(region_h, slot) - 2 * pad)
     if str(unit.get("kind") or "field") == "flow":
         wrap = True
         max_width = region_w - 2 * pad
-        max_height = float(base.height)  # the line cap below is the real constraint
-        max_lines: int | None = n_lines
     else:
         wrap = False
-        # Single line: let it grow horizontally instead of shrinking to the (often
-        # narrow) original word width — otherwise "frites" -> "French fries" gets
-        # squeezed tiny next to its full-size siblings.
+        # Single line: let it grow horizontally instead of being squeezed to the (often
+        # narrow) original word width — e.g. "frites" -> "French fries".
         max_width = 1_000_000.0
-        max_height = float(target_size * 2 + 2 * pad)
-        max_lines = 1
     fitted = fit_text(
-        translated, max(1, int(max_width)), int(max_height), wrap=wrap, max_size=target_size, max_lines=max_lines
+        translated, max(1, int(max_width)), int(max_height), wrap=wrap, max_size=target_size, max_lines=None
     )
 
     pad_i = int(pad)
@@ -174,6 +176,54 @@ def _composite(canvas: np.ndarray, job: _Job) -> None:
 
 def _ipoint(point: tuple[float, float]) -> tuple[int, int]:
     return (int(round(point[0])), int(round(point[1])))
+
+
+def _vertical_budgets(units: list[dict[str, Any]], image_height: int) -> list[float | None]:
+    """Vertical space each unit may grow into: the gap from its top to the top of the
+    next block below it that shares its horizontal span (so the price column or a
+    side-by-side block does not constrain it). ``None`` for units with no translatable
+    members (never rendered).
+
+    Measured in the **oriented (de-skewed) page frame** under one global page angle, like
+    the tile placement — on a tilted photo the axis-aligned box tops of consecutive blocks
+    interleave (a slanted multi-line block's bbox dips into its neighbour's), so an
+    axis-aligned gap over-measures the true along-page spacing and lets the translation
+    overprint the block below. The oriented gap is the real spacing, so the fit shrinks a
+    longer translation just enough to clear the next block.
+    """
+    quads_by_unit: list[list[list[geo.Point]]] = [
+        [q for q in (geo.quad_of(m) for m in (unit.get("members") or [])
+         if m.get("translate") and m.get("bbox")) if q is not None]
+        for unit in units
+    ]
+    all_quads = [q for quads in quads_by_unit for q in quads]
+    if not all_quads:
+        return [None] * len(units)
+    angle = median(geo.angle_deg(q) for q in all_quads)
+
+    boxes: list[tuple[float, float, float] | None] = []  # (oxmin, oxmax, oymin)
+    for quads in quads_by_unit:
+        if not quads:
+            boxes.append(None)
+            continue
+        _, _, oxmin, oxmax, oymin, _ = geo.oriented_frame(quads, angle)
+        boxes.append((oxmin, oxmax, oymin))
+
+    budgets: list[float | None] = []
+    for i, box in enumerate(boxes):
+        if box is None:
+            budgets.append(None)
+            continue
+        oxmin, oxmax, oymin = box
+        next_top: float | None = None
+        for j, other in enumerate(boxes):
+            if i == j or other is None:
+                continue
+            o_xmin, o_xmax, o_ymin = other
+            if o_ymin > oymin and oxmin < o_xmax and o_xmin < oxmax:  # below + horizontally overlapping
+                next_top = o_ymin if next_top is None else min(next_top, o_ymin)
+        budgets.append(next_top - oymin if next_top is not None else float(image_height))
+    return budgets
 
 
 def _line_boxes(members: list[dict[str, Any]]) -> list[tuple[int, int]]:
