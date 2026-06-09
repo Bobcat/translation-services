@@ -30,19 +30,22 @@ from app.core.config import AppSettings
 _RESPONSES_PATH = "/v1/responses"
 _MAX_OUTPUT_TOKENS = 4096
 
-# Sent as the user turn; the system role stays blank (llm-pool uses " "). Kept generic on
-# purpose — no wording tied to a specific image type. "Preserve newlines" + the table-row
-# "|" keep the original line/field structure visible in the hint, and the blank line before
-# "# OUTPUT FORMAT" keeps grouping stable on dense layouts. parse_grouping_output reads the
-# category line and joins each "###" block into ONE unit (the model already groups one
-# semantic block per "###"); the kept newlines/"|" survive only as text, for later use.
+# Sent as the user turn; the system role stays blank (llm-pool uses " "). Kept generic
+# on purpose — no wording tied to a specific image type. Two load-bearing details for
+# this small, prompt-sensitive model, both measured on the user's real uploads:
+#   - "Remove the newlines from the unit" makes it emit each semantic block as ONE
+#     unit instead of one-per-line; consistently fewer, cleaner units across every test
+#     image (menukaart raw hint 22 vs 53, danger 2 vs 7), no over-merge.
+#   - the blank line before "# OUTPUT FORMAT" keeps grouping stable on dense layouts.
+# Residual fragmentation in the pipeline is align's token-overlap mapping, not the
+# prompt (see docs). parse_grouping_output reads the category line and splits on "###".
 _SYSTEM_PROMPT = " "
 
 _USER_INSTRUCTION = (
     "# TASKS\n"
     "1) Categorize the image in a few words.\n"
-    "2) Group ALL text and numbers into semantically related units. Preserve newlines.\n"
-    "3) If a line appears to be a table row put '|' between the fields.\n\n"
+    "2) Group ALL text and numbers into semantically related units. "
+    "Remove the newlines from the unit.\n\n"
     "# OUTPUT FORMAT\n"
     "CATEGORY: <category>\n###\n<unit 1>\n###\n<unit 2>\n###\n..."
 )
@@ -102,27 +105,24 @@ def request_grouping_hint(
 def parse_grouping_output(output_text: str) -> GroupingHint:
     """Split the VLM output into the image category and the hint units.
 
-    The leading ``CATEGORY:`` line becomes the category. The rest is split into blocks on
-    separator lines (``###`` / ``-----``) and each block's lines are joined into ONE unit
-    (the model already puts one semantic block per ``###``). Leading bullet/markdown markers
-    are dropped; the preserved newlines/``|`` survive only as spaces in the unit text, which
-    the token-based alignment ignores.
+    The leading ``CATEGORY:`` line becomes the category; every other non-empty line is
+    one unit (the model puts each unit on its own line). Separator lines (``###`` /
+    ``-----``) and leading bullet/markdown markers are dropped.
     """
     category = ""
-    blocks: list[list[str]] = [[]]
+    units: list[str] = []
     for raw in str(output_text or "").splitlines():
         line = raw.strip()
+        if not line:
+            continue
         if not category and line.lower().startswith("category:"):
             category = line.split(":", 1)[1].strip()
             continue
         if _is_separator(line):
-            if blocks[-1]:
-                blocks.append([])
             continue
         cleaned = line.lstrip("-*•#").strip().strip("*").strip()
         if cleaned:
-            blocks[-1].append(cleaned)
-    units = [" ".join(block) for block in blocks if block]
+            units.append(cleaned)
     return GroupingHint(category=category, units=units)
 
 
