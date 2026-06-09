@@ -3,7 +3,7 @@
 Draws, on top of the input image, what the VLM decided:
 
 - each translation unit in its own colour (member boxes filled, union box outlined,
-  a ``order·kind`` label);
+  a ``order`` label);
 - ``translate: false`` members outlined in red (kept as-is, not re-rendered);
 - ignored cells in grey with a cross.
 
@@ -82,7 +82,7 @@ def render_grouping_overlay_debug(
         union = _xy(unit.bbox)
         if union is not None:
             draw.rectangle(union, outline=color + (255,), width=line_width + 1)
-            _label(draw, union, f"{unit.order} {unit.kind}", color, font)
+            _label(draw, union, f"{unit.order}", color, font)
 
     for cell_id in result.ignored_cell_ids:
         box = _xy(cell_bbox.get(int(cell_id), {}))

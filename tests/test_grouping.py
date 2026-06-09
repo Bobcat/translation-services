@@ -19,20 +19,18 @@ def _hint() -> list[str]:
     return ["THE SHOE WORKS IF YOU DO.", "nike.com", "KARNEMELK"]
 
 
-def test_consecutive_match_becomes_one_flow_unit() -> None:
+def test_consecutive_match_becomes_one_unit() -> None:
     result = build_units_from_hint(cells=_cells(), hint_units=_hint(), model="qwen")
     flow = result.units[0]
-    assert flow.kind == "flow"
     assert [m.cell_id for m in flow.members] == [1, 2, 3]
     assert flow.source_text == "THE SHOE WORKS IF YOU DO."
     # union bbox spans the three stacked lines
     assert flow.bbox == {"left": 10, "top": 10, "width": 220, "height": 140}
 
 
-def test_single_cell_is_field_unit() -> None:
+def test_single_cell_is_own_unit() -> None:
     result = build_units_from_hint(cells=_cells(), hint_units=_hint(), model="qwen")
     karnemelk = next(u for u in result.units if any(m.cell_id == 5 for m in u.members))
-    assert karnemelk.kind == "field"
     assert karnemelk.source_text == "KARNEMELK"
 
 
@@ -44,11 +42,10 @@ def test_url_member_is_not_translatable() -> None:
     assert nike.source_text == ""  # nothing translatable -> empty
 
 
-def test_unmatched_cell_becomes_own_field_unit() -> None:
-    # "1,69" matches no hint block -> leftover -> its own field unit, not dropped
+def test_unmatched_cell_becomes_own_unit() -> None:
+    # "1,69" matches no hint block -> leftover -> its own unit, not dropped
     result = build_units_from_hint(cells=_cells(), hint_units=_hint(), model="qwen")
     price_unit = next(u for u in result.units if any(m.cell_id == 6 for m in u.members))
-    assert price_unit.kind == "field"
     assert price_unit.members[0].translate is False  # bare number
 
 
@@ -67,10 +64,9 @@ def test_units_are_ordered_in_reading_order() -> None:
     assert result.units[0].members[0].cell_id == 1
 
 
-def test_empty_hint_makes_each_cell_its_own_field_unit() -> None:
+def test_empty_hint_makes_each_cell_its_own_unit() -> None:
     result = build_units_from_hint(cells=_cells(), hint_units=[], model="qwen")
     assert len(result.units) == len(_cells())
-    assert all(u.kind == "field" for u in result.units)
 
 
 def test_accent_and_case_tolerant_matching() -> None:

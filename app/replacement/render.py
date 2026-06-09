@@ -90,12 +90,10 @@ def _plan_unit(base: Image.Image, unit: dict[str, Any]) -> _Job | None:
     region_h = ymax - ymin
     bg, fg = sample_region_colors(base, geo.axis_bbox(quads))
 
-    wrap = str(unit.get("kind") or "field") == "flow"
-    # Size consistency comes from the true-height target above. Bound the block to the
-    # original region (with slack) so a longer translation shrinks to fit rather than
-    # exploding into one giant word per line on large-text, narrow regions.
+    # Size consistency comes from the true-height target above; the translation stays on
+    # one line and the font shrinks to fit the original region width (no re-wrapping).
     max_height = int(region_h + 2 * pad)
-    fitted = fit_text(translated, max(1, int(region_w - 2 * pad)), max_height, wrap=wrap, max_size=target_size)
+    fitted = fit_text(translated, max(1, int(region_w - 2 * pad)), max_height, wrap=False, max_size=target_size)
 
     text_w = max((int(fitted.font.getlength(line)) for line in fitted.lines), default=0)
     tile_w = max(1, text_w + 2 * int(pad))

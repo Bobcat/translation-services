@@ -1,8 +1,7 @@
 """Fit text into a box: the largest font size that fits, with optional wrapping.
 
-Used by the renderer to size the translation to its target region. Single-line for
-``field`` units, word-wrapped for ``flow`` units. Measurement uses the font metrics
-directly (no draw context needed).
+Used by the renderer to size the translation to its target region. Measurement uses
+the font metrics directly (no draw context needed).
 """
 from __future__ import annotations
 

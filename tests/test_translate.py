@@ -8,7 +8,7 @@ from app.translation.translate import translate_units
 
 def _unit(unit_id: int, source_text: str) -> TranslationUnit:
     return TranslationUnit(
-        id=unit_id, order=unit_id, kind="field", members=[], bbox={}, source_text=source_text
+        id=unit_id, order=unit_id, members=[], bbox={}, source_text=source_text
     )
 
 
