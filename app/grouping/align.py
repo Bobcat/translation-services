@@ -1,8 +1,9 @@
 """Align the VLM grouping hint onto the authoritative OCR cells and build units.
 
 OCR cells are the source of truth for positions; the VLM hint is the source of
-truth for text/structure. This module assigns each cell to the hint block it
-best matches (normalised token overlap, tolerant to OCR garble), groups
+truth for text/structure. This module assigns each cell to the hint line it
+best matches (normalised token overlap, tolerant to OCR garble), breaking ties
+by an anchor-interpolated reading position (``_anchored_positions``), groups
 consecutive cells with the same assignment into a unit, and turns every
 unmatched cell into its own unit. Because we build the units, coverage is guaranteed: every cell
 ends up in exactly one unit, so a weak/incomplete hint lowers quality but never
@@ -16,6 +17,7 @@ from __future__ import annotations
 import difflib
 import re
 import unicodedata
+from dataclasses import dataclass
 from typing import Any
 
 from app.grouping.units import GroupingResult
@@ -39,10 +41,11 @@ def build_units_from_hint(
     hint_block_ids: list[int] | None = None,
 ) -> GroupingResult:
     hint_token_sets = [set(_tokens(text)) for text in hint_units]
-    positions = _reading_positions(cells, len(hint_units))
+    matches = [_match_scores(cell, hint_token_sets) for cell in cells]
+    positions = _anchored_positions(cells, matches, len(hint_units))
     labels = [
-        _best_hint(cell, hint_token_sets, preferred_index=pos)
-        for cell, pos in zip(cells, positions)
+        _pick_hint(match, preferred_index=pos)
+        for match, pos in zip(matches, positions)
     ]
 
     groups = _group_consecutive(labels)
@@ -75,12 +78,16 @@ def build_units_from_hint(
     )
 
 
-def _best_hint(
-    cell: dict[str, Any], hint_token_sets: list[set[str]], *, preferred_index: float = 0.0
-) -> int | None:
+@dataclass(frozen=True)
+class _Match:
+    candidates: list[int]  # hint indices sharing the best token-overlap score
+    score: float           # best matched-token mass / cell token count
+
+
+def _match_scores(cell: dict[str, Any], hint_token_sets: list[set[str]]) -> _Match:
     cell_tokens = _tokens(str(cell.get("text") or ""))
     if not cell_tokens:
-        return None
+        return _Match(candidates=[], score=0.0)
     matched_by_index: list[tuple[int, float]] = []
     best_matched = 0.0
     for index, hint_set in enumerate(hint_token_sets):
@@ -91,13 +98,21 @@ def _best_hint(
             matched_by_index.append((index, matched))
             if matched > best_matched:
                 best_matched = matched
-    if best_matched / len(cell_tokens) < _MATCH_THRESHOLD:
+    if not best_matched:
+        return _Match(candidates=[], score=0.0)
+    return _Match(
+        candidates=[index for index, matched in matched_by_index if matched == best_matched],
+        score=best_matched / len(cell_tokens),
+    )
+
+
+def _pick_hint(match: _Match, *, preferred_index: float = 0.0) -> int | None:
+    if not match.candidates or match.score < _MATCH_THRESHOLD:
         return None
     # Several hint lines can match a short cell equally (two dishes ending "en frites").
     # Break the tie by reading position: bind the cell to the hint nearest its place on the
     # page, not just the first in the list.
-    tied = [index for index, matched in matched_by_index if matched == best_matched]
-    return min(tied, key=lambda index: abs(index - preferred_index))
+    return min(match.candidates, key=lambda index: abs(index - preferred_index))
 
 
 def _token_score(token: str, hint_set: set[str]) -> float:
@@ -126,12 +141,73 @@ def _token_score(token: str, hint_set: set[str]) -> float:
     return 0.0
 
 
-def _reading_positions(cells: list[dict[str, Any]], n_hints: int) -> list[float]:
-    """Each cell's expected hint index from its vertical position on the page — used only to
-    break ties in ``_best_hint`` (the lower cell takes the lower hint line)."""
+def _anchored_positions(
+    cells: list[dict[str, Any]], matches: list[_Match], n_hints: int
+) -> list[float]:
+    """Each cell's expected hint index, used only to break ties in ``_pick_hint``.
+
+    Anchor-and-chain, as in OCR<->text alignment literature (RETAS, Yalniz & Manmatha
+    2011: unique words anchor the alignment) and seed-chain aligners: every cell whose
+    best hint is UNIQUE and confident pins (cell y -> hint index); the longest
+    non-decreasing chain of those seeds keeps the map monotone (a rogue match drops
+    out); every cell's position is interpolated between its surrounding anchors. The
+    global linear estimate is the fallback — it mis-points on pages whose line density
+    varies (a dense menu above a sparse footer)."""
     tops = [float((cell.get("bbox") or {}).get("top", 0.0)) for cell in cells]
     if not tops or n_hints <= 1:
         return [0.0] * len(cells)
+    seeds = [
+        (top, match.candidates[0])
+        for top, match in zip(tops, matches)
+        if len(match.candidates) == 1 and match.score >= _MATCH_THRESHOLD
+    ]
+    anchors = _chain(seeds)
+    if len(anchors) < 2:
+        return _linear_positions(tops, n_hints)
+    return [_interpolate(top, anchors, n_hints) for top in tops]
+
+
+def _chain(seeds: list[tuple[float, int]]) -> list[tuple[float, int]]:
+    """Longest non-decreasing subsequence of the seeds' hint indices (seeds are in
+    reading order), deduplicated to strictly increasing y for interpolation."""
+    if not seeds:
+        return []
+    best_len = [1] * len(seeds)
+    prev = [-1] * len(seeds)
+    for i in range(len(seeds)):
+        for j in range(i):
+            if seeds[j][1] <= seeds[i][1] and best_len[j] + 1 > best_len[i]:
+                best_len[i] = best_len[j] + 1
+                prev[i] = j
+    index = max(range(len(seeds)), key=lambda i: best_len[i])
+    chain: list[tuple[float, int]] = []
+    while index != -1:
+        chain.append(seeds[index])
+        index = prev[index]
+    chain.reverse()
+    anchors: list[tuple[float, int]] = []
+    for top, hint_index in chain:
+        if not anchors or top > anchors[-1][0]:
+            anchors.append((top, hint_index))
+    return anchors
+
+
+def _interpolate(top: float, anchors: list[tuple[float, int]], n_hints: int) -> float:
+    """Piecewise-linear hint index at ``top``; outside the anchor range the nearest
+    segment extrapolates. Clamped to the valid index range."""
+    if top <= anchors[0][0]:
+        (y0, i0), (y1, i1) = anchors[0], anchors[1]
+    elif top >= anchors[-1][0]:
+        (y0, i0), (y1, i1) = anchors[-2], anchors[-1]
+    else:
+        for (y0, i0), (y1, i1) in zip(anchors, anchors[1:]):
+            if y0 <= top <= y1:
+                break
+    position = float(i0) if y1 == y0 else i0 + (top - y0) / (y1 - y0) * (i1 - i0)
+    return min(max(position, 0.0), float(n_hints - 1))
+
+
+def _linear_positions(tops: list[float], n_hints: int) -> list[float]:
     y_min, y_max = min(tops), max(tops)
     span = (y_max - y_min) or 1.0
     return [((top - y_min) / span) * (n_hints - 1) for top in tops]
