@@ -85,6 +85,28 @@ def test_render_reflows_a_block_over_its_original_planes(tmp_path) -> None:
     assert line2.min() < 128  # text drawn on plane 2, wider than its own 120px plane
 
 
+def test_single_unit_spanning_two_printed_lines_reflows_over_both(tmp_path) -> None:
+    # Element-level hint: ONE unit whose members lie on two physical lines. The planes
+    # come from line-clustering the members, so the translation reflows over both.
+    input_path = tmp_path / "input.png"
+    Image.new("RGB", (400, 120), (255, 255, 255)).save(input_path)
+    units = [
+        {"translated_text": "Grilled steak with red wine gravy shallots and fries",
+         "block_id": 13, "level": "body",
+         "members": [
+             {"cell_id": 1, "text": "Biefstuk van de grill met rode wijn", "translate": True,
+              "bbox": {"left": 20, "top": 10, "width": 300, "height": 30}},
+             {"cell_id": 2, "text": "jus, sjalotten en frites", "translate": True,
+              "bbox": {"left": 20, "top": 50, "width": 200, "height": 30}}]},
+    ]
+    png = render_translated_image(input_path, units)
+    out = Image.open(BytesIO(png)).convert("RGB")
+    line1 = np.asarray(out.crop((20, 10, 320, 40)))
+    line2 = np.asarray(out.crop((20, 50, 320, 90)))
+    assert line1.min() < 128
+    assert line2.min() < 128
+
+
 def test_interleaved_leftover_does_not_break_a_reflow_group(tmp_path) -> None:
     # An OCR noise cell ("L") lands between a dish's two lines in reading order; its
     # leftover unit must not split the block back into per-line fitting.
