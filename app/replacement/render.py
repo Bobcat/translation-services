@@ -1,9 +1,15 @@
 """Stage #8 re-placement — background-matched, polygon-aware (Tier-1, model-free).
 
-Per unit: cover the original with the locally-sampled **background colour** (so it
-reads as erased on a flat surface — menu paper, sign panel, receipt), then draw the
-translation and **warp it onto the unit's polygon** so it follows the page tilt
-(rotation/perspective), for a clean camera-translation look.
+Units that share a VLM block (a wrapped dish, a body paragraph) render as one
+**group**: their translations are joined and re-broken freely over at most the
+original number of lines, at ONE font size decided up front from the group's total
+ink width — slack on a short line is pooled into the next instead of shrinking that
+line alone. Each rendered line anchors on its original line's plane (so the line
+pitch follows the original), capped at the group's widest plane. Per plane: cover
+the original with the locally-sampled **background colour** (so it reads as erased
+on a flat surface — menu paper, sign panel, receipt), then draw the line and **warp
+it onto the plane's polygon** so it follows the page tilt (rotation/perspective),
+for a clean camera-translation look.
 
 Two facts make this work without a model:
 - the OCR polygon gives the **true line height** (tilt-invariant), so text is sized
@@ -31,7 +37,8 @@ from PIL import ImageDraw
 
 from app.replacement import geometry as geo
 from app.replacement.color import sample_region_colors
-from app.replacement.fit import fit_text
+from app.replacement.fit import load_font
+from app.replacement.fit import wrap_lines
 
 
 # Font size from the true (de-skewed) line height. The polygon height spans the full
@@ -43,18 +50,17 @@ _SIZE_RATIO = 0.9
 class _Job:
     erase_quad: list[tuple[int, int]]
     bg_color: tuple[int, int, int]
-    tile: Image.Image
-    dst_quad: list[tuple[float, float]]
+    # None for an erase-only plane (the translation needed fewer lines than the original).
+    tile: Image.Image | None
+    dst_quad: list[tuple[float, float]] | None
 
 
 def render_translated_image(input_path: Path, translation_units: list[dict[str, Any]]) -> bytes:
     base = Image.open(input_path).convert("RGB")
 
     jobs: list[_Job] = []
-    for unit in translation_units:
-        job = _plan_unit(base, unit)
-        if job is not None:
-            jobs.append(job)
+    for group in _groups(translation_units):
+        jobs.extend(_plan_group(base, group))
 
     # Pass 1: cover every original (along the slant) so no source text peeks through.
     erase = ImageDraw.Draw(base)
@@ -64,71 +70,133 @@ def render_translated_image(input_path: Path, translation_units: list[dict[str, 
     # Pass 2: warp each text tile onto its oriented region.
     canvas = np.asarray(base).copy()
     for job in jobs:
-        _composite(canvas, job)
+        if job.tile is not None:
+            _composite(canvas, job)
 
     out = BytesIO()
     Image.fromarray(canvas).save(out, format="PNG")
     return out.getvalue()
 
 
-def _plan_unit(base: Image.Image, unit: dict[str, Any]) -> _Job | None:
-    translated = str(unit.get("translated_text") or "").strip()
-    if len(translated) <= 1:  # empty / OCR-noise single char -> leave the original alone
-        return None
-    members = [m for m in (unit.get("members") or []) if m.get("translate") and m.get("bbox")]
-    quads = [quad for quad in (geo.quad_of(m) for m in members) if quad is not None]
-    if not quads:
-        return None
+def _groups(units: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
+    """Consecutive units of one VLM block at one level reflow together — a wrapped
+    dish, a body paragraph. The level guard keeps a heading from merging into its
+    body text. Leftovers (no block — an OCR noise cell interleaved in reading order)
+    stay alone but do NOT break the surrounding block's run, or one stray cell would
+    split a dish back into per-line fitting."""
+    groups: list[list[dict[str, Any]]] = []
+    current: list[dict[str, Any]] | None = None
+    previous: tuple[Any, Any] | None = None
+    for unit in units:
+        key = (unit.get("block_id"), unit.get("level"))
+        if key[0] is None:
+            groups.append([unit])
+            continue
+        if current is not None and key == previous:
+            current.append(unit)
+        else:
+            current = [unit]
+            groups.append(current)
+        previous = key
+    return groups
 
-    angle = median(geo.angle_deg(quad) for quad in quads)
-    true_height = median(geo.line_height(quad) for quad in quads)
-    target_size = max(8, int(true_height * _SIZE_RATIO))
-    pad = max(2.0, true_height / 6.0)
 
-    x_axis, y_axis, xmin, xmax, ymin, ymax = geo.oriented_frame(quads, angle)
-    region_w = xmax - xmin
-    region_h = ymax - ymin
-    bg, fg = sample_region_colors(base, geo.axis_bbox(quads))
+def _plan_group(base: Image.Image, units: list[dict[str, Any]]) -> list[_Job]:
+    rows: list[tuple[list, str]] = []
+    for unit in units:
+        translated = str(unit.get("translated_text") or "").strip()
+        if len(translated) <= 1:  # empty / OCR-noise single char -> leave the original alone
+            continue
+        members = [m for m in (unit.get("members") or []) if m.get("translate") and m.get("bbox")]
+        quads = [quad for quad in (geo.quad_of(m) for m in members) if quad is not None]
+        if not quads:
+            continue
+        rows.append((quads, translated))
+    if not rows:
+        return []
 
-    # The translation never takes more room than the original text: it starts at the
-    # original size (true-height target) and steps down until it fits the unit's own
-    # de-skewed footprint. A shorter translation keeps the original size — no growing.
-    max_height = int(region_h + 2 * pad)
-    fitted = fit_text(translated, max(1, int(region_w)), max_height, wrap=False, max_size=target_size)
+    angle = median(geo.angle_deg(quad) for quads, _ in rows for quad in quads)
+    planes: list[dict[str, Any]] = []
+    for quads, _ in rows:
+        true_height = median(geo.line_height(quad) for quad in quads)
+        x_axis, y_axis, xmin, xmax, ymin, ymax = geo.oriented_frame(quads, angle)
+        planes.append({
+            "quads": quads,
+            "target": max(8, int(true_height * _SIZE_RATIO)),
+            "pad": max(2.0, true_height / 6.0),
+            "frame": (x_axis, y_axis, xmin, xmax, ymin, ymax),
+            "width": xmax - xmin,
+        })
 
-    text_w = max((int(fitted.font.getlength(line)) for line in fitted.lines), default=0)
-    # fit_text returns its smallest-font attempt even when that still does not fit (a
-    # long chat-reply "translation" on a pictogram-sized cell). The footprint rule wins:
-    # leave the original pixels rather than erase far beyond them.
-    if text_w > max(1, int(region_w)):
-        return None
-    tile_w = max(1, text_w + 2 * int(pad))
-    tile_h = max(1, fitted.line_height * len(fitted.lines) + 2 * int(pad))
-    tile = Image.new("RGBA", (tile_w, tile_h), (0, 0, 0, 0))
-    tile_draw = ImageDraw.Draw(tile)
-    y = int(pad)
-    for line in fitted.lines:
-        tile_draw.text((int(pad), y), line, font=fitted.font, fill=fg + (255,))
-        y += fitted.line_height
+    # The whole group renders at ONE size — never above the original — decided up front
+    # from the group's total ink width; the joined translation is re-broken freely over
+    # at most the original line count, every line capped at the group's WIDEST plane.
+    # Slack on a short original line is pooled into the next line instead of that line
+    # shrinking alone ("jus," may move up behind "red wine").
+    joined = " ".join(translated for _, translated in rows)
+    fitted = _fit_group(
+        joined,
+        start=min(plane["target"] for plane in planes),
+        max_line_w=max(plane["width"] for plane in planes),
+        budget=sum(plane["width"] for plane in planes),
+        n_lines=len(planes),
+    )
+    if fitted is None:  # not even the smallest font packs -> leave the original alone
+        return []
+    font, lines = fitted
+    ascent, descent = font.getmetrics()
 
-    # Origin = unit top-left in the rotated frame, lifted by the padding margin.
-    ox, oy = xmin - pad, ymin - pad
-    dst_quad = [
-        geo.to_image(ox, oy, x_axis, y_axis),
-        geo.to_image(ox + tile_w, oy, x_axis, y_axis),
-        geo.to_image(ox + tile_w, oy + tile_h, x_axis, y_axis),
-        geo.to_image(ox, oy + tile_h, x_axis, y_axis),
-    ]
-    # Erase region: the original extent, grown to cover the (possibly larger) text tile.
-    ex1 = max(xmax + pad, ox + tile_w)
-    ey1 = max(ymax + pad, oy + tile_h)
-    erase_quad = [
-        _ipoint(geo.to_image(ox, oy, x_axis, y_axis)),
-        _ipoint(geo.to_image(ex1, oy, x_axis, y_axis)),
-        _ipoint(geo.to_image(ex1, ey1, x_axis, y_axis)),
-        _ipoint(geo.to_image(ox, ey1, x_axis, y_axis)),
-    ]
-    return _Job(erase_quad=erase_quad, bg_color=bg, tile=tile, dst_quad=dst_quad)
+    jobs: list[_Job] = []
+    for index, plane in enumerate(planes):
+        x_axis, y_axis, xmin, xmax, ymin, ymax = plane["frame"]
+        pad = plane["pad"]
+        bg, fg = sample_region_colors(base, geo.axis_bbox(plane["quads"]))
+        # Origin = the original line's top-left in the rotated frame — line pitch and
+        # perspective follow the original print, whatever the new break positions are.
+        ox, oy = xmin - pad, ymin - pad
+        ex1, ey1 = xmax + pad, ymax + pad
+        tile: Image.Image | None = None
+        dst_quad: list[tuple[float, float]] | None = None
+        line = lines[index] if index < len(lines) else None  # extra planes: erase only
+        if line:
+            text_w = int(font.getlength(line))
+            tile_w = max(1, text_w + 2 * int(pad))
+            tile_h = max(1, int(ascent + descent) + 2 * int(pad))
+            tile = Image.new("RGBA", (tile_w, tile_h), (0, 0, 0, 0))
+            ImageDraw.Draw(tile).text((int(pad), int(pad)), line, font=font, fill=fg + (255,))
+            dst_quad = [
+                geo.to_image(ox, oy, x_axis, y_axis),
+                geo.to_image(ox + tile_w, oy, x_axis, y_axis),
+                geo.to_image(ox + tile_w, oy + tile_h, x_axis, y_axis),
+                geo.to_image(ox, oy + tile_h, x_axis, y_axis),
+            ]
+            # Erase the original extent, grown to cover the (possibly wider) line.
+            ex1 = max(ex1, ox + tile_w)
+            ey1 = max(ey1, oy + tile_h)
+        erase_quad = [
+            _ipoint(geo.to_image(ox, oy, x_axis, y_axis)),
+            _ipoint(geo.to_image(ex1, oy, x_axis, y_axis)),
+            _ipoint(geo.to_image(ex1, ey1, x_axis, y_axis)),
+            _ipoint(geo.to_image(ox, ey1, x_axis, y_axis)),
+        ]
+        jobs.append(_Job(erase_quad=erase_quad, bg_color=bg, tile=tile, dst_quad=dst_quad))
+    return jobs
+
+
+def _fit_group(
+    text: str, *, start: int, max_line_w: float, budget: float, n_lines: int
+) -> tuple[Any, list[str]] | None:
+    """Largest size (from ``start`` down) whose text fits the group's total ink width
+    AND re-breaks into at most the original line count under the per-line cap. None
+    when even the smallest font cannot pack it (the caller leaves the original)."""
+    for size in range(max(6, min(start, 160)), 5, -1):
+        font = load_font(size)
+        if font.getlength(text) > budget:
+            continue
+        lines = wrap_lines(font, text, int(max_line_w))
+        if len(lines) <= n_lines and all(font.getlength(line) <= max_line_w for line in lines):
+            return font, lines
+    return None
 
 
 def _composite(canvas: np.ndarray, job: _Job) -> None:

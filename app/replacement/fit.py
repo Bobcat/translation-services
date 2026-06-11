@@ -54,7 +54,7 @@ def fit_text(
     start = max(_MIN_SIZE, min(ceiling, 160))
     for size in range(start, _MIN_SIZE - 1, -1):
         font = load_font(size)
-        lines = _wrap(font, content, max_width) if wrap else [content]
+        lines = wrap_lines(font, content, max_width) if wrap else [content]
         line_height = _line_height(font)
         widest = max((_text_width(font, line) for line in lines), default=0)
         fits_box = widest <= max_width and line_height * len(lines) <= max_height
@@ -63,11 +63,11 @@ def fit_text(
             return FittedText(font=font, lines=lines, line_height=line_height)
 
     font = load_font(_MIN_SIZE)
-    lines = _wrap(font, content, max_width) if wrap else [content]
+    lines = wrap_lines(font, content, max_width) if wrap else [content]
     return FittedText(font=font, lines=lines, line_height=_line_height(font))
 
 
-def _wrap(font: ImageFont.FreeTypeFont, text: str, max_width: int) -> list[str]:
+def wrap_lines(font: ImageFont.FreeTypeFont, text: str, max_width: int) -> list[str]:
     words = text.split()
     if not words:
         return [""]
