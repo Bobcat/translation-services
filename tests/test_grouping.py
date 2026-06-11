@@ -107,6 +107,45 @@ def test_exact_match_beats_fuzzy_substring() -> None:
     assert [u.hint_index for u in result.units] == [0, 1]
 
 
+def test_anchored_tie_break_binds_each_duplicate_line_to_its_own_hint() -> None:
+    # Two dishes share the line "en frites"-style text. The cells around the ambiguous
+    # one anchor the y -> hint-index map, so the tie breaks to the hint at the cell's
+    # actual position even when line density skews the global linear estimate (the
+    # large gap before the last cell pulls the linear estimate far off).
+    def cell(cid: int, text: str, top: int) -> dict:
+        return {"id": cid, "text": text, "bbox": {"left": 0, "top": top, "width": 100, "height": 8}}
+
+    hints = [
+        "Saté van kippendijen",   # 0
+        "koolsla en frites",      # 1  <- the wrong candidate for the tied cell
+        "HESP hotdog van Brandt", # 2
+        "met kool en uitjes",     # 3
+        "en frites",              # 4  <- the right one
+        "Biefstuk van de grill",  # 5
+    ]
+    cells = [
+        cell(1, "Saté van kippendijen", 0),
+        cell(2, "koolsla en frites", 10),
+        cell(3, "HESP hotdog van Brandt", 20),
+        cell(4, "met kool en uitjes", 30),
+        cell(5, "en frites", 40),          # ties hints 1 and 4
+        cell(6, "Biefstuk van de grill", 500),
+    ]
+    result = build_units_from_hint(cells=cells, hint_units=hints, model="qwen")
+    ambiguous = next(u for u in result.units if any(m.cell_id == 5 for m in u.members))
+    assert ambiguous.hint_index == 4
+
+
+def test_rogue_seed_is_dropped_by_chaining() -> None:
+    from app.grouping.align import _chain
+
+    # Seeds in reading order; the out-of-order hint index (a coincidental unique match)
+    # must drop out, the monotone rest stays.
+    seeds = [(0.0, 0), (10.0, 1), (20.0, 5), (30.0, 2), (40.0, 3)]
+    anchors = _chain(seeds)
+    assert anchors == [(0.0, 0), (10.0, 1), (30.0, 2), (40.0, 3)]
+
+
 def test_short_noise_cell_stays_leftover() -> None:
     # A misread single-char qty cell ("T") must not fuzzy-bind a row: it stays a leftover
     # (render skips it) instead of dragging the unit's bbox into the qty column.
