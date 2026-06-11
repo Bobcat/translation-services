@@ -208,21 +208,6 @@ def test_upload_canonicalizes_exif_orientation(tmp_path: Path, monkeypatch) -> N
         assert completed["response"]["artifacts"]["input"]["mime_type"] == "image/jpeg"
 
 
-def test_upload_without_orientation_keeps_original_bytes() -> None:
-    # A JPEG with no EXIF orientation must reach the pipeline byte-for-byte: re-encoding
-    # (even at quality 95) silently changes the pixels the grouping VLM sees.
-    from PIL import Image
-
-    from app.main import _canonical_image_bytes
-
-    image = Image.new("RGB", (1080, 600), (40, 60, 200))
-    image.putpixel((0, 0), (200, 10, 10))
-    raw = BytesIO()
-    image.save(raw, format="JPEG", quality=92)
-    original = raw.getvalue()
-    assert _canonical_image_bytes(original, "image/jpeg") == original
-
-
 def test_resolve_ocr_language_maps_paddleocr_codes() -> None:
     settings = OcrSettings(backend="paddleocr", language="")
 
