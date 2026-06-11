@@ -36,6 +36,7 @@ from PIL import Image
 from PIL import ImageDraw
 
 from app.replacement import geometry as geo
+from app.replacement.color import contrasting_fg
 from app.replacement.color import sample_region_colors
 from app.replacement.fit import load_font
 from app.replacement.fit import wrap_lines
@@ -44,6 +45,11 @@ from app.replacement.fit import wrap_lines
 # Font size from the true (de-skewed) line height. The polygon height spans the full
 # glyph extent, a touch taller than the visual cap; scale down slightly to match.
 _SIZE_RATIO = 0.9
+
+# Per-channel tolerance for snapping a group's per-plane background samples to one
+# colour: within it the planes are one surface sampled with texture noise; beyond it
+# they are genuinely different (a gradient, two panels) and stay per-plane.
+_BG_SNAP_DELTA = 24
 
 
 @dataclass(frozen=True)
@@ -153,11 +159,20 @@ def _plan_group(base: Image.Image, units: list[dict[str, Any]]) -> list[_Job]:
     ascent, descent = font.getmetrics()
     centered = any(str(unit.get("alignment") or "") == "center" for unit in units)
 
+    # One element usually sits on one surface: when the per-plane background samples
+    # are near-equal (texture noise), snap them to their median so the erase planes
+    # don't show slightly different shades per line.
+    colors = [sample_region_colors(base, geo.axis_bbox(plane["quads"])) for plane in planes]
+    if len(colors) > 1:
+        median_bg = tuple(int(median(bg[channel] for bg, _ in colors)) for channel in range(3))
+        if all(max(abs(bg[c] - median_bg[c]) for c in range(3)) <= _BG_SNAP_DELTA for bg, _ in colors):
+            colors = [(median_bg, contrasting_fg(median_bg))] * len(colors)
+
     jobs: list[_Job] = []
     for index, plane in enumerate(planes):
         x_axis, y_axis, xmin, xmax, ymin, ymax = plane["frame"]
         pad = plane["pad"]
-        bg, fg = sample_region_colors(base, geo.axis_bbox(plane["quads"]))
+        bg, fg = colors[index]
         # Origin = the original line's top-left in the rotated frame — line pitch and
         # perspective follow the original print, whatever the new break positions are.
         # A centered element anchors each line on its plane's CENTRE instead (the VLM
