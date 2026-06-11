@@ -50,10 +50,9 @@ class _Job:
 def render_translated_image(input_path: Path, translation_units: list[dict[str, Any]]) -> bytes:
     base = Image.open(input_path).convert("RGB")
 
-    budgets = _horizontal_budgets(translation_units)
     jobs: list[_Job] = []
-    for unit, budget in zip(translation_units, budgets):
-        job = _plan_unit(base, unit, budget)
+    for unit in translation_units:
+        job = _plan_unit(base, unit)
         if job is not None:
             jobs.append(job)
 
@@ -72,7 +71,7 @@ def render_translated_image(input_path: Path, translation_units: list[dict[str, 
     return out.getvalue()
 
 
-def _plan_unit(base: Image.Image, unit: dict[str, Any], budget: float | None) -> _Job | None:
+def _plan_unit(base: Image.Image, unit: dict[str, Any]) -> _Job | None:
     translated = str(unit.get("translated_text") or "").strip()
     if len(translated) <= 1:  # empty / OCR-noise single char -> leave the original alone
         return None
@@ -91,13 +90,11 @@ def _plan_unit(base: Image.Image, unit: dict[str, Any], budget: float | None) ->
     region_h = ymax - ymin
     bg, fg = sample_region_colors(base, geo.axis_bbox(quads))
 
-    # Size consistency comes from the true-height target above; the translation keeps that
-    # size and grows RIGHTWARDS into the whitespace (no re-wrapping), like a native print —
-    # bounded by ``budget`` (the gap to the next cell on this line) so it never overruns the
-    # price column or a neighbour. It shrinks only if too long even for that gap.
-    avail = budget if budget is not None else region_w
+    # The translation never takes more room than the original text: it starts at the
+    # original size (true-height target) and steps down until it fits the unit's own
+    # de-skewed footprint. A shorter translation keeps the original size — no growing.
     max_height = int(region_h + 2 * pad)
-    fitted = fit_text(translated, max(1, int(avail - 2 * pad)), max_height, wrap=False, max_size=target_size)
+    fitted = fit_text(translated, max(1, int(region_w)), max_height, wrap=False, max_size=target_size)
 
     text_w = max((int(fitted.font.getlength(line)) for line in fitted.lines), default=0)
     tile_w = max(1, text_w + 2 * int(pad))
@@ -127,50 +124,6 @@ def _plan_unit(base: Image.Image, unit: dict[str, Any], budget: float | None) ->
         _ipoint(geo.to_image(ox, ey1, x_axis, y_axis)),
     ]
     return _Job(erase_quad=erase_quad, bg_color=bg, tile=tile, dst_quad=dst_quad)
-
-
-def _horizontal_budgets(units: list[dict[str, Any]]) -> list[float | None]:
-    """Width each unit may use before it would run into the next cell to its right (the
-    price column, a neighbouring block), measured in the oriented (de-skewed) page frame
-    under one global angle. The translation keeps its size and grows rightwards into the
-    whitespace like a native print, shrinking only if it would otherwise overlap that cell.
-    ``None`` for units with no translatable members (never rendered)."""
-    target_quads: list[list] = []          # the translatable quads we actually place
-    obstacle_quads: list = []              # every member box, as an obstacle to grow into
-    for unit in units:
-        members = unit.get("members") or []
-        target_quads.append(
-            [q for q in (geo.quad_of(m) for m in members
-             if m.get("translate") and m.get("bbox")) if q is not None]
-        )
-        for member in members:
-            if member.get("bbox"):
-                quad = geo.quad_of(member)
-                if quad is not None:
-                    obstacle_quads.append(quad)
-    if not obstacle_quads:
-        return [None] * len(units)
-    angle = median(geo.angle_deg(quad) for quad in obstacle_quads)
-
-    obstacles: list[tuple[float, float, float, float]] = []  # (oxmin, oxmax, oymin, oymax)
-    for quad in obstacle_quads:
-        _, _, oxmin, oxmax, oymin, oymax = geo.oriented_frame([quad], angle)
-        obstacles.append((oxmin, oxmax, oymin, oymax))
-    page_right = max(oxmax for _, oxmax, _, _ in obstacles)
-
-    budgets: list[float | None] = []
-    for quads in target_quads:
-        if not quads:
-            budgets.append(None)
-            continue
-        _, _, oxmin, oxmax, oymin, oymax = geo.oriented_frame(quads, angle)
-        next_left: float | None = None
-        for o_xmin, _o_xmax, o_ymin, o_ymax in obstacles:
-            if o_xmin > oxmax + 2.0 and o_ymin < oymax and o_ymax > oymin:  # right + vertical overlap
-                next_left = o_xmin if next_left is None else min(next_left, o_xmin)
-        right = next_left if next_left is not None else page_right
-        budgets.append(max(oxmax, right) - oxmin)
-    return budgets
 
 
 def _composite(canvas: np.ndarray, job: _Job) -> None:
