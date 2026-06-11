@@ -136,6 +136,38 @@ def test_anchored_tie_break_binds_each_duplicate_line_to_its_own_hint() -> None:
     assert ambiguous.hint_index == 4
 
 
+def test_continuation_cell_sticks_to_its_element_on_a_tie() -> None:
+    # "en frites" ties two dish elements. Tilt distorts axis-aligned tops (the next
+    # dish's first line can sit at almost the same top), so position is a coin flip —
+    # but the cell is left-aligned directly under its element's previous line, so it
+    # sticks with that element.
+    cells = [
+        {"id": 1, "text": "AAA hotdog kool", "bbox": {"left": 100, "top": 0, "width": 280, "height": 20}},
+        {"id": 2, "text": "en frites", "bbox": {"left": 100, "top": 40, "width": 90, "height": 20}},
+        {"id": 3, "text": "BBB biefstuk wijn", "bbox": {"left": 110, "top": 50, "width": 290, "height": 20}},
+    ]
+    hints = ["AAA hotdog kool en frites", "BBB biefstuk wijn en frites"]
+    result = build_units_from_hint(cells=cells, hint_units=hints, model="qwen")
+    hotdog = next(u for u in result.units if any(m.cell_id == 2 for m in u.members))
+    assert hotdog.hint_index == 0
+
+
+def test_interleaved_leftover_does_not_split_a_unit() -> None:
+    # A noise cell between two cells of one element: the element stays ONE unit (the
+    # structured translation must land once), the noise is its own leftover unit.
+    cells = [
+        {"id": 1, "text": "Biefstuk van de grill", "bbox": {"left": 100, "top": 10, "width": 300, "height": 30}},
+        {"id": 2, "text": "xqzj", "bbox": {"left": 0, "top": 30, "width": 20, "height": 20}},
+        {"id": 3, "text": "rode wijn jus en frites", "bbox": {"left": 100, "top": 50, "width": 280, "height": 30}},
+    ]
+    hints = ["Biefstuk van de grill met rode wijn jus en frites"]
+    result = build_units_from_hint(cells=cells, hint_units=hints, model="qwen")
+    dish = next(u for u in result.units if u.hint_index == 0)
+    assert [m.cell_id for m in dish.members] == [1, 3]
+    leftover = next(u for u in result.units if u.hint_index is None)
+    assert [m.cell_id for m in leftover.members] == [2]
+
+
 def test_rogue_seed_is_dropped_by_chaining() -> None:
     from app.grouping.align import _chain
 
@@ -175,6 +207,7 @@ def test_parse_grouping_output_strips_bullets_and_separators() -> None:
 
 
 def test_parse_labeled_output_extracts_levels_and_blocks() -> None:
+    # Every labeled line is its own element, so its own block.
     raw = (
         "[Image Classification: Informational sign]\n"
         "\n"
@@ -191,7 +224,7 @@ def test_parse_labeled_output_extracts_levels_and_blocks() -> None:
         "25 m", "U bent te gast.", "Zij kunnen u schade toebrengen.", "050 - 313 59 01",
     ]
     assert hint.levels == ["title", "header", "body", "footer"]
-    assert hint.block_ids == [0, 1, 1, 2]
+    assert hint.block_ids == [0, 1, 2, 3]
 
 
 def test_parse_labeled_output_text_inside_bracket_variant() -> None:
@@ -203,12 +236,11 @@ def test_parse_labeled_output_text_inside_bracket_variant() -> None:
 
 
 def test_parse_continuation_lines_inherit_block_level_and_block() -> None:
-    # Menu style: label on the dish's first line, wrapped continuation below it without
-    # a label, blank line between dishes. The continuation inherits level AND block.
+    # If the model wraps an element over output lines anyway, the unlabeled
+    # continuation inherits level AND block; the next label starts the next element.
     raw = (
         "[Level 3 / Body] Biefstuk van de grill met rode wijn | € 18,75\n"
         "jus, sjalotten, spitskool en frites\n"
-        "\n"
         "[Level 3 / Body] HESP classic burger met kaas, | € 14\n"
         "tomaat, augurk, uitjes en frites\n"
     )
@@ -228,7 +260,7 @@ def test_parse_standalone_label_applies_to_following_lines() -> None:
 
 def test_parse_labeled_separator_content_is_dropped() -> None:
     # A label wrapping a ruled line ("[Level 3 / Body] ------") is table decoration,
-    # not a unit; it must not break the block either.
+    # not a unit; the receipt rows around it stay separate elements.
     raw = (
         "[Level 3 / Body] 1 | KARNEMELK | | 1,69 B\n"
         "[Level 3 / Body] ------------------------\n"
@@ -236,7 +268,7 @@ def test_parse_labeled_separator_content_is_dropped() -> None:
     )
     hint = parse_grouping_output(raw)
     assert hint.units == ["1 | KARNEMELK | | 1,69 B", "20 | SUBTOTAAL | | 60,95"]
-    assert hint.block_ids == [0, 0]
+    assert hint.block_ids == [0, 1]
 
 
 def test_units_carry_hint_level_and_block_id() -> None:
