@@ -75,6 +75,46 @@ def test_accent_and_case_tolerant_matching() -> None:
     assert [m.cell_id for m in result.units[0].members] == [1]
 
 
+def test_garbled_cell_binds_its_clean_hint_line() -> None:
+    # OCR adds a character ("AHNEDAARDBEI" vs hint "AHNEDAARBEI") -> the cell must still
+    # bind the clean VLM line, so the structured translation lands on it instead of the
+    # fallback translating the garble in isolation.
+    cells = [{"id": 1, "text": "AHNEDAARDBEI", "bbox": {"left": 0, "top": 0, "width": 10, "height": 10}}]
+    hints = ["BONUS | AHNEDAARBEI | | -2,00", "BONUS | ARLABIOLOGIS | | -0,44"]
+    result = build_units_from_hint(cells=cells, hint_units=hints, model="qwen")
+    assert result.units[0].hint_index == 0
+
+
+def test_split_word_cells_bind_the_joined_hint_line() -> None:
+    # OCR splits one word over two cells ("Kaar thouder" vs hint "Kaarthouder").
+    cells = [
+        {"id": 1, "text": "Kaar", "bbox": {"left": 0, "top": 0, "width": 10, "height": 10}},
+        {"id": 2, "text": "thouder", "bbox": {"left": 12, "top": 0, "width": 10, "height": 10}},
+    ]
+    result = build_units_from_hint(cells=cells, hint_units=["Kopie", "Kaarthouder"], model="qwen")
+    assert len(result.units) == 1
+    assert result.units[0].hint_index == 1
+
+
+def test_exact_match_beats_fuzzy_substring() -> None:
+    # "Kaart" is a substring of "Kaarthouder": each cell must keep its own exact line.
+    cells = [
+        {"id": 1, "text": "Kaarthouder", "bbox": {"left": 0, "top": 0, "width": 10, "height": 10}},
+        {"id": 2, "text": "Kaart", "bbox": {"left": 0, "top": 20, "width": 10, "height": 10}},
+    ]
+    hints = ["Kaarthouder", "Kaart | 123456xxx0000"]
+    result = build_units_from_hint(cells=cells, hint_units=hints, model="qwen")
+    assert [u.hint_index for u in result.units] == [0, 1]
+
+
+def test_short_noise_cell_stays_leftover() -> None:
+    # A misread single-char qty cell ("T") must not fuzzy-bind a row: it stays a leftover
+    # (render skips it) instead of dragging the unit's bbox into the qty column.
+    cells = [{"id": 1, "text": "T", "bbox": {"left": 0, "top": 0, "width": 10, "height": 10}}]
+    result = build_units_from_hint(cells=cells, hint_units=["1 | KARNEMELK | | 1,69"], model="qwen")
+    assert result.units[0].hint_index is None
+
+
 def test_parse_grouping_output_extracts_category_and_units() -> None:
     raw = (
         "CATEGORY: Restaurant Menu\n"
