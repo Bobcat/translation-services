@@ -144,6 +144,32 @@ def test_render_erases_planes_left_over_after_reflow(tmp_path) -> None:
     assert plane2.min() > 200  # the black source text is erased, nothing redrawn there
 
 
+def test_group_planes_snap_to_one_background_shade(tmp_path) -> None:
+    # Three planes of one element on a lightly textured background sample three
+    # slightly different greys; they must snap to ONE shade. Short translation ->
+    # planes 2 and 3 are erase-only, so their fill colour is directly observable.
+    input_path = tmp_path / "input.png"
+    base = Image.new("RGB", (400, 160), (120, 120, 120))
+    ImageDraw.Draw(base).rectangle((0, 60, 400, 110), fill=(132, 132, 132))
+    ImageDraw.Draw(base).rectangle((0, 110, 400, 160), fill=(144, 144, 144))
+    base.save(input_path)
+    units = [
+        {"translated_text": "Hi", "block_id": 1, "level": "title",
+         "members": [
+             {"cell_id": 1, "text": "DE SCHOEN", "translate": True,
+              "bbox": {"left": 50, "top": 10, "width": 300, "height": 40}},
+             {"cell_id": 2, "text": "WERKT ALS", "translate": True,
+              "bbox": {"left": 50, "top": 62, "width": 300, "height": 40}},
+             {"cell_id": 3, "text": "JIJ DAT DOET.", "translate": True,
+              "bbox": {"left": 50, "top": 114, "width": 300, "height": 40}}]},
+    ]
+    png = render_translated_image(input_path, units)
+    out = np.asarray(Image.open(BytesIO(png)).convert("RGB"))
+    fill2 = out[80, 340]   # inside plane 2's erase, right of any text
+    fill3 = out[130, 340]  # inside plane 3's erase
+    assert (fill2 == fill3).all()  # one snapped shade, not two band colours
+
+
 def test_centered_element_anchors_on_its_plane_center(tmp_path) -> None:
     # The VLM alignment hint: a centered element's line anchors on the plane's centre
     # instead of its left edge. A short translation of a wide centered original must

@@ -30,7 +30,7 @@ def sample_region_colors(image: Image.Image, bbox: dict[str, Any]) -> tuple[Colo
         return (255, 255, 255), (0, 0, 0)
 
     bg = tuple(int(channel) for channel in np.median(_border_pixels(crop), axis=0))
-    return bg, _contrasting_fg(bg)
+    return bg, contrasting_fg(bg)
 
 
 def _border_pixels(crop: np.ndarray) -> np.ndarray:
@@ -44,6 +44,6 @@ def _border_pixels(crop: np.ndarray) -> np.ndarray:
     return np.concatenate([edge.reshape(-1, 3) for edge in edges], axis=0)
 
 
-def _contrasting_fg(bg: Color) -> Color:
+def contrasting_fg(bg: Color) -> Color:
     luminance = 0.2126 * bg[0] + 0.7152 * bg[1] + 0.0722 * bg[2]
     return (0, 0, 0) if luminance >= 140 else (255, 255, 255)
