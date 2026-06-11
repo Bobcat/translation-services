@@ -192,6 +192,9 @@ def _suffix_for_mime(mime_type: str) -> str:
     return ".bin"
 
 
+_EXIF_ORIENTATION_TAG = 0x0112
+
+
 def _canonical_image_bytes(image_bytes: bytes, mime_type: str) -> bytes:
     from PIL import Image
     from PIL import ImageOps
@@ -199,9 +202,17 @@ def _canonical_image_bytes(image_bytes: bytes, mime_type: str) -> bytes:
 
     try:
         with Image.open(BytesIO(image_bytes)) as original:
+            image_format = _image_format_for_mime(mime_type)
+            orientation = original.getexif().get(_EXIF_ORIENTATION_TAG)
+            # Keep the uploaded bytes VERBATIM when there is nothing to normalize: same
+            # format, no rotation to bake in. Re-encoding (even at quality 95) is lossy
+            # and silently changes the pixels the grouping VLM sees — which made the same
+            # photo group differently here than in a path that sends the original bytes.
+            if original.format == image_format and orientation in (None, 1):
+                original.load()  # decode-validate (raises on a truncated/corrupt body)
+                return image_bytes
             image = ImageOps.exif_transpose(original)
             out = BytesIO()
-            image_format = _image_format_for_mime(mime_type)
             save_kwargs: dict[str, object] = {}
             if image_format == "JPEG":
                 if image.mode not in {"RGB", "L"}:
