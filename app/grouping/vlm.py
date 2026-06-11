@@ -41,6 +41,11 @@ _MAX_OUTPUT_TOKENS = 4096
 #   - the hierarchy labels ([Level 1 / Title] ... [Metadata/Footer]) carry the visual
 #     size/weight hierarchy OCR cannot give; parse_grouping_output strips them into a
 #     per-line level.
+#   - alignment is EXCEPTION-marked ("| centered" inside the label, left = default):
+#     near-free in tokens, and ambiguity falls back to left. The tilt + shared-left-
+#     margin clauses are load-bearing — without them the tilted menu's headers misread
+#     as left/right (and once made the dishes read as centred). A wrong hint is only
+#     cosmetic: the renderer moves the anchor within the same plane, nothing else.
 #   - "table row -> '|' between its fields" marks tabular layout; at element level it
 #     also splits a menu dish from its price column.
 # Price/number cells are flagged non-translatable in align (_is_nontranslatable); the
@@ -63,7 +68,11 @@ _USER_INSTRUCTION = (
     "    * **[Metadata/Footer]:** Small text at the edges, such as contact info, "
     "dates, or fine print.\n"
     "3. **Tables:** If an element is a table row, put '|' between its fields.\n"
-    "4. **Output Format:** Present the final structure using **Markdown formatting**. "
+    "4. **Alignment:** The photo may be tilted; judge alignment against the document "
+    "itself, not the image frame. Append ' | centered' inside the label only when an "
+    "element is horizontally centred. Elements that share a common left margin (a "
+    "list, a column) are left-aligned, never centred.\n"
+    "5. **Output Format:** Present the final structure using **Markdown formatting**. "
     "The output must begin with a single line in the format **[Image Classification: "
     "<short description>]**, followed by a continuous stream of labeled text that "
     "follows the visual flow of the document. Output only the text."
@@ -87,10 +96,11 @@ class GroupingHint:
     units: list[str]
     raw: str = ""
     # Parallel to ``units``: the visual hierarchy level of each line
-    # ("title" | "header" | "body" | "footer", None when unlabeled) and the index of
-    # the blank-line-separated block it belongs to.
+    # ("title" | "header" | "body" | "footer", None when unlabeled), the index of the
+    # element block it belongs to, and its horizontal alignment ("center", None = left).
     levels: list[str | None] = field(default_factory=list)
     block_ids: list[int] = field(default_factory=list)
+    alignments: list[str | None] = field(default_factory=list)
 
 
 def request_grouping_hint(
@@ -162,16 +172,19 @@ def parse_grouping_output(output_text: str) -> GroupingHint:
     units: list[str] = []
     levels: list[str | None] = []
     block_ids: list[int] = []
+    alignments: list[str | None] = []
     block = 0
     block_open = False
     block_level: str | None = None
+    block_alignment: str | None = None
 
     def close_block() -> None:
-        nonlocal block, block_open, block_level
+        nonlocal block, block_open, block_level, block_alignment
         if block_open:
             block += 1
             block_open = False
         block_level = None
+        block_alignment = None
 
     for raw in str(output_text or "").splitlines():
         line = raw.strip()
@@ -194,6 +207,7 @@ def parse_grouping_output(output_text: str) -> GroupingHint:
                 close_block()  # a label starts a new element
                 line = text
                 block_level = level
+                block_alignment = "center" if re.search(r"\bcent(?:e?red)\b", label.lower()) else None
                 if not line:  # standalone "[Level 3 / Body]" -> labels the lines below
                     continue
         if level is None:
@@ -207,6 +221,7 @@ def parse_grouping_output(output_text: str) -> GroupingHint:
         units.append(cleaned)
         levels.append(level)
         block_ids.append(block)
+        alignments.append(block_alignment)
         block_open = True
     return GroupingHint(
         category=category,
@@ -214,6 +229,7 @@ def parse_grouping_output(output_text: str) -> GroupingHint:
         raw=str(output_text or ""),
         levels=levels,
         block_ids=block_ids,
+        alignments=alignments,
     )
 
 

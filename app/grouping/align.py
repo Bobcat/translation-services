@@ -39,6 +39,7 @@ def build_units_from_hint(
     model: str,
     hint_levels: list[str | None] | None = None,
     hint_block_ids: list[int] | None = None,
+    hint_alignments: list[str | None] | None = None,
 ) -> GroupingResult:
     hint_token_sets = [set(_tokens(text)) for text in hint_units]
     matches = [_match_scores(cell, hint_token_sets) for cell in cells]
@@ -63,6 +64,7 @@ def build_units_from_hint(
             hint_index=label,
             level=_hint_meta(label, hint_levels),
             block_id=_hint_meta(label, hint_block_ids),
+            alignment=_hint_meta(label, hint_alignments),
         )
         for order, (label, indices) in enumerate(groups, start=1)
     ]
@@ -272,6 +274,7 @@ def _build_unit(
     hint_index: int | None = None,
     level: str | None = None,
     block_id: int | None = None,
+    alignment: str | None = None,
 ) -> TranslationUnit:
     members: list[UnitMember] = []
     for order, cell_index in enumerate(indices, start=1):
@@ -299,6 +302,7 @@ def _build_unit(
         hint_index=hint_index,
         level=level,
         block_id=block_id,
+        alignment=alignment,
     )
 
 

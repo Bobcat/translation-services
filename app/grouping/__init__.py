@@ -69,6 +69,7 @@ def group_cells_into_units(
         model=resolved_model,
         hint_levels=hint.levels,
         hint_block_ids=hint.block_ids,
+        hint_alignments=hint.alignments,
     )
     return replace(
         result,
@@ -76,6 +77,7 @@ def group_cells_into_units(
         hint_units=list(hint.units),
         hint_levels=list(hint.levels),
         hint_block_ids=list(hint.block_ids),
+        hint_alignments=list(hint.alignments),
         metrics={**result.metrics, "grouping_wall_ms": grouping_wall_ms},
         metadata={
             **result.metadata,
