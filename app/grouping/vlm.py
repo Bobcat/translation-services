@@ -1,25 +1,25 @@
-"""Stage #5 grouping hint: ask a VLM which text belongs together (+ a category).
+"""Stage #5 grouping hint: ask a VLM for a structural analysis of the text.
 
-The VLM (small Gemma) reads the image and returns, in reading order, an image
-**category** plus the groups of text as plain text — the format it is actually good
-at (it groups a menu correctly this way, even reading prices our OCR missed). It does
-NOT do cell-id bookkeeping; that brittle burden is gone.
+The VLM reads the image and returns, in reading order, an image **classification**
+plus one labeled line per printed line of the document — the hierarchy label
+(Title/Header/Body/Footer) comes from visual cues (size, weight, position) that OCR
+line heights cannot give reliably. Blank lines separate semantic blocks; table rows
+carry ``|`` between their fields. It does NOT do cell-id bookkeeping.
 
-The returned units are only a *hint*: ``app.grouping.align`` maps them back onto the
+The returned lines are only a *hint*: ``app.grouping.align`` maps them back onto the
 authoritative OCR cells (text + bbox) and builds the units. A weak or incomplete hint
-therefore lowers quality but does not fail the job. The category is near-free extra
-context (e.g. feeds the translation prompt: "restaurant menu" stops gemma rendering
-"hoofdgerechten" as "fundamental rights").
-
-We deliberately do NOT ask the VLM for font sizes: the same small model cannot do
-good grouping *and* sizes in one call (asking for sizes pushes it to per-line units,
-and the size field comes back as the price). Sizing is done from the OCR polygon.
+therefore lowers quality but does not fail the job. The classification is near-free
+extra context (e.g. feeds the translation prompt: "restaurant menu" stops gemma
+rendering "hoofdgerechten" as "fundamental rights"); the per-line level + block id
+feed the renderer's size coordination.
 """
 from __future__ import annotations
 
 import base64
 import copy
+import re
 from dataclasses import dataclass
+from dataclasses import field
 from pathlib import Path
 from typing import Any
 
@@ -32,27 +32,43 @@ _RESPONSES_PATH = "/v1/responses"
 _MAX_OUTPUT_TOKENS = 4096
 
 # Sent as the user turn; the system role stays blank (llm-pool uses " "). Kept generic
-# on purpose — no wording tied to a specific image type. Design:
-#   - "Preserve newlines" keeps each ORIGINAL line as its own line, so
-#     parse_grouping_output yields one hint unit per line. align then maps each OCR cell
-#     onto its line ~1:1 (it does NOT merge a multi-line dish into one block), so every
-#     line re-places onto its own cell at its own size — faithful to the original layout,
-#     no re-wrapping or cramming.
-#   - "table row -> '|' between fields" marks tabular layout (receipt columns, a menu
-#     price) so a row's fields stay distinct.
-#   - the blank line before "# OUTPUT FORMAT" keeps output stable on dense layouts.
-# parse_grouping_output reads the category line, drops "###"/separators, and yields one
-# unit per remaining line. Price/number cells are flagged non-translatable in align
-# (_is_nontranslatable); the '|' itself is not yet parsed into field structure.
+# on purpose — no wording tied to a specific image type. Design (verified on all
+# data/test-images/):
+#   - "every printed line is exactly one line of output" keeps each ORIGINAL line as
+#     its own hint line, so align maps each OCR cell onto its line ~1:1 and every line
+#     re-places onto its own cell at its own size — faithful to the original layout.
+#   - the hierarchy labels ([Level 1 / Title] ... [Metadata/Footer]) carry the visual
+#     size/weight hierarchy OCR cannot give; parse_grouping_output strips them into a
+#     per-line level.
+#   - "table row -> '|' between its fields" marks tabular layout (receipt columns, a
+#     menu price) so a row's fields stay distinct.
+#   - the blank line between blocks becomes the per-line block id.
+# Price/number cells are flagged non-translatable in align (_is_nontranslatable); the
+# '|' itself is not yet parsed into field structure.
 _SYSTEM_PROMPT = " "
 
 _USER_INSTRUCTION = (
-    "# TASKS\n"
-    "1) Categorize the image in a few words.\n"
-    "2) Group ALL text and numbers into semantically related units. Preserve newlines.\n"
-    "3) If a line appears to be a table row put '|' between the fields.\n\n"
-    "# OUTPUT FORMAT\n"
-    "CATEGORY: <category>\n###\n<unit 1>\n###\n..."
+    "**Perform a structural analysis of the text in this image. Reconstruct the "
+    "document's hierarchy by labeling each line in its natural reading order.**\n\n"
+    "**Instructions:**\n"
+    "1. **Analyze Visual Cues:** Use font size, font weight (boldness), spatial "
+    "positioning, and grouping to determine the importance of each text element.\n"
+    "2. **Linear Labeling (Do Not Group):** Do **not** group all elements of the same "
+    "level together. Instead, process the text from top to bottom, following the "
+    "natural reading order. **Preserve the original line breaks: every printed line of "
+    "the document is exactly one line of output, even when a sentence wraps over "
+    "several lines.** Immediately precede every line with its classification:\n"
+    "    * **[Level 1 / Title]:** The most prominent text (largest/boldest).\n"
+    "    * **[Level 2 / Header]:** Sub-headings that introduce new sections.\n"
+    "    * **[Level 3 / Body]:** Descriptive or supporting text.\n"
+    "    * **[Metadata/Footer]:** Small text at the edges, such as contact info, "
+    "dates, or fine print.\n"
+    "3. **Tables:** If a line is a table row, put '|' between its fields.\n"
+    "4. **Output Format:** Present the final structure using **Markdown formatting**. "
+    "The output must begin with a single line in the format **[Image Classification: "
+    "<short description>]**, followed by a continuous stream of labeled lines that "
+    "follows the visual flow of the document, with a blank line between separate "
+    "blocks. Output only the text."
 )
 
 _MIME_BY_SUFFIX = {
@@ -72,6 +88,11 @@ class GroupingHint:
     category: str
     units: list[str]
     raw: str = ""
+    # Parallel to ``units``: the visual hierarchy level of each line
+    # ("title" | "header" | "body" | "footer", None when unlabeled) and the index of
+    # the blank-line-separated block it belongs to.
+    levels: list[str | None] = field(default_factory=list)
+    block_ids: list[int] = field(default_factory=list)
 
 
 def request_grouping_hint(
@@ -110,28 +131,89 @@ def request_grouping_hint(
     return parse_grouping_output(output_text)
 
 
-def parse_grouping_output(output_text: str) -> GroupingHint:
-    """Split the VLM output into the image category and the hint units.
+_LABELED_LINE = re.compile(r"^\[(?P<label>[^\[\]]+)\]\s*:?\s*(?P<rest>.*)$")
 
-    The leading ``CATEGORY:`` line becomes the category; every other non-empty line is
-    one unit (the model puts each unit on its own line). Separator lines (``###`` /
-    ``-----``) and leading bullet/markdown markers are dropped.
+# Substring -> level, checked in order. "level N" first: the model sometimes drops the
+# word after the slash; the word checks catch the "[Metadata/Footer]" style labels.
+_LEVEL_BY_LABEL = (
+    ("level 1", "title"),
+    ("level 2", "header"),
+    ("level 3", "body"),
+    ("title", "title"),
+    ("header", "header"),
+    ("body", "body"),
+    ("footer", "footer"),
+    ("metadata", "footer"),
+)
+
+
+def parse_grouping_output(output_text: str) -> GroupingHint:
+    """Split the VLM output into the classification and the labeled hint lines.
+
+    The leading ``[Image Classification: ...]`` line becomes the category; every other
+    non-empty line is one unit. A ``[Level n / ...]`` / ``[Metadata/Footer]`` prefix is
+    stripped into the line's level (the model wavers between ``[Label] text`` and
+    ``[Label: text]`` — both parse). Blank lines and separator lines (``###`` /
+    ``-----``) advance the block id; leading bullet/markdown markers are dropped.
+    A legacy ``CATEGORY:`` first line still parses as the category.
     """
     category = ""
     units: list[str] = []
+    levels: list[str | None] = []
+    block_ids: list[int] = []
+    block = 0
+    block_open = False
+
+    def close_block() -> None:
+        nonlocal block, block_open
+        if block_open:
+            block += 1
+            block_open = False
+
     for raw in str(output_text or "").splitlines():
         line = raw.strip()
-        if not line:
+        if not line or _is_separator(line):
+            close_block()
             continue
-        if not category and line.lower().startswith("category:"):
+        level: str | None = None
+        match = _LABELED_LINE.match(line)
+        if match:
+            label = match.group("label").strip()
+            text = match.group("rest").strip()
+            if not text and ":" in label:  # "[Metadata/Footer: 23:53]" variant
+                label, text = (part.strip() for part in label.split(":", 1))
+            if label.lower().startswith("image classification"):
+                if not category:
+                    category = text
+                continue
+            level = _level_of(label)
+            if level is not None:
+                line = text
+        if not category and not units and line.lower().startswith("category:"):
             category = line.split(":", 1)[1].strip()
             continue
-        if _is_separator(line):
-            continue
         cleaned = line.lstrip("-*•#").strip().strip("*").strip()
-        if cleaned:
-            units.append(cleaned)
-    return GroupingHint(category=category, units=units, raw=str(output_text or ""))
+        if not cleaned or _is_separator(cleaned):
+            continue
+        units.append(cleaned)
+        levels.append(level)
+        block_ids.append(block)
+        block_open = True
+    return GroupingHint(
+        category=category,
+        units=units,
+        raw=str(output_text or ""),
+        levels=levels,
+        block_ids=block_ids,
+    )
+
+
+def _level_of(label: str) -> str | None:
+    lowered = label.lower()
+    for key, level in _LEVEL_BY_LABEL:
+        if key in lowered:
+            return level
+    return None
 
 
 def _is_separator(line: str) -> bool:

@@ -108,8 +108,8 @@ def run_translate_image_pipeline(
         translator_model=translator_model,
         translator_mode=translator_mode,
         category=image_category,
-        hint_raw=grouping.hint_raw,
         hint_units=grouping.hint_units,
+        hint_block_ids=grouping.hint_block_ids,
         call_log=llm_calls,
     )
     translation_wall_ms = _elapsed_ms(translation_started)
@@ -162,6 +162,8 @@ def run_translate_image_pipeline(
             "category": image_category,
             "raw": grouping.hint_raw,
             "hint_units": list(grouping.hint_units),
+            "hint_levels": list(grouping.hint_levels),
+            "hint_block_ids": list(grouping.hint_block_ids),
             "units": [unit.to_dict() for unit in grouping.units],
         },
         "translation": [

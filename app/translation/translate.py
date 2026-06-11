@@ -9,14 +9,14 @@ target-language ``instructions`` prompt that also carries the image **category**
 
 Instruction-based modes translate **all units in ONE call** so the model sees the whole
 document (better context/coherence, fewer round-trips). Preferred path is **structured**:
-re-translate the whole VLM grouping output (``###`` blocks / newlines / ``|`` fields) and
-map each translated line back onto its unit by ``hint_index`` — this keeps a multi-line
-unit's full-sentence context (e.g. "THE SHOE WORKS IF YOU DO." is not split into "THE
-SHOE"). When no hint is available or the model does not preserve the structure, it falls
-back to a **numbered list** (a numbered list in/out, mapped back by number); any unit
-still missing falls back to a single per-unit call. ``translategemma`` (single-text
-template) stays one-call-per-unit. Units with no translatable text (a bare price/number)
-are skipped.
+re-translate the clean hint lines (grouped into their blocks, ``###``-separated in the
+call, ``|`` fields kept) and map each translated line back onto its unit by
+``hint_index`` — this keeps a multi-line unit's full-sentence context (e.g. "THE SHOE
+WORKS IF YOU DO." is not split into "THE SHOE"). When no hint is available or the model
+does not preserve the structure, it falls back to a **numbered list** (a numbered list
+in/out, mapped back by number); any unit still missing falls back to a single per-unit
+call. ``translategemma`` (single-text template) stays one-call-per-unit. Units with no
+translatable text (a bare price/number) are skipped.
 """
 from __future__ import annotations
 
@@ -75,8 +75,8 @@ def translate_units(
     translator_model: str,
     translator_mode: str,
     category: str = "",
-    hint_raw: str = "",
     hint_units: list[str] | None = None,
+    hint_block_ids: list[int] | None = None,
     call_log: list[dict[str, Any]] | None = None,
 ) -> list[TranslatedUnit]:
     decision = resolve_translation_route(
@@ -90,20 +90,20 @@ def translate_units(
     translatable = [(unit.id, str(unit.source_text or "").strip()) for unit in units if str(unit.source_text or "").strip()]
 
     # Instruction-based modes translate in ONE call (translategemma can't batch). Preferred
-    # path: STRUCTURED — re-translate the whole VLM grouping output (### blocks / newlines /
-    # | fields) and map each translated line back to its unit by hint index, so a multi-line
-    # unit keeps full-sentence context (e.g. "THE SHOE WORKS IF YOU DO." is not split). Falls
+    # path: STRUCTURED — re-translate the clean hint lines (blocks / newlines / | fields)
+    # and map each translated line back to its unit by hint index, so a multi-line unit
+    # keeps full-sentence context (e.g. "THE SHOE WORKS IF YOU DO." is not split). Falls
     # back to the numbered-list batch when no hint is available or the structure is not preserved.
     batched = decision.translator_mode != "translategemma" and len(translatable) > 1
     batch: dict[int, str] = {}
     if batched:
-        if str(hint_raw or "").strip() and hint_units:
+        if hint_units:
             batch = _translate_structured(
                 settings=settings,
                 model=decision.translator_model,
                 units=units,
-                hint_raw=hint_raw,
-                source_hint_count=len(hint_units),
+                hint_units=hint_units,
+                hint_block_ids=hint_block_ids,
                 target_lang_code=target_lang_code,
                 category=category,
                 call_log=call_log,
@@ -304,21 +304,22 @@ def _translate_structured(
     settings: AppSettings,
     model: str,
     units: list[TranslationUnit],
-    hint_raw: str,
-    source_hint_count: int,
+    hint_units: list[str],
+    hint_block_ids: list[int] | None,
     target_lang_code: str,
     category: str,
     call_log: list[dict[str, Any]] | None = None,
 ) -> dict[int, str]:
-    """Translate the whole VLM grouping output in ONE call, preserving its
-    ``###`` / newline / ``|`` structure, then map each translated line back onto its unit
-    by ``hint_index``. Returns ``{unit_id: translation}``; empty (so the caller falls back
-    to the numbered-list batch) if the model did not preserve the line structure."""
+    """Translate all clean hint lines in ONE call — blocks joined by ``###`` separator
+    lines, newlines and ``|`` fields preserved — then map each translated line back onto
+    its unit by ``hint_index``. Returns ``{unit_id: translation}``; empty (so the caller
+    falls back to the numbered-list batch) if the model did not preserve the structure."""
     if not str(model or "").strip():
         raise TranslationError("translator_model is required to translate units")
+    source_blocks = _blocks_of(hint_units, hint_block_ids)
     payload: dict[str, Any] = {
         "model": model,
-        "input": _strip_category(hint_raw),
+        "input": "\n###\n".join("\n".join(block) for block in source_blocks),
         "instructions": _structured_system_prompt(target_lang_code, category),
         "stream": False,
         "decoding": {"top_k": 1, "top_p": 1, "temperature": 0.0, "repetition_penalty": 1.0, "max_tokens": 4096},
@@ -338,7 +339,6 @@ def _translate_structured(
     if call_log is not None:
         call_log.append({"role": "translation_main", "payload": payload, "response": data})
 
-    source_blocks = _parse_blocks(hint_raw)
     translated_blocks = _parse_blocks(str(data.get("output_text") or ""))
     if not source_blocks or len(source_blocks) != len(translated_blocks):
         return {}  # block structure not preserved -> caller falls back to the numbered list
@@ -347,7 +347,7 @@ def _translate_structured(
     aligned: list[str | None] = []
     for src_block, dst_block in zip(source_blocks, translated_blocks):
         aligned.extend(dst_block if len(src_block) == len(dst_block) else [None] * len(src_block))
-    if len(aligned) != source_hint_count:
+    if len(aligned) != len(hint_units):
         return {}
     out: dict[int, str] = {}
     for unit in units:
@@ -363,10 +363,25 @@ def _translate_structured(
     return out
 
 
+def _blocks_of(hint_units: list[str], hint_block_ids: list[int] | None) -> list[list[str]]:
+    """Group the hint lines into their blocks (consecutive equal block ids). Without
+    (parallel) block ids every line is its own block — the strictest mapping."""
+    if not hint_block_ids or len(hint_block_ids) != len(hint_units):
+        return [[line] for line in hint_units]
+    blocks: list[list[str]] = []
+    previous: int | None = None
+    for line, block_id in zip(hint_units, hint_block_ids):
+        if not blocks or block_id != previous:
+            blocks.append([])
+            previous = block_id
+        blocks[-1].append(line)
+    return blocks
+
+
 def _parse_blocks(text: str) -> list[list[str]]:
-    """Parse a grouping/translation output into ``###`` blocks, each a list of its lines
-    (same line cleaning as ``parse_grouping_output``; a leading ``CATEGORY:`` line is dropped).
-    Flattened, this equals ``parse_grouping_output(text).units``."""
+    """Parse the translated output into ``###``-separated blocks, each a list of its
+    lines (same line cleaning as ``parse_grouping_output``; a leading ``CATEGORY:``
+    line is dropped)."""
     blocks: list[list[str]] = []
     current: list[str] = []
     seen_category = False
@@ -389,18 +404,6 @@ def _parse_blocks(text: str) -> list[list[str]]:
     if current:
         blocks.append(current)
     return blocks
-
-
-def _strip_category(raw: str) -> str:
-    """Drop the leading ``CATEGORY:`` line; keep the ### / newline / | structure as input."""
-    kept: list[str] = []
-    dropped = False
-    for line in str(raw or "").splitlines():
-        if not dropped and line.strip().lower().startswith("category:"):
-            dropped = True
-            continue
-        kept.append(line)
-    return "\n".join(kept).strip()
 
 
 def _translatable_segment(line: str) -> str:
