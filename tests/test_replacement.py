@@ -144,6 +144,27 @@ def test_render_erases_planes_left_over_after_reflow(tmp_path) -> None:
     assert plane2.min() > 200  # the black source text is erased, nothing redrawn there
 
 
+def test_centered_element_anchors_on_its_plane_center(tmp_path) -> None:
+    # The VLM alignment hint: a centered element's line anchors on the plane's centre
+    # instead of its left edge. A short translation of a wide centered original must
+    # land in the middle, not at the left margin.
+    input_path = tmp_path / "input.png"
+    Image.new("RGB", (400, 100), (255, 255, 255)).save(input_path)
+    units = [
+        {"translated_text": "Hi", "alignment": "center", "block_id": 1, "level": "title",
+         "members": [
+             {"cell_id": 1, "text": "Hallo wereld dit is breed", "translate": True,
+              "bbox": {"left": 100, "top": 30, "width": 200, "height": 30}}]},
+    ]
+    png = render_translated_image(input_path, units)
+    out = np.asarray(Image.open(BytesIO(png)).convert("RGB"))
+    columns = np.where(out.min(axis=(0, 2)) < 128)[0]
+    assert len(columns) > 0
+    drawn_center = (columns.min() + columns.max()) / 2
+    assert abs(drawn_center - 200) < 25  # centred on the plane (plane spans 100..300)
+    assert columns.min() > 120  # and NOT anchored at the left edge
+
+
 def test_render_skips_translation_that_cannot_fit_the_footprint(tmp_path) -> None:
     # A chat-reply "translation" on a pictogram-sized cell does not fit even at the
     # smallest font; the footprint rule wins — the original pixels stay untouched

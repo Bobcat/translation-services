@@ -46,11 +46,13 @@ class TranslationUnit:
     # the structured translation can map each translated line back onto its unit. None
     # for leftover cells that matched no hint.
     hint_index: int | None = None
-    # Visual hierarchy of the matched hint line ("title" | "header" | "body" | "footer")
-    # and the id of its blank-line-separated block — the renderer coordinates font sizes
-    # per block/level. None for leftovers and unlabeled lines.
+    # Visual hierarchy of the matched hint line ("title" | "header" | "body" | "footer"),
+    # the id of its element block, and its horizontal alignment ("center", None = left) —
+    # the renderer coordinates font sizes per block/level and anchors lines by alignment.
+    # None for leftovers and unlabeled lines.
     level: str | None = None
     block_id: int | None = None
+    alignment: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -60,6 +62,7 @@ class TranslationUnit:
             "source_text": self.source_text,
             "level": self.level,
             "block_id": self.block_id,
+            "alignment": self.alignment,
             "members": [member.to_dict() for member in self.members],
         }
 
@@ -78,6 +81,7 @@ class GroupingResult:
     hint_units: list[str] = field(default_factory=list)
     hint_levels: list[str | None] = field(default_factory=list)
     hint_block_ids: list[int] = field(default_factory=list)
+    hint_alignments: list[str | None] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {

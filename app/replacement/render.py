@@ -151,6 +151,7 @@ def _plan_group(base: Image.Image, units: list[dict[str, Any]]) -> list[_Job]:
         return []
     font, lines = fitted
     ascent, descent = font.getmetrics()
+    centered = any(str(unit.get("alignment") or "") == "center" for unit in units)
 
     jobs: list[_Job] = []
     for index, plane in enumerate(planes):
@@ -159,8 +160,10 @@ def _plan_group(base: Image.Image, units: list[dict[str, Any]]) -> list[_Job]:
         bg, fg = sample_region_colors(base, geo.axis_bbox(plane["quads"]))
         # Origin = the original line's top-left in the rotated frame — line pitch and
         # perspective follow the original print, whatever the new break positions are.
-        ox, oy = xmin - pad, ymin - pad
-        ex1, ey1 = xmax + pad, ymax + pad
+        # A centered element anchors each line on its plane's CENTRE instead (the VLM
+        # alignment hint); a wrong hint only moves text within the plane, nothing else.
+        oy = ymin - pad
+        ex0, ex1, ey1 = xmin - pad, xmax + pad, ymax + pad
         tile: Image.Image | None = None
         dst_quad: list[tuple[float, float]] | None = None
         line = lines[index] if index < len(lines) else None  # extra planes: erase only
@@ -168,6 +171,7 @@ def _plan_group(base: Image.Image, units: list[dict[str, Any]]) -> list[_Job]:
             text_w = int(font.getlength(line))
             tile_w = max(1, text_w + 2 * int(pad))
             tile_h = max(1, int(ascent + descent) + 2 * int(pad))
+            ox = (xmin + xmax) / 2 - tile_w / 2 if centered else xmin - pad
             tile = Image.new("RGBA", (tile_w, tile_h), (0, 0, 0, 0))
             ImageDraw.Draw(tile).text((int(pad), int(pad)), line, font=font, fill=fg + (255,))
             dst_quad = [
@@ -177,13 +181,14 @@ def _plan_group(base: Image.Image, units: list[dict[str, Any]]) -> list[_Job]:
                 geo.to_image(ox, oy + tile_h, x_axis, y_axis),
             ]
             # Erase the original extent, grown to cover the (possibly wider) line.
+            ex0 = min(ex0, ox)
             ex1 = max(ex1, ox + tile_w)
             ey1 = max(ey1, oy + tile_h)
         erase_quad = [
-            _ipoint(geo.to_image(ox, oy, x_axis, y_axis)),
+            _ipoint(geo.to_image(ex0, oy, x_axis, y_axis)),
             _ipoint(geo.to_image(ex1, oy, x_axis, y_axis)),
             _ipoint(geo.to_image(ex1, ey1, x_axis, y_axis)),
-            _ipoint(geo.to_image(ox, ey1, x_axis, y_axis)),
+            _ipoint(geo.to_image(ex0, ey1, x_axis, y_axis)),
         ]
         jobs.append(_Job(erase_quad=erase_quad, bg_color=bg, tile=tile, dst_quad=dst_quad))
     return jobs

@@ -258,6 +258,19 @@ def test_parse_standalone_label_applies_to_following_lines() -> None:
     assert hint.block_ids == [0, 1]
 
 
+def test_parse_alignment_suffix_in_label() -> None:
+    # Alignment is exception-marked inside the label; unmarked elements stay None (left).
+    raw = (
+        "[Level 2 / Header | centered] VOORGERECHTEN\n"
+        "[Level 3 / Body] Franse vissoep met venkel | € 8,50\n"
+        "[Level 1 / Title | centred]: DINER\n"
+    )
+    hint = parse_grouping_output(raw)
+    assert hint.alignments == ["center", None, "center"]
+    assert hint.levels == ["header", "body", "title"]
+    assert hint.units[0] == "VOORGERECHTEN"
+
+
 def test_parse_labeled_separator_content_is_dropped() -> None:
     # A label wrapping a ruled line ("[Level 3 / Body] ------") is table decoration,
     # not a unit; the receipt rows around it stay separate elements.

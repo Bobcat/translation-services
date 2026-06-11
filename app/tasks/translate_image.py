@@ -164,6 +164,7 @@ def run_translate_image_pipeline(
             "hint_units": list(grouping.hint_units),
             "hint_levels": list(grouping.hint_levels),
             "hint_block_ids": list(grouping.hint_block_ids),
+            "hint_alignments": list(grouping.hint_alignments),
             "units": [unit.to_dict() for unit in grouping.units],
         },
         "translation": [
