@@ -97,6 +97,11 @@ def _plan_unit(base: Image.Image, unit: dict[str, Any]) -> _Job | None:
     fitted = fit_text(translated, max(1, int(region_w)), max_height, wrap=False, max_size=target_size)
 
     text_w = max((int(fitted.font.getlength(line)) for line in fitted.lines), default=0)
+    # fit_text returns its smallest-font attempt even when that still does not fit (a
+    # long chat-reply "translation" on a pictogram-sized cell). The footprint rule wins:
+    # leave the original pixels rather than erase far beyond them.
+    if text_w > max(1, int(region_w)):
+        return None
     tile_w = max(1, text_w + 2 * int(pad))
     tile_h = max(1, fitted.line_height * len(fitted.lines) + 2 * int(pad))
     tile = Image.new("RGBA", (tile_w, tile_h), (0, 0, 0, 0))

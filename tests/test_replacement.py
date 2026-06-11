@@ -60,6 +60,23 @@ def test_render_translated_image_draws_into_translatable_member(tmp_path) -> Non
     assert region.min() < 128
 
 
+def test_render_skips_translation_that_cannot_fit_the_footprint(tmp_path) -> None:
+    # A chat-reply "translation" on a pictogram-sized cell does not fit even at the
+    # smallest font; the footprint rule wins — the original pixels stay untouched
+    # instead of an erase plane far beyond the cell.
+    input_path = tmp_path / "input.png"
+    Image.new("RGB", (200, 100), (10, 10, 10)).save(input_path)
+    units = [
+        {"translated_text": "I cannot translate this because you only provided one letter",
+         "members": [
+             {"cell_id": 1, "text": "i", "translate": True,
+              "bbox": {"left": 5, "top": 5, "width": 12, "height": 14}}]},
+    ]
+    png = render_translated_image(input_path, units)
+    out = np.asarray(Image.open(BytesIO(png)).convert("RGB"))
+    assert out.max() <= 10
+
+
 def test_render_skips_units_without_translation(tmp_path) -> None:
     input_path = tmp_path / "input.png"
     Image.new("RGB", (60, 60), (10, 10, 10)).save(input_path)
