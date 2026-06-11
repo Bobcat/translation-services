@@ -46,6 +46,11 @@ class TranslationUnit:
     # the structured translation can map each translated line back onto its unit. None
     # for leftover cells that matched no hint.
     hint_index: int | None = None
+    # Visual hierarchy of the matched hint line ("title" | "header" | "body" | "footer")
+    # and the id of its blank-line-separated block — the renderer coordinates font sizes
+    # per block/level. None for leftovers and unlabeled lines.
+    level: str | None = None
+    block_id: int | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -53,6 +58,8 @@ class TranslationUnit:
             "order": self.order,
             "bbox": dict(self.bbox),
             "source_text": self.source_text,
+            "level": self.level,
+            "block_id": self.block_id,
             "members": [member.to_dict() for member in self.members],
         }
 
@@ -66,8 +73,11 @@ class GroupingResult:
     metrics: dict[str, float | int] = field(default_factory=dict)
     # The raw VLM grouping output and its per-line hint units — carried through so the
     # structured translation can re-translate the whole block structure in one call.
+    # ``hint_levels`` / ``hint_block_ids`` are parallel to ``hint_units``.
     hint_raw: str = ""
     hint_units: list[str] = field(default_factory=list)
+    hint_levels: list[str | None] = field(default_factory=list)
+    hint_block_ids: list[int] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {

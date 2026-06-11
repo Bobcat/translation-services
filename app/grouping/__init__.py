@@ -63,11 +63,19 @@ def group_cells_into_units(
     )
     grouping_wall_ms = max(0.0, (time.perf_counter() - started) * 1000.0)
 
-    result = build_units_from_hint(cells=cells, hint_units=hint.units, model=resolved_model)
+    result = build_units_from_hint(
+        cells=cells,
+        hint_units=hint.units,
+        model=resolved_model,
+        hint_levels=hint.levels,
+        hint_block_ids=hint.block_ids,
+    )
     return replace(
         result,
         hint_raw=hint.raw,
         hint_units=list(hint.units),
+        hint_levels=list(hint.levels),
+        hint_block_ids=list(hint.block_ids),
         metrics={**result.metrics, "grouping_wall_ms": grouping_wall_ms},
         metadata={
             **result.metadata,

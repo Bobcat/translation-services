@@ -35,6 +35,8 @@ def build_units_from_hint(
     cells: list[dict[str, Any]],
     hint_units: list[str],
     model: str,
+    hint_levels: list[str | None] | None = None,
+    hint_block_ids: list[int] | None = None,
 ) -> GroupingResult:
     hint_token_sets = [set(_tokens(text)) for text in hint_units]
     positions = _reading_positions(cells, len(hint_units))
@@ -45,7 +47,14 @@ def build_units_from_hint(
 
     groups = _group_consecutive(labels)
     units = [
-        _build_unit(cells=cells, indices=indices, unit_id=order, hint_index=label)
+        _build_unit(
+            cells=cells,
+            indices=indices,
+            unit_id=order,
+            hint_index=label,
+            level=_hint_meta(label, hint_levels),
+            block_id=_hint_meta(label, hint_block_ids),
+        )
         for order, (label, indices) in enumerate(groups, start=1)
     ]
     leftover = sum(1 for label, _ in groups if label is None)
@@ -138,8 +147,20 @@ def _group_consecutive(labels: list[int | None]) -> list[tuple[int | None, list[
     return groups
 
 
+def _hint_meta(label: int | None, values: list | None):
+    if label is None or values is None or not (0 <= label < len(values)):
+        return None
+    return values[label]
+
+
 def _build_unit(
-    *, cells: list[dict[str, Any]], indices: list[int], unit_id: int, hint_index: int | None = None
+    *,
+    cells: list[dict[str, Any]],
+    indices: list[int],
+    unit_id: int,
+    hint_index: int | None = None,
+    level: str | None = None,
+    block_id: int | None = None,
 ) -> TranslationUnit:
     members: list[UnitMember] = []
     for order, cell_index in enumerate(indices, start=1):
@@ -165,6 +186,8 @@ def _build_unit(
         bbox=bbox,
         source_text=source_text,
         hint_index=hint_index,
+        level=level,
+        block_id=block_id,
     )
 
 

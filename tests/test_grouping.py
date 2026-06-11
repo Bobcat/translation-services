@@ -133,3 +133,62 @@ def test_parse_grouping_output_strips_bullets_and_separators() -> None:
     hint = parse_grouping_output(raw)
     assert hint.category == ""
     assert hint.units == ["Alpha", "Beta", "Voorgerechten:", "Gamma"]
+
+
+def test_parse_labeled_output_extracts_levels_and_blocks() -> None:
+    raw = (
+        "[Image Classification: Informational sign]\n"
+        "\n"
+        "[Level 1 / Title]: 25 m\n"
+        "\n"
+        "[Level 2 / Header] U bent te gast.\n"
+        "[Level 3 / Body] Zij kunnen u schade toebrengen.\n"
+        "\n"
+        "[Metadata/Footer]: 050 - 313 59 01\n"
+    )
+    hint = parse_grouping_output(raw)
+    assert hint.category == "Informational sign"
+    assert hint.units == [
+        "25 m", "U bent te gast.", "Zij kunnen u schade toebrengen.", "050 - 313 59 01",
+    ]
+    assert hint.levels == ["title", "header", "body", "footer"]
+    assert hint.block_ids == [0, 1, 1, 2]
+
+
+def test_parse_labeled_output_text_inside_bracket_variant() -> None:
+    # The model wavers between "[Label] text" and "[Label: text]" — both must parse.
+    raw = "[Metadata/Footer: 23:53]\n[Level 1 / Title: 48 STUKS]\n"
+    hint = parse_grouping_output(raw)
+    assert hint.units == ["23:53", "48 STUKS"]
+    assert hint.levels == ["footer", "title"]
+
+
+def test_parse_labeled_separator_content_is_dropped() -> None:
+    # A label wrapping a ruled line ("[Level 3 / Body] ------") is table decoration,
+    # not a unit; it must not break the block either.
+    raw = (
+        "[Level 3 / Body] 1 | KARNEMELK | | 1,69 B\n"
+        "[Level 3 / Body] ------------------------\n"
+        "[Level 3 / Body] 20 | SUBTOTAAL | | 60,95\n"
+    )
+    hint = parse_grouping_output(raw)
+    assert hint.units == ["1 | KARNEMELK | | 1,69 B", "20 | SUBTOTAAL | | 60,95"]
+    assert hint.block_ids == [0, 0]
+
+
+def test_units_carry_hint_level_and_block_id() -> None:
+    cells = [
+        {"id": 1, "text": "KARNEMELK", "bbox": {"left": 0, "top": 0, "width": 90, "height": 10}},
+        {"id": 2, "text": "xyzzy", "bbox": {"left": 0, "top": 30, "width": 50, "height": 10}},
+    ]
+    result = build_units_from_hint(
+        cells=cells,
+        hint_units=["KARNEMELK", "iets anders"],
+        model="qwen",
+        hint_levels=["body", "footer"],
+        hint_block_ids=[0, 1],
+    )
+    matched = next(u for u in result.units if u.hint_index == 0)
+    leftover = next(u for u in result.units if u.hint_index is None)
+    assert matched.level == "body" and matched.block_id == 0
+    assert leftover.level is None and leftover.block_id is None
