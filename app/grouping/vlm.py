@@ -32,46 +32,41 @@ _RESPONSES_PATH = "/v1/responses"
 _MAX_OUTPUT_TOKENS = 4096
 
 # Sent as the user turn; the system role stays blank (llm-pool uses " "). Kept generic
-# on purpose — no wording tied to a specific image type. Design (verified on all
-# data/test-images/):
-#   - "every printed line is exactly one line of output" keeps each ORIGINAL line as
-#     its own hint line, so align maps each OCR cell onto its line ~1:1 and every line
-#     re-places onto its own cell at its own size — faithful to the original layout.
+# on purpose — no wording tied to a specific image type. Design (the user's original
+# structural-analysis prompt + only the Tables rule; verified on all data/test-images/):
+#   - ELEMENT level: one labeled line per semantic element (a whole dish with its
+#     wrapped lines merged, a receipt row, a paragraph). The label boundary IS the item
+#     boundary — each labeled line becomes its own block, and the renderer reflows the
+#     translation over the element's physical lines (recovered by geometry).
 #   - the hierarchy labels ([Level 1 / Title] ... [Metadata/Footer]) carry the visual
 #     size/weight hierarchy OCR cannot give; parse_grouping_output strips them into a
 #     per-line level.
-#   - "table row -> '|' between its fields" marks tabular layout (receipt columns, a
-#     menu price) so a row's fields stay distinct.
-#   - the blank line between ITEMS becomes the per-line block id — the renderer
-#     reflows the translation within a block, so a block must never span two
-#     unrelated items. "items, paragraphs or sections" (not "blocks") is what makes
-#     the model separate at item level; keep it free of image-type-specific examples.
+#   - "table row -> '|' between its fields" marks tabular layout; at element level it
+#     also splits a menu dish from its price column.
 # Price/number cells are flagged non-translatable in align (_is_nontranslatable); the
 # '|' itself is not yet parsed into field structure.
 _SYSTEM_PROMPT = " "
 
 _USER_INSTRUCTION = (
     "**Perform a structural analysis of the text in this image. Reconstruct the "
-    "document's hierarchy by labeling each line in its natural reading order.**\n\n"
+    "document's hierarchy by labeling each element in its natural reading order.**\n\n"
     "**Instructions:**\n"
     "1. **Analyze Visual Cues:** Use font size, font weight (boldness), spatial "
     "positioning, and grouping to determine the importance of each text element.\n"
     "2. **Linear Labeling (Do Not Group):** Do **not** group all elements of the same "
     "level together. Instead, process the text from top to bottom, following the "
-    "natural reading order. **Preserve the original line breaks: every printed line of "
-    "the document is exactly one line of output, even when a sentence wraps over "
-    "several lines.** Immediately precede every line with its classification:\n"
+    "natural reading order. For every piece of text, immediately precede it with its "
+    "classification:\n"
     "    * **[Level 1 / Title]:** The most prominent text (largest/boldest).\n"
     "    * **[Level 2 / Header]:** Sub-headings that introduce new sections.\n"
     "    * **[Level 3 / Body]:** Descriptive or supporting text.\n"
     "    * **[Metadata/Footer]:** Small text at the edges, such as contact info, "
     "dates, or fine print.\n"
-    "3. **Tables:** If a line is a table row, put '|' between its fields.\n"
+    "3. **Tables:** If an element is a table row, put '|' between its fields.\n"
     "4. **Output Format:** Present the final structure using **Markdown formatting**. "
     "The output must begin with a single line in the format **[Image Classification: "
-    "<short description>]**, followed by a continuous stream of labeled lines that "
-    "follows the visual flow of the document, with a blank line between separate "
-    "items, paragraphs or sections. Output only the text."
+    "<short description>]**, followed by a continuous stream of labeled text that "
+    "follows the visual flow of the document. Output only the text."
 )
 
 _MIME_BY_SUFFIX = {
@@ -156,9 +151,10 @@ def parse_grouping_output(output_text: str) -> GroupingHint:
     The leading ``[Image Classification: ...]`` line becomes the category; every other
     non-empty line is one unit. A ``[Level n / ...]`` / ``[Metadata/Footer]`` prefix is
     stripped into the line's level — the model wavers between ``[Label] text``,
-    ``[Label: text]`` and a standalone ``[Label]`` line above the text; all three parse,
-    and unlabeled lines (a dish's wrapped continuation) inherit the block's level.
-    Blank lines and separator lines (``###`` / ``-----``) advance the block id; leading
+    ``[Label: text]`` and a standalone ``[Label]`` line above the text; all three parse.
+    Every LABELED line starts a new block (the label boundary is the element boundary);
+    unlabeled lines (a wrapped continuation) join the block and inherit its level.
+    Blank lines and separator lines (``###`` / ``-----``) also close the block; leading
     bullet/markdown markers are dropped. A legacy ``CATEGORY:`` first line still parses
     as the category.
     """
@@ -195,6 +191,7 @@ def parse_grouping_output(output_text: str) -> GroupingHint:
                 continue
             level = _level_of(label)
             if level is not None:
+                close_block()  # a label starts a new element
                 line = text
                 block_level = level
                 if not line:  # standalone "[Level 3 / Body]" -> labels the lines below

@@ -43,10 +43,16 @@ def build_units_from_hint(
     hint_token_sets = [set(_tokens(text)) for text in hint_units]
     matches = [_match_scores(cell, hint_token_sets) for cell in cells]
     positions = _anchored_positions(cells, matches, len(hint_units))
-    labels = [
-        _pick_hint(match, preferred_index=pos)
-        for match, pos in zip(matches, positions)
-    ]
+    labels: list[int | None] = []
+    previous_label: int | None = None
+    previous_cell: dict[str, Any] | None = None
+    for cell, match, position in zip(cells, matches, positions):
+        sticky = previous_label if _is_continuation(previous_cell, cell) else None
+        label = _pick_hint(match, preferred_index=position, sticky=sticky)
+        labels.append(label)
+        if label is not None:
+            previous_label = label
+            previous_cell = cell
 
     groups = _group_consecutive(labels)
     units = [
@@ -106,13 +112,34 @@ def _match_scores(cell: dict[str, Any], hint_token_sets: list[set[str]]) -> _Mat
     )
 
 
-def _pick_hint(match: _Match, *, preferred_index: float = 0.0) -> int | None:
+def _pick_hint(
+    match: _Match, *, preferred_index: float = 0.0, sticky: int | None = None
+) -> int | None:
     if not match.candidates or match.score < _MATCH_THRESHOLD:
         return None
     # Several hint lines can match a short cell equally (two dishes ending "en frites").
-    # Break the tie by reading position: bind the cell to the hint nearest its place on the
-    # page, not just the first in the list.
+    # A continuation cell stays with its element (axis-aligned tops are tilt-distorted,
+    # so position alone is a coin flip near an element boundary); otherwise bind the
+    # cell to the hint nearest its place on the page.
+    if sticky is not None and sticky in match.candidates:
+        return sticky
     return min(match.candidates, key=lambda index: abs(index - preferred_index))
+
+
+def _is_continuation(previous_cell: dict[str, Any] | None, cell: dict[str, Any]) -> bool:
+    """A wrapped continuation line starts at ~the same left margin as, and directly
+    below, its element's previous line. A price in the right column or the next row of
+    a receipt does not qualify, so genuinely repeated rows ("BONUS ...") still bind by
+    position."""
+    if previous_cell is None:
+        return False
+    prev, this = previous_cell.get("bbox") or {}, cell.get("bbox") or {}
+    height = float(this.get("height") or 0.0) or float(prev.get("height") or 0.0)
+    if height <= 0:
+        return False
+    drop = float(this.get("top") or 0.0) - float(prev.get("top") or 0.0)
+    indent = abs(float(this.get("left") or 0.0) - float(prev.get("left") or 0.0))
+    return 0 < drop <= 2.5 * height and indent <= 2.0 * height
 
 
 def _token_score(token: str, hint_set: set[str]) -> float:
@@ -214,12 +241,20 @@ def _linear_positions(tops: list[float], n_hints: int) -> list[float]:
 
 
 def _group_consecutive(labels: list[int | None]) -> list[tuple[int | None, list[int]]]:
+    """Runs of one label form a unit. A leftover (None) is its own unit but does NOT
+    break the surrounding run: an interleaved noise cell must not split an element in
+    two — the structured translation would land on both halves and render twice."""
     groups: list[tuple[int | None, list[int]]] = []
+    current: tuple[int | None, list[int]] | None = None
     for cell_index, label in enumerate(labels):
-        if label is not None and groups and groups[-1][0] == label:
-            groups[-1][1].append(cell_index)
+        if label is None:
+            groups.append((None, [cell_index]))
+            continue
+        if current is not None and current[0] == label:
+            current[1].append(cell_index)
         else:
-            groups.append((label, [cell_index]))
+            current = (label, [cell_index])
+            groups.append(current)
     return groups
 
 
