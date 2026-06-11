@@ -249,6 +249,30 @@ def test_parse_continuation_lines_inherit_block_level_and_block() -> None:
     assert hint.block_ids == [0, 0, 1, 1]
 
 
+def test_parse_label_wrapped_in_markdown_bold() -> None:
+    # We ask for Markdown, so the model sometimes wraps the label in bold:
+    # "**[Level 1 / Title | centered]** DINER". The label must still parse, or every
+    # line falls into block 0 with no level and the whole document reflows as one group.
+    raw = (
+        "**[Level 1 / Title | centered]** DINER\n"
+        "**[Level 3 / Body]** Franse vissoep | € 8,50\n"
+        "**[Level 2 / Header]:** HOOFDGERECHTEN\n"
+    )
+    hint = parse_grouping_output(raw)
+    assert hint.units == ["DINER", "Franse vissoep | € 8,50", "HOOFDGERECHTEN"]
+    assert hint.levels == ["title", "body", "header"]
+    assert hint.alignments == ["center", None, None]
+    assert hint.block_ids == [0, 1, 2]
+
+
+def test_parse_level_label_without_type_word() -> None:
+    # The model sometimes drops the "/ Body" part: "[Level 3]" / "[Level 3 | centered]".
+    raw = "[Level 3] 25 m\n[Level 3 | centered] U bent te gast.\n"
+    hint = parse_grouping_output(raw)
+    assert hint.levels == ["body", "body"]
+    assert hint.alignments == [None, "center"]
+
+
 def test_parse_standalone_label_applies_to_following_lines() -> None:
     # Receipt style: the label on its own line, the text below it.
     raw = "[Level 2 / Header]\nBETAALD MET:\n\n[Level 3 / Body]\nPINNEN | 58,51\n"

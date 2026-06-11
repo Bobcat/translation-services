@@ -139,7 +139,9 @@ def request_grouping_hint(
     return parse_grouping_output(output_text)
 
 
-_LABELED_LINE = re.compile(r"^\[(?P<label>[^\[\]]+)\]\s*:?\s*(?P<rest>.*)$")
+# The model emits the label in Markdown (we ask for it), so tolerate bold/emphasis and a
+# colon around the bracket: "**[Level 1 / Title]** text", "[Level 3 / Body]: text", etc.
+_LABELED_LINE = re.compile(r"^\**\s*\[(?P<label>[^\[\]]+)\]\**\s*:?\s*\**\s*(?P<rest>.*)$")
 
 # Substring -> level, checked in order. "level N" first: the model sometimes drops the
 # word after the slash; the word checks catch the "[Metadata/Footer]" style labels.
