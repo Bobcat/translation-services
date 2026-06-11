@@ -42,7 +42,10 @@ _MAX_OUTPUT_TOKENS = 4096
 #     per-line level.
 #   - "table row -> '|' between its fields" marks tabular layout (receipt columns, a
 #     menu price) so a row's fields stay distinct.
-#   - the blank line between blocks becomes the per-line block id.
+#   - the blank line between ITEMS becomes the per-line block id — the renderer
+#     reflows the translation within a block, so a block must never span two
+#     unrelated items. "items, paragraphs or sections" (not "blocks") is what makes
+#     the model separate at item level; keep it free of image-type-specific examples.
 # Price/number cells are flagged non-translatable in align (_is_nontranslatable); the
 # '|' itself is not yet parsed into field structure.
 _SYSTEM_PROMPT = " "
@@ -68,7 +71,7 @@ _USER_INSTRUCTION = (
     "The output must begin with a single line in the format **[Image Classification: "
     "<short description>]**, followed by a continuous stream of labeled lines that "
     "follows the visual flow of the document, with a blank line between separate "
-    "blocks. Output only the text."
+    "items, paragraphs or sections. Output only the text."
 )
 
 _MIME_BY_SUFFIX = {
@@ -152,10 +155,12 @@ def parse_grouping_output(output_text: str) -> GroupingHint:
 
     The leading ``[Image Classification: ...]`` line becomes the category; every other
     non-empty line is one unit. A ``[Level n / ...]`` / ``[Metadata/Footer]`` prefix is
-    stripped into the line's level (the model wavers between ``[Label] text`` and
-    ``[Label: text]`` — both parse). Blank lines and separator lines (``###`` /
-    ``-----``) advance the block id; leading bullet/markdown markers are dropped.
-    A legacy ``CATEGORY:`` first line still parses as the category.
+    stripped into the line's level — the model wavers between ``[Label] text``,
+    ``[Label: text]`` and a standalone ``[Label]`` line above the text; all three parse,
+    and unlabeled lines (a dish's wrapped continuation) inherit the block's level.
+    Blank lines and separator lines (``###`` / ``-----``) advance the block id; leading
+    bullet/markdown markers are dropped. A legacy ``CATEGORY:`` first line still parses
+    as the category.
     """
     category = ""
     units: list[str] = []
@@ -163,12 +168,14 @@ def parse_grouping_output(output_text: str) -> GroupingHint:
     block_ids: list[int] = []
     block = 0
     block_open = False
+    block_level: str | None = None
 
     def close_block() -> None:
-        nonlocal block, block_open
+        nonlocal block, block_open, block_level
         if block_open:
             block += 1
             block_open = False
+        block_level = None
 
     for raw in str(output_text or "").splitlines():
         line = raw.strip()
@@ -189,6 +196,11 @@ def parse_grouping_output(output_text: str) -> GroupingHint:
             level = _level_of(label)
             if level is not None:
                 line = text
+                block_level = level
+                if not line:  # standalone "[Level 3 / Body]" -> labels the lines below
+                    continue
+        if level is None:
+            level = block_level  # continuation line inherits the block's level
         if not category and not units and line.lower().startswith("category:"):
             category = line.split(":", 1)[1].strip()
             continue

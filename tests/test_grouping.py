@@ -202,6 +202,30 @@ def test_parse_labeled_output_text_inside_bracket_variant() -> None:
     assert hint.levels == ["footer", "title"]
 
 
+def test_parse_continuation_lines_inherit_block_level_and_block() -> None:
+    # Menu style: label on the dish's first line, wrapped continuation below it without
+    # a label, blank line between dishes. The continuation inherits level AND block.
+    raw = (
+        "[Level 3 / Body] Biefstuk van de grill met rode wijn | € 18,75\n"
+        "jus, sjalotten, spitskool en frites\n"
+        "\n"
+        "[Level 3 / Body] HESP classic burger met kaas, | € 14\n"
+        "tomaat, augurk, uitjes en frites\n"
+    )
+    hint = parse_grouping_output(raw)
+    assert hint.levels == ["body", "body", "body", "body"]
+    assert hint.block_ids == [0, 0, 1, 1]
+
+
+def test_parse_standalone_label_applies_to_following_lines() -> None:
+    # Receipt style: the label on its own line, the text below it.
+    raw = "[Level 2 / Header]\nBETAALD MET:\n\n[Level 3 / Body]\nPINNEN | 58,51\n"
+    hint = parse_grouping_output(raw)
+    assert hint.units == ["BETAALD MET:", "PINNEN | 58,51"]
+    assert hint.levels == ["header", "body"]
+    assert hint.block_ids == [0, 1]
+
+
 def test_parse_labeled_separator_content_is_dropped() -> None:
     # A label wrapping a ruled line ("[Level 3 / Body] ------") is table decoration,
     # not a unit; it must not break the block either.
