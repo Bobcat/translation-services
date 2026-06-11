@@ -4,6 +4,7 @@ from io import BytesIO
 
 import numpy as np
 from PIL import Image
+from PIL import ImageDraw
 
 from app.replacement.color import sample_region_colors
 from app.replacement.fit import fit_text
@@ -58,6 +59,67 @@ def test_render_translated_image_draws_into_translatable_member(tmp_path) -> Non
     region = np.asarray(out.crop((20, 30, 160, 70)))
     # text was drawn (black on white) -> the region is no longer all-white
     assert region.min() < 128
+
+
+def test_render_reflows_a_block_over_its_original_planes(tmp_path) -> None:
+    # Two lines of one block (a wrapped dish): the joined translation re-breaks freely;
+    # line 2 may exceed its own plane width (up to the block's widest plane), so the
+    # long second translation still lands readable on plane 2 instead of shrinking alone.
+    input_path = tmp_path / "input.png"
+    Image.new("RGB", (400, 120), (255, 255, 255)).save(input_path)
+    units = [
+        {"translated_text": "Grilled steak with", "block_id": 7, "level": "body",
+         "members": [
+             {"cell_id": 1, "text": "Biefstuk van de grill", "translate": True,
+              "bbox": {"left": 20, "top": 10, "width": 300, "height": 30}}]},
+        {"translated_text": "red wine jus and fries on top", "block_id": 7, "level": "body",
+         "members": [
+             {"cell_id": 2, "text": "jus en frites", "translate": True,
+              "bbox": {"left": 20, "top": 50, "width": 120, "height": 30}}]},
+    ]
+    png = render_translated_image(input_path, units)
+    out = Image.open(BytesIO(png)).convert("RGB")
+    line1 = np.asarray(out.crop((20, 10, 320, 40)))
+    line2 = np.asarray(out.crop((20, 50, 320, 90)))
+    assert line1.min() < 128  # text drawn on plane 1
+    assert line2.min() < 128  # text drawn on plane 2, wider than its own 120px plane
+
+
+def test_interleaved_leftover_does_not_break_a_reflow_group(tmp_path) -> None:
+    # An OCR noise cell ("L") lands between a dish's two lines in reading order; its
+    # leftover unit must not split the block back into per-line fitting.
+    from app.replacement.render import _groups
+
+    units = [
+        {"id": 1, "block_id": 13, "level": "body"},
+        {"id": 2, "block_id": None, "level": None},
+        {"id": 3, "block_id": 13, "level": "body"},
+    ]
+    groups = _groups(units)
+    assert [[u["id"] for u in g] for g in groups] == [[1, 3], [2]]
+
+
+def test_render_erases_planes_left_over_after_reflow(tmp_path) -> None:
+    # The translation needs fewer lines than the original: the unused plane still gets
+    # erased so no source text peeks through.
+    input_path = tmp_path / "input.png"
+    base = Image.new("RGB", (400, 120), (255, 255, 255))
+    ImageDraw.Draw(base).rectangle((30, 55, 130, 75), fill=(0, 0, 0))  # "source text" on plane 2
+    base.save(input_path)
+    units = [
+        {"translated_text": "Hello", "block_id": 3, "level": "body",
+         "members": [
+             {"cell_id": 1, "text": "Hallo wereld dit is lang", "translate": True,
+              "bbox": {"left": 20, "top": 10, "width": 300, "height": 30}}]},
+        {"translated_text": "yes", "block_id": 3, "level": "body",
+         "members": [
+             {"cell_id": 2, "text": "vervolgregel", "translate": True,
+              "bbox": {"left": 20, "top": 50, "width": 120, "height": 30}}]},
+    ]
+    png = render_translated_image(input_path, units)
+    out = np.asarray(Image.open(BytesIO(png)).convert("RGB"))
+    plane2 = out[52:78, 25:135]
+    assert plane2.min() > 200  # the black source text is erased, nothing redrawn there
 
 
 def test_render_skips_translation_that_cannot_fit_the_footprint(tmp_path) -> None:
