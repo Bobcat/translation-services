@@ -1,10 +1,10 @@
 """Align the VLM grouping hint onto the authoritative OCR cells and build units.
 
-OCR cells are the source of truth (text + bbox). The VLM hint is a list of
-text-block strings in reading order. This module assigns each cell to the hint
-block it best matches (normalised token overlap), groups consecutive cells with
-the same assignment into a unit, and turns every unmatched cell into its own
-unit. Because we build the units, coverage is guaranteed: every cell
+OCR cells are the source of truth for positions; the VLM hint is the source of
+truth for text/structure. This module assigns each cell to the hint block it
+best matches (normalised token overlap, tolerant to OCR garble), groups
+consecutive cells with the same assignment into a unit, and turns every
+unmatched cell into its own unit. Because we build the units, coverage is guaranteed: every cell
 ends up in exactly one unit, so a weak/incomplete hint lowers quality but never
 fails the job.
 
@@ -13,6 +13,7 @@ by small rules, not by the model.
 """
 from __future__ import annotations
 
+import difflib
 import re
 import unicodedata
 from typing import Any
@@ -24,6 +25,8 @@ from app.grouping.units import union_bbox
 
 
 _MATCH_THRESHOLD = 0.4
+_FUZZY_MIN_LEN = 4
+_FUZZY_RATIO = 0.8
 _URL_SUFFIX = re.compile(r"\.(com|nl|org|net|io|de|fr|co|eu)\b")
 
 
@@ -69,12 +72,12 @@ def _best_hint(
     cell_tokens = _tokens(str(cell.get("text") or ""))
     if not cell_tokens:
         return None
-    matched_by_index: list[tuple[int, int]] = []
-    best_matched = 0
+    matched_by_index: list[tuple[int, float]] = []
+    best_matched = 0.0
     for index, hint_set in enumerate(hint_token_sets):
         if not hint_set:
             continue
-        matched = sum(1 for token in cell_tokens if token in hint_set)
+        matched = sum(_token_score(token, hint_set) for token in cell_tokens)
         if matched:
             matched_by_index.append((index, matched))
             if matched > best_matched:
@@ -86,6 +89,32 @@ def _best_hint(
     # page, not just the first in the list.
     tied = [index for index, matched in matched_by_index if matched == best_matched]
     return min(tied, key=lambda index: abs(index - preferred_index))
+
+
+def _token_score(token: str, hint_set: set[str]) -> float:
+    """1.0 exact, else fuzzy (slightly lower, so exact wins a tie) for OCR garble: the cell
+    must still bind to its clean VLM line when OCR splits a word ("Kaar thouder" vs
+    "Kaarthouder") or drops/adds a character ("AHNEDAARDBEI" vs "AHNEDAARBEI") — otherwise
+    the cell becomes a leftover, the per-unit fallback translates the garbled text in
+    isolation, and the good structured translation of the VLM line is orphaned. Fuzzy =
+    substring or high character similarity, both only for tokens long enough that they
+    cannot collide by chance; below exact so "Kaart" still binds its own line, not
+    "Kaarthouder"."""
+    if token in hint_set:
+        return 1.0
+    if len(token) < _FUZZY_MIN_LEN:
+        return 0.0
+    for hint_token in hint_set:
+        if len(hint_token) < _FUZZY_MIN_LEN:
+            continue
+        if token in hint_token or hint_token in token:
+            return 0.9
+        shorter, longer = sorted((len(token), len(hint_token)))
+        if 2 * shorter / (shorter + longer) < _FUZZY_RATIO:  # ratio can't reach the bar
+            continue
+        if difflib.SequenceMatcher(None, token, hint_token).ratio() >= _FUZZY_RATIO:
+            return 0.9
+    return 0.0
 
 
 def _reading_positions(cells: list[dict[str, Any]], n_hints: int) -> list[float]:
