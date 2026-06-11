@@ -102,7 +102,8 @@ def _groups(units: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
 
 
 def _plan_group(base: Image.Image, units: list[dict[str, Any]]) -> list[_Job]:
-    rows: list[tuple[list, str]] = []
+    texts: list[str] = []
+    group_quads: list = []
     for unit in units:
         translated = str(unit.get("translated_text") or "").strip()
         if len(translated) <= 1:  # empty / OCR-noise single char -> leave the original alone
@@ -111,13 +112,18 @@ def _plan_group(base: Image.Image, units: list[dict[str, Any]]) -> list[_Job]:
         quads = [quad for quad in (geo.quad_of(m) for m in members) if quad is not None]
         if not quads:
             continue
-        rows.append((quads, translated))
-    if not rows:
+        texts.append(translated)
+        group_quads.extend(quads)
+    if not texts:
         return []
 
-    angle = median(geo.angle_deg(quad) for quads, _ in rows for quad in quads)
+    # Planes come from geometry, not from the unit shape: cluster the group's member
+    # quads into physical text lines. An element-level hint yields ONE unit spanning
+    # several printed lines; a per-line hint yields one unit per line — both cluster
+    # to the same planes.
+    angle = median(geo.angle_deg(quad) for quad in group_quads)
     planes: list[dict[str, Any]] = []
-    for quads, _ in rows:
+    for quads in _line_clusters(group_quads, angle):
         true_height = median(geo.line_height(quad) for quad in quads)
         x_axis, y_axis, xmin, xmax, ymin, ymax = geo.oriented_frame(quads, angle)
         planes.append({
@@ -133,7 +139,7 @@ def _plan_group(base: Image.Image, units: list[dict[str, Any]]) -> list[_Job]:
     # at most the original line count, every line capped at the group's WIDEST plane.
     # Slack on a short original line is pooled into the next line instead of that line
     # shrinking alone ("jus," may move up behind "red wine").
-    joined = " ".join(translated for _, translated in rows)
+    joined = " ".join(texts)
     fitted = _fit_group(
         joined,
         start=min(plane["target"] for plane in planes),
@@ -181,6 +187,28 @@ def _plan_group(base: Image.Image, units: list[dict[str, Any]]) -> list[_Job]:
         ]
         jobs.append(_Job(erase_quad=erase_quad, bg_color=bg, tile=tile, dst_quad=dst_quad))
     return jobs
+
+
+def _line_clusters(quads: list, angle: float) -> list[list]:
+    """Cluster member quads into physical text lines (top to bottom in the oriented
+    frame): a quad whose vertical centre falls inside the running cluster's extent is
+    on the same line; line pitch puts the next line's centre below it."""
+    measured = []
+    for quad in quads:
+        _, _, _, _, oymin, oymax = geo.oriented_frame([quad], angle)
+        measured.append((oymin, oymax, quad))
+    measured.sort(key=lambda item: (item[0] + item[1]) / 2)
+    clusters: list[list] = []
+    extent_max = float("-inf")
+    for oymin, oymax, quad in measured:
+        center = (oymin + oymax) / 2
+        if clusters and center <= extent_max:
+            clusters[-1].append(quad)
+            extent_max = max(extent_max, oymax)
+        else:
+            clusters.append([quad])
+            extent_max = oymax
+    return clusters
 
 
 def _fit_group(
