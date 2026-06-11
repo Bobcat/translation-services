@@ -15,8 +15,10 @@ call, ``|`` fields kept) and map each translated line back onto its unit by
 WORKS IF YOU DO." is not split into "THE SHOE"). When no hint is available or the model
 does not preserve the structure, it falls back to a **numbered list** (a numbered list
 in/out, mapped back by number); any unit still missing falls back to a single per-unit
-call. ``translategemma`` (single-text template) stays one-call-per-unit. Units with no
-translatable text (a bare price/number) are skipped.
+call. ``translategemma`` (single-text template) stays one-call-per-unit. Leftover units
+(no hint line) ride along as a final extra block, so they are translated with document
+context instead of in isolation. Units with no translatable text (a bare price/number)
+or OCR noise (a pictogram read as "i") are skipped.
 """
 from __future__ import annotations
 
@@ -87,7 +89,11 @@ def translate_units(
         target_lang_code=target_lang_code,
         source_text="",
     )
-    translatable = [(unit.id, str(unit.source_text or "").strip()) for unit in units if str(unit.source_text or "").strip()]
+    translatable = [
+        (unit.id, text)
+        for unit in units
+        if (text := str(unit.source_text or "").strip()) and not _is_noise(text)
+    ]
 
     # Instruction-based modes translate in ONE call (translategemma can't batch). Preferred
     # path: STRUCTURED — re-translate the clean hint lines (blocks / newlines / | fields)
@@ -121,14 +127,14 @@ def translate_units(
     results: list[TranslatedUnit] = []
     for unit in units:
         source_text = str(unit.source_text or "").strip()
-        if not source_text:
+        if not source_text or _is_noise(source_text):
             results.append(
                 TranslatedUnit(
                     unit_id=unit.id,
                     source_text=unit.source_text,
                     translated_text="",
                     translator_model="",
-                    translation_route="skipped_empty",
+                    translation_route="skipped_empty" if not source_text else "skipped_noise",
                 )
             )
             continue
@@ -312,11 +318,22 @@ def _translate_structured(
 ) -> dict[int, str]:
     """Translate all clean hint lines in ONE call — blocks joined by ``###`` separator
     lines, newlines and ``|`` fields preserved — then map each translated line back onto
-    its unit by ``hint_index``. Returns ``{unit_id: translation}``; empty (so the caller
+    its unit by ``hint_index``. Leftover units (no hint line) are appended as one extra
+    block and mapped back by position, so they get document context instead of an
+    isolated per-unit call. Returns ``{unit_id: translation}``; empty (so the caller
     falls back to the numbered-list batch) if the model did not preserve the structure."""
     if not str(model or "").strip():
         raise TranslationError("translator_model is required to translate units")
     source_blocks = _blocks_of(hint_units, hint_block_ids)
+    leftovers = [
+        (unit.id, text)
+        for unit in units
+        if unit.hint_index is None
+        and (text := str(unit.source_text or "").strip())
+        and not _is_noise(text)
+    ]
+    if leftovers:
+        source_blocks = source_blocks + [[text for _unit_id, text in leftovers]]
     payload: dict[str, Any] = {
         "model": model,
         "input": "\n###\n".join("\n".join(block) for block in source_blocks),
@@ -347,8 +364,10 @@ def _translate_structured(
     aligned: list[str | None] = []
     for src_block, dst_block in zip(source_blocks, translated_blocks):
         aligned.extend(dst_block if len(src_block) == len(dst_block) else [None] * len(src_block))
-    if len(aligned) != len(hint_units):
+    if len(aligned) != len(hint_units) + len(leftovers):
         return {}
+    leftover_aligned = aligned[len(hint_units):]
+    aligned = aligned[: len(hint_units)]
     out: dict[int, str] = {}
     for unit in units:
         index = unit.hint_index
@@ -360,6 +379,12 @@ def _translate_structured(
         text = _translatable_segment(line)
         if text:
             out[unit.id] = text
+    for (unit_id, _source), line in zip(leftovers, leftover_aligned):
+        if line is None:
+            continue
+        text = _translatable_segment(line)
+        if text:
+            out[unit_id] = text
     return out
 
 
@@ -404,6 +429,15 @@ def _parse_blocks(text: str) -> list[list[str]]:
     if current:
         blocks.append(current)
     return blocks
+
+
+def _is_noise(text: str) -> bool:
+    """OCR junk (a pictogram read as "i", a stray "GM"/"s0") — never send it to the
+    model: it wastes a call and the model may chat back ("Good morning", "I cannot
+    translate…") instead of translating. Two ASCII chars cannot be meaningful standalone
+    text; short CJK (危險) can be, and stays translatable."""
+    stripped = str(text or "").strip()
+    return len(stripped) <= 2 and stripped.isascii()
 
 
 def _translatable_segment(line: str) -> str:
