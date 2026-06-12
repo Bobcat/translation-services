@@ -48,6 +48,11 @@ class OcrSettings:
     ocr_version: str = "PP-OCRv5"
     text_det_limit_side_len: int = 2048
     text_det_limit_type: str = "max"
+    # Explicit PaddleOCR model names; when set they override the lang-based model
+    # selection (e.g. "PP-OCRv5_server_det" / "PP-OCRv5_server_rec" for the
+    # multilingual server pair that also recognizes CJK).
+    det_model: str = ""
+    rec_model: str = ""
 
 
 @dataclass(frozen=True)
@@ -115,6 +120,8 @@ def load_settings(path: str | Path | None = None) -> AppSettings:
             ocr_version=str(ocr_payload.get("ocr_version", "PP-OCRv5") or "").strip() or "PP-OCRv5",
             text_det_limit_side_len=max(64, int(ocr_payload.get("text_det_limit_side_len", 2048))),
             text_det_limit_type=_text_det_limit_type(ocr_payload.get("text_det_limit_type", "max")),
+            det_model=str(ocr_payload.get("det_model", "") or "").strip(),
+            rec_model=str(ocr_payload.get("rec_model", "") or "").strip(),
         ),
     )
 

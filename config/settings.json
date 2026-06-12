@@ -29,6 +29,8 @@
     "device": "gpu:0",
     "ocr_version": "PP-OCRv5",
     "text_det_limit_side_len": 2048,
-    "text_det_limit_type": "max"
+    "text_det_limit_type": "max",
+    "det_model": "",
+    "rec_model": ""
   }
 }
