@@ -152,8 +152,17 @@ def _distance(a: tuple[float, float], b: tuple[float, float]) -> float:
 
 
 def _get_paddleocr_engine(settings: OcrSettings, language: str) -> Any:
+    det_model = str(settings.det_model or "").strip()
+    rec_model = str(settings.rec_model or "").strip()
+    lang = str(language or "en")
+    # Explicit model names override PaddleOCR's lang-based selection. When both are
+    # set the engine no longer depends on the source language, so collapse it in the
+    # cache key to avoid spinning up one (heavy) engine per source language.
+    lang_key = "*" if (det_model and rec_model) else lang
     key = (
-        str(language or "en"),
+        lang_key,
+        det_model,
+        rec_model,
         str(settings.ocr_version or "PP-OCRv5"),
         str(settings.device or "cpu"),
         int(settings.text_det_limit_side_len),
@@ -170,14 +179,16 @@ def _get_paddleocr_engine(settings: OcrSettings, language: str) -> Any:
 
         try:
             engine = PaddleOCR(
-                lang=key[0],
-                ocr_version=key[1],
-                device=key[2],
+                lang=lang,
+                ocr_version=str(settings.ocr_version or "PP-OCRv5"),
+                device=str(settings.device or "cpu"),
+                text_detection_model_name=det_model or None,
+                text_recognition_model_name=rec_model or None,
                 use_doc_orientation_classify=False,
                 use_doc_unwarping=False,
                 use_textline_orientation=False,
-                text_det_limit_side_len=key[3],
-                text_det_limit_type=key[4],
+                text_det_limit_side_len=int(settings.text_det_limit_side_len),
+                text_det_limit_type=str(settings.text_det_limit_type),
             )
         except Exception as exc:
             raise RuntimeError(f"failed to initialize paddleocr: {exc}") from exc
