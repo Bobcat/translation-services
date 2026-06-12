@@ -1,13 +1,26 @@
 from __future__ import annotations
 
+import math
 from pathlib import Path
 import threading
 from typing import Any
+
+import numpy as np
+from PIL import Image
 
 from app.core.config import OcrSettings
 from app.ocr.merging import merge_same_line_segments
 from app.ocr.segment import bbox_polygon
 from app.ocr.segment import OcrSegment
+
+
+# PaddleX's get_rotate_crop_image rotates any recognition crop whose
+# height/width >= this ratio by 90 degrees, on the assumption that a tall-thin
+# crop is a vertical text line. For isolated tall glyphs (e.g. a single '1' in a
+# receipt's quantity column) that assumption is wrong: the rotated digit reads as
+# 'T'/'I'/'V'/'7' at low confidence and gets dropped. We re-recognize exactly
+# those crops upright. See _correct_rotated_tall_text.
+_ROTATED_TALL_RATIO = 1.5
 
 
 _PADDLEOCR_LANGUAGE_BY_SOURCE = {
@@ -46,43 +59,96 @@ def run_paddleocr(
 ) -> list[OcrSegment]:
     resolved_language = str(language or settings.language or "").strip() or "en"
     engine = _get_paddleocr_engine(settings, resolved_language)
-    try:
-        with _PADDLEOCR_LOCK:
-            results = engine.predict(str(input_path))
-    except Exception as exc:
-        raise RuntimeError(f"paddleocr failed: {exc}") from exc
 
     segments: list[OcrSegment] = []
-    for result in results or []:
-        payload = _paddleocr_result_payload(result)
-        texts = _as_list(payload.get("rec_texts"))
-        scores = _as_list(payload.get("rec_scores"))
-        boxes = _as_list(payload.get("rec_boxes"))
-        polys = _as_list(payload.get("rec_polys"))
-        if not polys:
-            polys = _as_list(payload.get("dt_polys"))
+    with _PADDLEOCR_LOCK:
+        try:
+            results = engine.predict(str(input_path))
+        except Exception as exc:
+            raise RuntimeError(f"paddleocr failed: {exc}") from exc
 
-        for idx, raw_text in enumerate(texts):
-            text = str(raw_text or "").strip()
-            if not text:
-                continue
-            confidence = _parse_paddleocr_confidence(_list_item(scores, idx))
-            if confidence is None:
-                confidence = 1.0
-            if confidence < settings.min_confidence:
-                continue
-            polygon = _paddleocr_polygon(_list_item(polys, idx))
-            bbox = _paddleocr_bbox(_list_item(boxes, idx))
-            if bbox is None:
-                bbox = _paddleocr_bbox(polygon)
-            if bbox is None:
-                continue
-            if polygon is None:
-                polygon = bbox_polygon(bbox)
-            segments.append(OcrSegment(text=text, bbox=bbox, confidence=confidence, polygon=polygon))
+        rec_model: Any = None  # the engine's own rec sub-model
+        image_bgr: Any = None  # both resolved lazily, only when a tall crop needs re-recognition
+        for result in results or []:
+            payload = _paddleocr_result_payload(result)
+            texts = _as_list(payload.get("rec_texts"))
+            scores = _as_list(payload.get("rec_scores"))
+            boxes = _as_list(payload.get("rec_boxes"))
+            polys = _as_list(payload.get("rec_polys"))
+            if not polys:
+                polys = _as_list(payload.get("dt_polys"))
+
+            for idx, raw_text in enumerate(texts):
+                text = str(raw_text or "").strip()
+                confidence = _parse_paddleocr_confidence(_list_item(scores, idx))
+                if confidence is None:
+                    confidence = 1.0
+                polygon = _paddleocr_polygon(_list_item(polys, idx))
+                bbox = _paddleocr_bbox(_list_item(boxes, idx))
+                if bbox is None:
+                    bbox = _paddleocr_bbox(polygon)
+                if bbox is None:
+                    continue
+                if polygon is None:
+                    polygon = bbox_polygon(bbox)
+                if _polygon_is_rotated_tall(polygon):
+                    if rec_model is None:
+                        rec_model = engine.paddlex_pipeline.text_rec_model
+                        image_bgr = _load_bgr(input_path)
+                    upright = _recognize_upright(rec_model, image_bgr, bbox)
+                    if upright is not None and upright[1] >= confidence:
+                        text, confidence = upright
+                if not text:
+                    continue
+                if confidence < settings.min_confidence:
+                    continue
+                segments.append(OcrSegment(text=text, bbox=bbox, confidence=confidence, polygon=polygon))
     if not merge_lines:
         return segments
     return merge_same_line_segments(segments)
+
+
+def _polygon_is_rotated_tall(polygon: list[dict[str, int]] | None) -> bool:
+    """Whether PaddleX would have rotated this crop 90 degrees before recognition.
+
+    Mirrors get_rotate_crop_image: it rotates when crop height/width >= 1.5, where
+    width/height are the rotated-rectangle edge lengths of the detection polygon
+    (top-left, top-right, bottom-right, bottom-left order).
+    """
+    if not polygon or len(polygon) < 4:
+        return False
+    pts = [(float(p["x"]), float(p["y"])) for p in polygon[:4]]
+    width = max(_distance(pts[0], pts[1]), _distance(pts[3], pts[2]))
+    height = max(_distance(pts[0], pts[3]), _distance(pts[1], pts[2]))
+    if width <= 0:
+        return False
+    return (height / width) >= _ROTATED_TALL_RATIO
+
+
+def _recognize_upright(rec_model: Any, image_bgr: Any, bbox: dict[str, int]) -> tuple[str, float] | None:
+    """Re-run recognition on the axis-aligned (upright) crop of bbox."""
+    height, width = image_bgr.shape[:2]
+    left = max(0, min(int(bbox["left"]), width - 1))
+    top = max(0, min(int(bbox["top"]), height - 1))
+    right = max(left + 1, min(int(bbox["left"]) + int(bbox["width"]), width))
+    bottom = max(top + 1, min(int(bbox["top"]) + int(bbox["height"]), height))
+    crop = image_bgr[top:bottom, left:right]
+    if crop.size == 0:
+        return None
+    for result in rec_model(crop):
+        text = str(result.get("rec_text") or "").strip()
+        score = _parse_paddleocr_confidence(result.get("rec_score"))
+        return text, (score if score is not None else 0.0)
+    return None
+
+
+def _load_bgr(input_path: Path) -> Any:
+    rgb = np.asarray(Image.open(input_path).convert("RGB"))
+    return np.ascontiguousarray(rgb[:, :, ::-1])
+
+
+def _distance(a: tuple[float, float], b: tuple[float, float]) -> float:
+    return math.hypot(a[0] - b[0], a[1] - b[1])
 
 
 def _get_paddleocr_engine(settings: OcrSettings, language: str) -> Any:
