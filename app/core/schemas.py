@@ -20,6 +20,10 @@ class RequestPayload(BaseModel):
     translator_model: str | None = None
     translator_mode: TranslatorMode | None = None
     grouping_model: str | None = None
+    # Opt-in eval harness: when set (conventionally "auto"), the pipeline resolves the
+    # translation from a registered gold fixture matched on the image instead of calling
+    # llm-pool (see app/translation/gold.py). Empty/absent = normal translation.
+    translation_fixture: str | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
