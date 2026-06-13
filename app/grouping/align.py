@@ -29,6 +29,7 @@ from app.grouping.units import union_bbox
 _MATCH_THRESHOLD = 0.4
 _FUZZY_MIN_LEN = 4
 _FUZZY_RATIO = 0.8
+_POSITION_GUARD = 3.0
 _URL_SUFFIX = re.compile(r"\.(com|nl|org|net|io|de|fr|co|eu)\b")
 
 
@@ -43,13 +44,18 @@ def build_units_from_hint(
 ) -> GroupingResult:
     hint_token_sets = [set(_tokens(text)) for text in hint_units]
     matches = [_match_scores(cell, hint_token_sets) for cell in cells]
-    positions = _anchored_positions(cells, matches, len(hint_units))
+    positions, positions_anchored = _anchored_positions(cells, matches, len(hint_units))
     labels: list[int | None] = []
     previous_label: int | None = None
     previous_cell: dict[str, Any] | None = None
     for cell, match, position in zip(cells, matches, positions):
         sticky = previous_label if _is_continuation(previous_cell, cell) else None
-        label = _pick_hint(match, preferred_index=position, sticky=sticky)
+        label = _pick_hint(
+            match,
+            preferred_index=position,
+            sticky=sticky,
+            position_reliable=positions_anchored,
+        )
         labels.append(label)
         if label is not None:
             previous_label = label
@@ -115,7 +121,11 @@ def _match_scores(cell: dict[str, Any], hint_token_sets: list[set[str]]) -> _Mat
 
 
 def _pick_hint(
-    match: _Match, *, preferred_index: float = 0.0, sticky: int | None = None
+    match: _Match,
+    *,
+    preferred_index: float = 0.0,
+    sticky: int | None = None,
+    position_reliable: bool = False,
 ) -> int | None:
     if not match.candidates or match.score < _MATCH_THRESHOLD:
         return None
@@ -125,7 +135,17 @@ def _pick_hint(
     # cell to the hint nearest its place on the page.
     if sticky is not None and sticky in match.candidates:
         return sticky
-    return min(match.candidates, key=lambda index: abs(index - preferred_index))
+    best = min(match.candidates, key=lambda index: abs(index - preferred_index))
+    # A cell whose only matches lie far from its anchored reading position is almost
+    # certainly noise that stole a token — e.g. a price sliver bleeding in from an
+    # adjacent page ("50") matching a dish line's price digits. Binding it would
+    # interrupt that element's continuation run and render its text twice
+    # (_group_consecutive breaks runs on real labels, not on leftovers), so make it
+    # a leftover instead. Only when positions come from anchors: the linear fallback
+    # mis-points on pages with varying line density, which this must not punish.
+    if position_reliable and abs(best - preferred_index) > _POSITION_GUARD:
+        return None
+    return best
 
 
 def _is_continuation(previous_cell: dict[str, Any] | None, cell: dict[str, Any]) -> bool:
@@ -172,8 +192,10 @@ def _token_score(token: str, hint_set: set[str]) -> float:
 
 def _anchored_positions(
     cells: list[dict[str, Any]], matches: list[_Match], n_hints: int
-) -> list[float]:
-    """Each cell's expected hint index, used only to break ties in ``_pick_hint``.
+) -> tuple[list[float], bool]:
+    """Each cell's expected hint index, used only to break ties in ``_pick_hint``,
+    plus whether the estimate is anchor-based (and so trustworthy enough for the
+    position guard).
 
     Anchor-and-chain, as in OCR<->text alignment literature (RETAS, Yalniz & Manmatha
     2011: unique words anchor the alignment) and seed-chain aligners: every cell whose
@@ -184,7 +206,7 @@ def _anchored_positions(
     varies (a dense menu above a sparse footer)."""
     tops = [float((cell.get("bbox") or {}).get("top", 0.0)) for cell in cells]
     if not tops or n_hints <= 1:
-        return [0.0] * len(cells)
+        return [0.0] * len(cells), False
     seeds = [
         (top, match.candidates[0])
         for top, match in zip(tops, matches)
@@ -192,8 +214,8 @@ def _anchored_positions(
     ]
     anchors = _chain(seeds)
     if len(anchors) < 2:
-        return _linear_positions(tops, n_hints)
-    return [_interpolate(top, anchors, n_hints) for top in tops]
+        return _linear_positions(tops, n_hints), False
+    return [_interpolate(top, anchors, n_hints) for top in tops], True
 
 
 def _chain(seeds: list[tuple[float, int]]) -> list[tuple[float, int]]:
