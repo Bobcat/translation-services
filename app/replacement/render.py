@@ -238,7 +238,7 @@ def _fit_group(
     AND re-breaks into at most the original line count under the per-line cap. None
     when even the smallest font cannot pack it (the caller leaves the original)."""
     for size in range(max(6, min(start, 160)), 5, -1):
-        font = load_font(size)
+        font = load_font(size, text)
         if font.getlength(text) > budget:
             continue
         lines = wrap_lines(font, text, int(max_line_w))
