@@ -54,6 +54,11 @@ class TranslatedUnit:
     translated_text: str
     translator_model: str
     translation_route: str
+    # For a table row (the hint line carried '|' fields): (source, translated) for each
+    # translatable field, so the renderer can place each in its own cell — matching by the
+    # source text, since the VLM does not always list fields in the cells' reading order.
+    # None for normal (non-tabular) units.
+    field_translations: list[tuple[str, str]] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -61,6 +66,7 @@ class TranslatedUnit:
             "translated_text": self.translated_text,
             "translator_model": self.translator_model,
             "translation_route": self.translation_route,
+            "field_translations": self.field_translations,
         }
 
 
@@ -102,9 +108,10 @@ def translate_units(
     # back to the numbered-list batch when no hint is available or the structure is not preserved.
     batched = decision.translator_mode != "translategemma" and len(translatable) > 1
     batch: dict[int, str] = {}
+    batch_fields: dict[int, list[str]] = {}
     if batched:
         if hint_units:
-            batch = _translate_structured(
+            batch, batch_fields = _translate_structured(
                 settings=settings,
                 model=decision.translator_model,
                 units=units,
@@ -159,6 +166,7 @@ def translate_units(
                 translated_text=translated,
                 translator_model=decision.translator_model,
                 translation_route=route,
+                field_translations=batch_fields.get(unit.id),
             )
         )
     return results
@@ -315,7 +323,7 @@ def _translate_structured(
     target_lang_code: str,
     category: str,
     call_log: list[dict[str, Any]] | None = None,
-) -> dict[int, str]:
+) -> tuple[dict[int, str], dict[int, list[tuple[str, str]]]]:
     """Translate all clean hint lines in ONE call — blocks joined by ``###`` separator
     lines, newlines and ``|`` fields preserved — then map each translated line back onto
     its unit by ``hint_index``. Leftover units (no hint line) are appended as one extra
@@ -358,17 +366,18 @@ def _translate_structured(
 
     translated_blocks = _parse_blocks(str(data.get("output_text") or ""))
     if not source_blocks or len(source_blocks) != len(translated_blocks):
-        return {}  # block structure not preserved -> caller falls back to the numbered list
+        return {}, {}  # block structure not preserved -> caller falls back to the numbered list
     # Align BLOCK BY BLOCK: a reflow inside one block can't shift the mapping of the others.
     # A block whose line count changed maps to None — those units fall back to a per-unit call.
     aligned: list[str | None] = []
     for src_block, dst_block in zip(source_blocks, translated_blocks):
         aligned.extend(dst_block if len(src_block) == len(dst_block) else [None] * len(src_block))
     if len(aligned) != len(hint_units) + len(leftovers):
-        return {}
+        return {}, {}
     leftover_aligned = aligned[len(hint_units):]
     aligned = aligned[: len(hint_units)]
     out: dict[int, str] = {}
+    fields: dict[int, list[tuple[str, str]]] = {}
     for unit in units:
         index = unit.hint_index
         if index is None or not (0 <= index < len(aligned)):
@@ -379,13 +388,16 @@ def _translate_structured(
         text = _translatable_segment(line)
         if text:
             out[unit.id] = text
+            pairs = _field_pairs(hint_units[index], line)
+            if pairs is not None:
+                fields[unit.id] = pairs
     for (unit_id, _source), line in zip(leftovers, leftover_aligned):
         if line is None:
             continue
         text = _translatable_segment(line)
         if text:
             out[unit_id] = text
-    return out
+    return out, fields
 
 
 def _blocks_of(hint_units: list[str], hint_block_ids: list[int] | None) -> list[list[str]]:
@@ -445,6 +457,23 @@ def _translatable_segment(line: str) -> str:
     (kept as the original pixels in the render) and join the rest."""
     segments = [seg.strip() for seg in str(line or "").split("|")]
     return " ".join(seg for seg in segments if seg and not _is_nontranslatable(seg)).strip()
+
+
+def _field_pairs(source_line: str, translated_line: str) -> list[tuple[str, str]] | None:
+    """(source, translated) for each translatable ``|`` field of a table row, in order.
+
+    Splits both the source hint line and its translation on ``|`` and pairs them field by
+    field, keeping only the translatable fields (prices/numbers stay as original pixels).
+    The source half lets the renderer match a field to its OWN cell by text — the VLM does
+    not always list the fields in the cells' reading order. Returns ``None`` when the line
+    carried no ``|`` fields or the source/translation field counts disagree (then the unit
+    falls back to the reflow path)."""
+    src = [seg.strip() for seg in str(source_line or "").split("|")]
+    dst = [seg.strip() for seg in str(translated_line or "").split("|")]
+    if len(src) <= 1 or len(src) != len(dst):
+        return None
+    pairs = [(s, t) for s, t in zip(src, dst) if t and not _is_nontranslatable(t)]
+    return pairs or None
 
 
 def _structured_system_prompt(target_lang_code: str, category: str = "") -> str:

@@ -31,6 +31,11 @@ _FUZZY_MIN_LEN = 4
 _FUZZY_RATIO = 0.8
 _POSITION_GUARD = 3.0
 _URL_SUFFIX = re.compile(r"\.(com|nl|org|net|io|de|fr|co|eu)\b")
+# A money/amount token, optionally followed by a single UPPERCASE tax-class letter (a
+# receipt's "1,69 B", "4,99 B", "€ 8,50", "-2,00"): the trailing letter slipped past the "no
+# alpha" rule below, so the price leaked into the translation and was re-drawn over the
+# original. Uppercase-only keeps lowercase measurements like "25 m" translatable as before.
+_PRICE_TAX = re.compile(r"^[€$£]?\s*[-+]?\s*\d[\d.,]*\s*[A-Z]?$")
 
 
 def build_units_from_hint(
@@ -348,5 +353,7 @@ def _is_nontranslatable(text: str) -> bool:
         return True
     lowered = stripped.lower()
     if "://" in lowered or lowered.startswith("www.") or _URL_SUFFIX.search(lowered):
+        return True
+    if _PRICE_TAX.match(stripped):
         return True
     return not any(char.isalpha() for char in stripped)

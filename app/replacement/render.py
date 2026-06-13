@@ -26,7 +26,9 @@ See docs/re-placement.md.
 """
 from __future__ import annotations
 
+import difflib
 import math
+import re
 from dataclasses import dataclass
 from io import BytesIO
 from pathlib import Path
@@ -56,6 +58,11 @@ _SIZE_RATIO = 0.9
 # the way the reference render does. Never squeeze past this floor: below it the glyphs
 # read as unnaturally narrow, so the line is allowed to overrun the original width instead.
 _CONDENSE_FLOOR = 0.75
+
+# Minimum source-text similarity to bind a table-row field to a cell. Below it the row is
+# not split into cells (the renderer reflows it instead) — a wrong field/cell match would
+# place text in the wrong column, worse than a reflow.
+_FIELD_MATCH_MIN = 0.5
 
 # Per-channel tolerance for snapping a group's per-plane background samples to one
 # colour: within it the planes are one surface sampled with texture noise; beyond it
@@ -118,7 +125,57 @@ def _groups(units: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
     return groups
 
 
+def _split_table_row(unit: dict[str, Any]) -> list[dict[str, Any]] | None:
+    """A table row (the VLM hint carried '|' fields) with >= 2 translatable fields becomes
+    one pseudo-unit per field, each holding a single member. The renderer then places each
+    field in its own cell instead of reflowing the joined line over the row's union — which
+    would collapse the column gaps and shift the description leftward.
+
+    Each (source, translated) field is matched to its cell by the SOURCE text, not by order:
+    the VLM does not always list fields left-to-right. Returns None when the unit is not such
+    a row, the field/member counts disagree, or any field has no confident distinct match
+    (then the normal reflow path runs)."""
+    pairs = unit.get("field_translations")
+    if not pairs or len(pairs) < 2:
+        return None
+    members = [m for m in (unit.get("members") or []) if m.get("translate") and m.get("bbox")]
+    if len(members) != len(pairs):
+        return None
+    remaining = list(members)
+    cells: list[dict[str, Any]] = []
+    for source, translated in pairs:
+        best, best_score = None, 0.0
+        for member in remaining:
+            score = _text_similarity(source, str(member.get("text") or ""))
+            if score > best_score:
+                best, best_score = member, score
+        if best is None or best_score < _FIELD_MATCH_MIN:
+            return None
+        remaining.remove(best)
+        cell = dict(unit)
+        cell["translated_text"] = translated
+        cell["members"] = [best]
+        cell["field_translations"] = None  # already split — don't re-enter
+        cells.append(cell)
+    return cells
+
+
+def _text_similarity(a: str, b: str) -> float:
+    """Alphanumeric-only character-ratio similarity (tolerant to OCR garble like
+    AHNEDAARBEI vs AHNEDAARDBEI), used to bind a source field to its cell."""
+    na = re.sub(r"[^a-z0-9]", "", str(a or "").lower())
+    nb = re.sub(r"[^a-z0-9]", "", str(b or "").lower())
+    if not na or not nb:
+        return 0.0
+    return difflib.SequenceMatcher(None, na, nb).ratio()
+
+
 def _plan_group(base: Image.Image, units: list[dict[str, Any]]) -> list[_Job]:
+    if len(units) == 1:
+        cells = _split_table_row(units[0])
+        if cells is not None:
+            return [job for cell in cells for job in _plan_group(base, [cell])]
+
     texts: list[str] = []
     group_quads: list = []
     for unit in units:
