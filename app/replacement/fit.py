@@ -6,14 +6,40 @@ the font metrics directly (no draw context needed).
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import lru_cache
 
 from PIL import ImageFont
 
 
 _MIN_SIZE = 6
 # Regular weight first — matches the look of menu/sign body text (a regular sans);
-# bold is the fallback only if regular is missing.
+# bold is the fallback only if regular is missing. DejaVu has no CJK glyphs, so text
+# with CJK is drawn in the CJK font instead (see load_font / _CJK_FONT).
 _FONT_NAMES = ("DejaVuSans.ttf", "DejaVuSans-Bold.ttf")
+
+
+def _has_cjk(text: str) -> bool:
+    # Han + Kana + CJK symbols/fullwidth — the ranges DejaVu renders as tofu.
+    return any(
+        "　" <= ch <= "〿"
+        or "぀" <= ch <= "ヿ"
+        or "㐀" <= ch <= "鿿"
+        or "豈" <= ch <= "﫿"
+        or "＀" <= ch <= "￯"
+        for ch in str(text or "")
+    )
+
+
+@lru_cache(maxsize=1)
+def _cjk_font_path() -> str | None:
+    """Path to a CJK-capable font, reusing the one PaddleX ships (downloaded on first
+    use, then cached). None if unavailable — CJK then falls back to tofu, as before."""
+    try:
+        from paddlex.utils.fonts import PINGFANG_FONT
+
+        return str(PINGFANG_FONT.path)
+    except Exception:
+        return None
 
 
 @dataclass(frozen=True)
@@ -23,8 +49,13 @@ class FittedText:
     line_height: int
 
 
-def load_font(size: int) -> ImageFont.FreeTypeFont:
-    for name in _FONT_NAMES:
+def load_font(size: int, text: str = "") -> ImageFont.FreeTypeFont:
+    names = _FONT_NAMES
+    if _has_cjk(text):
+        cjk = _cjk_font_path()
+        if cjk:
+            names = (cjk, *names)
+    for name in names:
         try:
             return ImageFont.truetype(name, size)
         except Exception:
@@ -53,7 +84,7 @@ def fit_text(
     ceiling = int(max_size) if max_size else int(max_height)
     start = max(_MIN_SIZE, min(ceiling, 160))
     for size in range(start, _MIN_SIZE - 1, -1):
-        font = load_font(size)
+        font = load_font(size, content)
         lines = wrap_lines(font, content, max_width) if wrap else [content]
         line_height = _line_height(font)
         widest = max((_text_width(font, line) for line in lines), default=0)
@@ -62,7 +93,7 @@ def fit_text(
         if fits_box and fits_lines:
             return FittedText(font=font, lines=lines, line_height=line_height)
 
-    font = load_font(_MIN_SIZE)
+    font = load_font(_MIN_SIZE, content)
     lines = wrap_lines(font, content, max_width) if wrap else [content]
     return FittedText(font=font, lines=lines, line_height=_line_height(font))
 
