@@ -159,6 +159,7 @@ def run_translate_image_pipeline(
             unit_dict["translated_text"] = translated.translated_text
             unit_dict["translator_model"] = translated.translator_model
             unit_dict["translation_route"] = translated.translation_route
+            unit_dict["field_translations"] = translated.field_translations
         translation_units.append(unit_dict)
     translated_unit_count = sum(1 for item in translations if item.translated_text)
     # Actual llm-pool calls: one shared batch call (if any unit was batched) + one per
