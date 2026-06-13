@@ -48,7 +48,7 @@ standalone label or value, e.g. a price or a table cell).
 | # | Stage | What | Status |
 |---|---|---|---|
 | 1 | **Ingest** | store canonical input (EXIF-transposed) | ✅ done (`app/main.py`) |
-| 2 | **OCR** | PaddleOCR → cells (detection resolution via `text_det_limit_side_len`) | ✅ done (`ocr/`) |
+| 2 | **OCR** | PaddleOCR → cells (detection resolution via `text_det_limit_side_len`); the recognition model is routed per image on the #5 hint's script (Han/Kana → multilingual server pair, else the en recognizer), so the hint is requested first | ✅ done (`ocr/`) |
 | 3 | **Orientation rescue** | re-recognise low-confidence cells by cropping + rotating (fixes garbled rotated text) | ⏳ planned |
 | 4 | **Coverage gate** | compare the VLM transcription (#5) to the cells; escalate OCR (higher `text_det_limit_side_len`) when much is missing | 🟡 byproduct of #5 available; gate itself parked |
 | 5 | **Grouping** (VLM-based) | a VLM groups text that belongs together (a heading, paragraph or item) so each coherent piece is translated as one unit; an aligner maps the groups onto the OCR cells | ✅ done (`grouping/`) |
@@ -66,8 +66,9 @@ handles it well without cross-talk — is a future optimization, not yet tried.
 
 ## Current status
 
-Phase: **Tier-1 re-placement.** `translate_image` runs ingest → OCR → VLM grouping
-→ per-unit routing + translation → re-placement, and returns the OCR cells, the
+Phase: **Tier-1 re-placement.** `translate_image` runs ingest → VLM hint (also
+routes the OCR model) → OCR → grouping alignment → per-unit routing + translation
+→ re-placement, and returns the OCR cells, the
 translation units (each with `translated_text`, `kind`, members), a grouping debug
 overlay, and the **`rendered`** artifact — the translated image (Tier-1 model-free
 simple replace; see [docs/re-placement.md](docs/re-placement.md) for the upgrade

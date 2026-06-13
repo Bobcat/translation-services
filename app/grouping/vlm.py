@@ -110,6 +110,11 @@ def request_grouping_hint(
     model: str,
     call_log: list[dict[str, Any]] | None = None,
 ) -> GroupingHint:
+    if not str(model or "").strip():
+        raise GroupingHintError(
+            "grouping_model is required (set llm_pool.grouping_model or pass "
+            "grouping_model in the request)"
+        )
     content = [
         {"type": "text", "text": _USER_INSTRUCTION},
         {"type": "image_url", "image_url": {"url": _data_uri(input_path)}},

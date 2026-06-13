@@ -42,7 +42,10 @@ class LlmPoolSettings:
 @dataclass(frozen=True)
 class OcrSettings:
     backend: str = "paddleocr"
-    language: str = "en"
+    # Empty = route per image on the VLM grouping hint (Han/Kana glyphs -> the
+    # multilingual server models, everything else -> the en recognizer). Non-empty
+    # pins one PaddleOCR language code; PaddleOCR's own lookup then picks the models.
+    language: str = ""
     min_confidence: float = 0.35
     device: str = "cpu"
     ocr_version: str = "PP-OCRv5"
@@ -114,7 +117,7 @@ def load_settings(path: str | Path | None = None) -> AppSettings:
         ),
         ocr=OcrSettings(
             backend=str(ocr_payload.get("backend", "paddleocr") or "").strip().lower() or "paddleocr",
-            language=str(ocr_payload.get("language", "en") or "").strip() or "en",
+            language=str(ocr_payload.get("language", "") or "").strip(),
             min_confidence=min(1.0, max(0.0, float(ocr_payload.get("min_confidence", 0.35)))),
             device=str(ocr_payload.get("device", "cpu") or "").strip() or "cpu",
             ocr_version=str(ocr_payload.get("ocr_version", "PP-OCRv5") or "").strip() or "PP-OCRv5",

@@ -24,7 +24,7 @@
   },
   "ocr": {
     "backend": "paddleocr",
-    "language": "en",
+    "language": "",
     "min_confidence": 0.35,
     "device": "gpu:0",
     "ocr_version": "PP-OCRv5",
