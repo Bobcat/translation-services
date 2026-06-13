@@ -78,6 +78,8 @@ _USER_INSTRUCTION = (
     "    * **[Metadata/Footer]:** Small text at the edges, such as contact info, "
     "dates, or fine print.\n\n"
     "3. **Tables:** If an element is a table row, put '|' between its fields.\n\n"
+    "3.1. **Field values:** If an element has the format <Field-label> <Field-value>, "
+    "put '|' between the label and the value.\n\n"
     "4. For font-family, provide your best best guess for a **specific font name** do "
     "NOT just mention serif or sans-serif.\n\n"
     "5. **Centered:** Append ' | centered' inside the classification only when an "
