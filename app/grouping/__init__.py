@@ -55,6 +55,8 @@ def group_cells_into_units(
         hint_levels=hint.levels,
         hint_block_ids=hint.block_ids,
         hint_alignments=hint.alignments,
+        hint_families=hint.font_families,
+        hint_weights=hint.font_weights,
     )
     return replace(
         result,
