@@ -1,11 +1,14 @@
 """Stage #8 re-placement — background-matched, polygon-aware (Tier-1, model-free).
 
 Units that share a VLM block (a wrapped dish, a body paragraph) render as one
-**group**: their translations are joined and re-broken freely over at most the
-original number of lines, at ONE font size decided up front from the group's total
-ink width — slack on a short line is pooled into the next instead of shrinking that
-line alone. Each rendered line anchors on its original line's plane (so the line
-pitch follows the original), capped at the group's widest plane. Per plane: cover
+**group**: their translations are joined and balanced over the original number of
+lines, at ONE font size taken from the original's true line height — the **source
+size**, so a heading stays heading-sized and body stays body-sized (the source size
+carries the visual hierarchy). Width is matched separately by **horizontal condensation**:
+at the source height a translated line is usually wider than its original, so the rendered
+text is squeezed in x to fit the original line's width (floored, never stretched) — keeping
+height while matching width, the way the reference render does. Each rendered line anchors
+on its original line's plane (so the line pitch follows the original). Per plane: cover
 the original with the locally-sampled **background colour** (so it reads as erased
 on a flat surface — menu paper, sign panel, receipt), then draw the line and **warp
 it onto the plane's polygon** so it follows the page tilt (rotation/perspective),
@@ -45,6 +48,14 @@ from app.replacement.fit import wrap_lines
 # Font size from the true (de-skewed) line height. The polygon height spans the full
 # glyph extent, a touch taller than the visual cap; scale down slightly to match.
 _SIZE_RATIO = 0.9
+
+# Floor on horizontal condensation. The font is sized from the source HEIGHT (so the
+# header/body hierarchy is preserved); a translated line at that height is usually wider
+# than its original (most sans are wider than the sign's font), so the rendered text is
+# squeezed horizontally to fit the original line's width — keeping height, matching width,
+# the way the reference render does. Never squeeze past this floor: below it the glyphs
+# read as unnaturally narrow, so the line is allowed to overrun the original width instead.
+_CONDENSE_FLOOR = 0.75
 
 # Per-channel tolerance for snapping a group's per-plane background samples to one
 # colour: within it the planes are one surface sampled with texture noise; beyond it
@@ -140,24 +151,32 @@ def _plan_group(base: Image.Image, units: list[dict[str, Any]]) -> list[_Job]:
             "width": xmax - xmin,
         })
 
-    # The whole group renders at ONE size — never above the original — decided up front
-    # from the group's total ink width; the joined translation is re-broken freely over
-    # at most the original line count, every line capped at the group's WIDEST plane.
-    # Slack on a short original line is pooled into the next line instead of that line
-    # shrinking alone ("jus," may move up behind "red wine").
+    # The whole group renders at ONE size = the original's source size (true line height),
+    # NOT a size chosen to fit the width. So a heading keeps heading size and body keeps
+    # body size — the source size carries the hierarchy. The joined translation is balanced
+    # over the original line count.
+    # The units of a group share one VLM element, so one font family/weight. Take the first
+    # that carries a hint (leftovers have none -> fall back to the default font).
+    family = next((u.get("font_family") for u in units if u.get("font_family")), None)
+    weight = next((u.get("font_weight") for u in units if u.get("font_weight")), None)
     joined = " ".join(texts)
-    fitted = _fit_group(
+    font, lines = _fit_group(
         joined,
-        start=min(plane["target"] for plane in planes),
-        max_line_w=max(plane["width"] for plane in planes),
-        budget=sum(plane["width"] for plane in planes),
+        size=min(plane["target"] for plane in planes),
         n_lines=len(planes),
+        max_line_w=max(plane["width"] for plane in planes),
+        family=family,
+        weight=weight,
     )
-    if fitted is None:  # not even the smallest font packs -> leave the original alone
-        return []
-    font, lines = fitted
     ascent, descent = font.getmetrics()
     centered = any(str(unit.get("alignment") or "") == "center" for unit in units)
+
+    # Width is matched by horizontal condensation, not by shrinking the font: at the source
+    # size the translated line is usually wider than its original, so squeeze it in x to fit
+    # the original line's width (floored at _CONDENSE_FLOOR). One factor for the whole group
+    # keeps a multi-line block visually coherent; never stretch (cap at 1.0), so a shorter
+    # line just stays narrower.
+    condense = _condense_scale(font, lines, planes)
 
     # One element usually sits on one surface: when the per-plane background samples
     # are near-equal (texture noise), snap them to their median so the erase planes
@@ -183,12 +202,20 @@ def _plan_group(base: Image.Image, units: list[dict[str, Any]]) -> list[_Job]:
         dst_quad: list[tuple[float, float]] | None = None
         line = lines[index] if index < len(lines) else None  # extra planes: erase only
         if line:
-            text_w = int(font.getlength(line))
+            # Draw the line at its natural width, then squeeze in x by ``condense`` — this
+            # keeps the source height (hierarchy) while the line fits the original width.
+            text_h = max(1, int(ascent + descent))
+            text_w_nat = max(1, int(font.getlength(line)))
+            text_img = Image.new("RGBA", (text_w_nat, text_h), (0, 0, 0, 0))
+            ImageDraw.Draw(text_img).text((0, 0), line, font=font, fill=fg + (255,))
+            text_w = max(1, int(round(text_w_nat * condense)))
+            if text_w != text_w_nat:
+                text_img = text_img.resize((text_w, text_h), Image.LANCZOS)
             tile_w = max(1, text_w + 2 * int(pad))
-            tile_h = max(1, int(ascent + descent) + 2 * int(pad))
+            tile_h = max(1, text_h + 2 * int(pad))
             ox = (xmin + xmax) / 2 - tile_w / 2 if centered else xmin - pad
             tile = Image.new("RGBA", (tile_w, tile_h), (0, 0, 0, 0))
-            ImageDraw.Draw(tile).text((int(pad), int(pad)), line, font=font, fill=fg + (255,))
+            tile.paste(text_img, (int(pad), int(pad)))
             dst_quad = [
                 geo.to_image(ox, oy, x_axis, y_axis),
                 geo.to_image(ox + tile_w, oy, x_axis, y_axis),
@@ -232,19 +259,66 @@ def _line_clusters(quads: list, angle: float) -> list[list]:
 
 
 def _fit_group(
-    text: str, *, start: int, max_line_w: float, budget: float, n_lines: int
-) -> tuple[Any, list[str]] | None:
-    """Largest size (from ``start`` down) whose text fits the group's total ink width
-    AND re-breaks into at most the original line count under the per-line cap. None
-    when even the smallest font cannot pack it (the caller leaves the original)."""
-    for size in range(max(6, min(start, 160)), 5, -1):
-        font = load_font(size, text)
-        if font.getlength(text) > budget:
+    text: str,
+    *,
+    size: int,
+    n_lines: int,
+    max_line_w: float,
+    family: str | None = None,
+    weight: int | None = None,
+) -> tuple[Any, list[str]]:
+    """Render at the source ``size`` (true line height) in the unit's VLM font ``family`` /
+    ``weight``, wrapped into as few lines as fit the column width (``max_line_w``), capped at
+    ``n_lines``. The font is NOT reduced to fit width — the source size, and thus the
+    header/body hierarchy, is preserved; width is matched by horizontal condensation in the
+    caller."""
+    font = load_font(max(6, min(int(size), 160)), text, family=family, weight=weight)
+    return font, _wrap_balanced(font, text, n_lines, max_line_w)
+
+
+def _condense_scale(font: Any, lines: list[str], planes: list[dict[str, Any]]) -> float:
+    """Horizontal scale that squeezes the group's lines into their original widths.
+
+    Per line: original plane width / the line's natural rendered width. The group takes the
+    tightest line's factor (so a multi-line block condenses uniformly), clamped to
+    [``_CONDENSE_FLOOR``, 1.0] — never stretch a short line, never squeeze past the floor."""
+    factors: list[float] = []
+    for index, line in enumerate(lines):
+        if index >= len(planes) or not line:
             continue
-        lines = wrap_lines(font, text, int(max_line_w))
-        if len(lines) <= n_lines and all(font.getlength(line) <= max_line_w for line in lines):
-            return font, lines
-    return None
+        natural = font.getlength(line)
+        if natural > 0:
+            factors.append(planes[index]["width"] / natural)
+    if not factors:
+        return 1.0
+    return max(_CONDENSE_FLOOR, min(1.0, min(factors)))
+
+
+def _wrap_balanced(font: Any, text: str, n_lines: int, max_width: float) -> list[str]:
+    """Wrap ``text`` into as FEW lines as fit the column width, capped at ``n_lines``.
+
+    First a plain greedy wrap at the original column width (``max_width``): a more compact
+    translation that fits in fewer lines than the original uses fewer — no empty spreading
+    over the original line count. Only when the text still needs more than ``n_lines`` lines
+    at that width do we pack it into exactly ``n_lines`` by the smallest balancing width (the
+    caller then condenses horizontally to fit)."""
+    content = str(text or "").strip()
+    if n_lines <= 1 or not content:
+        return [content]
+    natural = wrap_lines(font, content, int(max_width))
+    if len(natural) <= n_lines:
+        return natural
+    lo, hi = 1, int(font.getlength(content)) + 1
+    best = wrap_lines(font, content, hi)
+    while lo <= hi:
+        mid = (lo + hi) // 2
+        lines = wrap_lines(font, content, mid)
+        if len(lines) <= n_lines:
+            best = lines
+            hi = mid - 1
+        else:
+            lo = mid + 1
+    return best
 
 
 def _composite(canvas: np.ndarray, job: _Job) -> None:

@@ -11,7 +11,11 @@ authoritative OCR cells (text + bbox) and builds the units. A weak or incomplete
 therefore lowers quality but does not fail the job. The classification is near-free
 extra context (e.g. feeds the translation prompt: "restaurant menu" stops gemma
 rendering "hoofdgerechten" as "fundamental rights"); the per-line level + block id
-feed the renderer's size coordination.
+feed the renderer's size coordination. We ask for it in "just a few words" on purpose:
+the category is injected into the translator prompt, and the translator preserves words
+from the category that also appear in the text — so a verbose, product-naming label
+("Nike advertisement for Sweet Classic High **shoe**s") leaks that word and leaves it
+untranslated ("DE SHOE" instead of "DE SCHOEN"). Keeping it generic avoids that.
 """
 from __future__ import annotations
 
@@ -32,22 +36,25 @@ _RESPONSES_PATH = "/v1/responses"
 _MAX_OUTPUT_TOKENS = 4096
 
 # Sent as the user turn; the system role stays blank (llm-pool uses " "). Kept generic
-# on purpose — no wording tied to a specific image type. Design (the user's original
-# structural-analysis prompt + only the Tables rule; verified on all data/test-images/):
+# on purpose — no wording tied to a specific image type. Design:
 #   - ELEMENT level: one labeled line per semantic element (a whole dish with its
 #     wrapped lines merged, a receipt row, a paragraph). The label boundary IS the item
 #     boundary — each labeled line becomes its own block, and the renderer reflows the
 #     translation over the element's physical lines (recovered by geometry).
-#   - the hierarchy labels ([Level 1 / Title] ... [Metadata/Footer]) carry the visual
-#     size/weight hierarchy OCR cannot give; parse_grouping_output strips them into a
-#     per-line level.
+#   - the label carries the visual typography OCR cannot give:
+#     "[Level n / Role | <font-family> | <font-size>pt | <font-weight> | centered]".
+#     parse_grouping_output strips it into a per-line level, font_family and font_weight.
+#     Size is requested but currently unused (OCR true-height drives the rendered size).
+#     font_family/weight are PER ELEMENT — a title and a body line can differ (e.g. an ad
+#     with a sans headline and a serif paragraph) — so the renderer picks a face per unit
+#     instead of one hard-coded font.
 #   - alignment is EXCEPTION-marked ("| centered" inside the label, left = default):
-#     near-free in tokens, and ambiguity falls back to left. The tilt + shared-left-
-#     margin clauses are load-bearing — without them the tilted menu's headers misread
-#     as left/right (and once made the dishes read as centred). A wrong hint is only
-#     cosmetic: the renderer moves the anchor within the same plane, nothing else.
+#     near-free in tokens, ambiguity falls back to left. The shared-left-margin clause is
+#     load-bearing; the tilt clause was dropped (verified unnecessary and it cost tokens).
+#     A wrong hint is only cosmetic: the renderer moves the anchor within the same plane.
 #   - "table row -> '|' between its fields" marks tabular layout; at element level it
-#     also splits a menu dish from its price column.
+#     also splits a menu dish from its price column. (This is the field '|' in the text,
+#     distinct from the '|' separating the label's font fields inside the brackets.)
 # Price/number cells are flagged non-translatable in align (_is_nontranslatable); the
 # '|' itself is not yet parsed into field structure.
 _SYSTEM_PROMPT = " "
@@ -55,26 +62,30 @@ _SYSTEM_PROMPT = " "
 _USER_INSTRUCTION = (
     "**Perform a structural analysis of the text in this image. Reconstruct the "
     "document's hierarchy by labeling each element in its natural reading order.**\n\n"
-    "**Instructions:**\n"
+    "**Instructions:**\n\n"
     "1. **Analyze Visual Cues:** Use font size, font weight (boldness), spatial "
-    "positioning, and grouping to determine the importance of each text element.\n"
+    "positioning, and grouping to determine the importance of each text element.\n\n"
     "2. **Linear Labeling (Do Not Group):** Do **not** group all elements of the same "
     "level together. Instead, process the text from top to bottom, following the "
     "natural reading order. For every piece of text, immediately precede it with its "
     "classification:\n"
-    "    * **[Level 1 / Title]:** The most prominent text (largest/boldest).\n"
-    "    * **[Level 2 / Header]:** Sub-headings that introduce new sections.\n"
-    "    * **[Level 3 / Body]:** Descriptive or supporting text.\n"
+    "    * **[Level 1 / Title | <font-family> | <font-size>pt | <font-weight (100-900)>]:** "
+    "The most prominent text (largest/boldest).\n"
+    "    * **[Level 2 / Header | <font-family> | <font-size>pt | <font-weight (100-900)>]:** "
+    "Sub-headings that introduce new sections.\n"
+    "    * **[Level 3 / Body | <font-family> | <font-size>pt | <font-weight (100-900)>]:** "
+    "Descriptive or supporting text.\n"
     "    * **[Metadata/Footer]:** Small text at the edges, such as contact info, "
-    "dates, or fine print.\n"
-    "3. **Tables:** If an element is a table row, put '|' between its fields.\n"
-    "4. **Alignment:** The photo may be tilted; judge alignment against the document "
-    "itself, not the image frame. Append ' | centered' inside the label only when an "
-    "element is horizontally centred. Elements that share a common left margin (a "
-    "list, a column) are left-aligned, never centred.\n"
-    "5. **Output Format:** Present the final structure using **Markdown formatting**. "
+    "dates, or fine print.\n\n"
+    "3. **Tables:** If an element is a table row, put '|' between its fields.\n\n"
+    "4. For font-family, provide your best best guess for a **specific font name** do "
+    "NOT just mention serif or sans-serif.\n\n"
+    "5. **Centered:** Append ' | centered' inside the classification only when an "
+    "element is horizontally centered. Elements that share a common left margin (a "
+    "list, a column) are left-aligned, never centered.\n\n"
+    "6. **Output Format:** Present the final structure using **Markdown formatting**. "
     "The output must begin with a single line in the format **[Image Classification: "
-    "<short description>]**, followed by a continuous stream of labeled text that "
+    "<just a few words>]**, followed by a continuous stream of labeled text that "
     "follows the visual flow of the document. Output only the text."
 )
 
@@ -97,10 +108,15 @@ class GroupingHint:
     raw: str = ""
     # Parallel to ``units``: the visual hierarchy level of each line
     # ("title" | "header" | "body" | "footer", None when unlabeled), the index of the
-    # element block it belongs to, and its horizontal alignment ("center", None = left).
+    # element block it belongs to, its horizontal alignment ("center", None = left), and
+    # the VLM's per-element typography: font_family (a named font, None when unlabeled)
+    # and font_weight (100-900, None when unlabeled). The label's font-size is parsed off
+    # but intentionally not kept — OCR true-height drives the rendered size.
     levels: list[str | None] = field(default_factory=list)
     block_ids: list[int] = field(default_factory=list)
     alignments: list[str | None] = field(default_factory=list)
+    font_families: list[str | None] = field(default_factory=list)
+    font_weights: list[int | None] = field(default_factory=list)
 
 
 def request_grouping_hint(
@@ -180,18 +196,24 @@ def parse_grouping_output(output_text: str) -> GroupingHint:
     levels: list[str | None] = []
     block_ids: list[int] = []
     alignments: list[str | None] = []
+    font_families: list[str | None] = []
+    font_weights: list[int | None] = []
     block = 0
     block_open = False
     block_level: str | None = None
     block_alignment: str | None = None
+    block_family: str | None = None
+    block_weight: int | None = None
 
     def close_block() -> None:
-        nonlocal block, block_open, block_level, block_alignment
+        nonlocal block, block_open, block_level, block_alignment, block_family, block_weight
         if block_open:
             block += 1
             block_open = False
         block_level = None
         block_alignment = None
+        block_family = None
+        block_weight = None
 
     for raw in str(output_text or "").splitlines():
         line = raw.strip()
@@ -215,6 +237,7 @@ def parse_grouping_output(output_text: str) -> GroupingHint:
                 line = text
                 block_level = level
                 block_alignment = "center" if re.search(r"\bcent(?:e?red)\b", label.lower()) else None
+                block_family, block_weight = _parse_label_fonts(label)
                 if not line:  # standalone "[Level 3 / Body]" -> labels the lines below
                     continue
         if level is None:
@@ -229,6 +252,8 @@ def parse_grouping_output(output_text: str) -> GroupingHint:
         levels.append(level)
         block_ids.append(block)
         alignments.append(block_alignment)
+        font_families.append(block_family)
+        font_weights.append(block_weight)
         block_open = True
     return GroupingHint(
         category=category,
@@ -237,6 +262,8 @@ def parse_grouping_output(output_text: str) -> GroupingHint:
         levels=levels,
         block_ids=block_ids,
         alignments=alignments,
+        font_families=font_families,
+        font_weights=font_weights,
     )
 
 
@@ -246,6 +273,32 @@ def _level_of(label: str) -> str | None:
         if key in lowered:
             return level
     return None
+
+
+def _parse_label_fonts(label: str) -> tuple[str | None, int | None]:
+    """Pull the font-family and font-weight out of a typography label.
+
+    The label reads "Level n / Role | <font-family> | <font-size>pt | <font-weight> |
+    centered"; only some fields may be present and their order can wobble. Weight is the
+    100-900 integer; family is the first remaining field that is not a size ("18pt"), a
+    weight, or the centred marker. Size is deliberately discarded. Returns (None, None)
+    when the label carries no font fields (e.g. a bare "[Metadata/Footer]")."""
+    parts = [part.strip() for part in label.split("|")]
+    family: str | None = None
+    weight: int | None = None
+    for part in parts[1:]:  # parts[0] is the "Level n / Role" field
+        lowered = part.lower()
+        if not part or re.fullmatch(r"cent(?:e?red)", lowered):
+            continue
+        if re.fullmatch(r"\d{1,3}\s*pt", lowered):  # font-size: parsed off, not kept
+            continue
+        match = re.fullmatch(r"[1-9]00", part)
+        if match:
+            weight = int(part)
+            continue
+        if family is None:
+            family = part
+    return family, weight
 
 
 def _is_separator(line: str) -> bool:

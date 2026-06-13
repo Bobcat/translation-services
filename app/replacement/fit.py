@@ -7,15 +7,34 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from functools import lru_cache
+from pathlib import Path
 
 from PIL import ImageFont
 
 
 _MIN_SIZE = 6
-# Regular weight first — matches the look of menu/sign body text (a regular sans);
-# bold is the fallback only if regular is missing. DejaVu has no CJK glyphs, so text
-# with CJK is drawn in the CJK font instead (see load_font / _CJK_FONT).
+# Ultimate fallback (no family hint, or a mapped font is missing). Regular first, bold
+# second. DejaVu has no CJK glyphs, so CJK text is drawn in the CJK font instead.
 _FONT_NAMES = ("DejaVuSans.ttf", "DejaVuSans-Bold.ttf")
+
+# The VLM names a font per element (e.g. "Helvetica", "Times New Roman", "Courier New").
+# We don't have those exact (proprietary) faces, so map by CATEGORY to a metric-compatible
+# installed face: sans -> Arimo (Arial/Helvetica metrics), serif -> Tinos (Times), mono ->
+# Cousine (Courier). The VLM wavers on the exact name (Georgia vs Times) but stays within a
+# category, so category mapping is the robust target.
+# NOTE: these live in the per-user fonts dir for now (no system install / repo vendoring
+# decided yet); a missing file degrades gracefully to the DejaVu fallback above.
+_GF_DIR = Path("~/.local/share/fonts/gf").expanduser()
+_BOLD_THRESHOLD = 600  # VLM font-weight (100-900) at/above which we pick the bold cut
+# category -> (regular file, bold file). bold None = the regular file is a variable font;
+# push its weight axis instead of loading a separate cut.
+_FAMILY_FONTS = {
+    "sans": ("Arimo[wght].ttf", None),
+    "serif": ("Tinos-Regular.ttf", "Tinos-Bold.ttf"),
+    "mono": ("Cousine-Regular.ttf", "Cousine-Bold.ttf"),
+}
+_SERIF_HINTS = ("times", "georgia", "serif", "garamond", "minion", "cambria", "palatino", "baskerville", "didot", "book antiqua")
+_MONO_HINTS = ("courier", "mono", "consol", "menlo", "monaco", "typewriter")
 
 
 def _has_cjk(text: str) -> bool:
@@ -49,18 +68,61 @@ class FittedText:
     line_height: int
 
 
-def load_font(size: int, text: str = "") -> ImageFont.FreeTypeFont:
-    names = _FONT_NAMES
+def load_font(
+    size: int, text: str = "", *, family: str | None = None, weight: int | None = None
+) -> ImageFont.FreeTypeFont:
+    """Font for a rendered line. CJK text always uses the CJK font (it overrides the family,
+    which has no CJK glyphs). Otherwise the VLM ``family``/``weight`` map to an installed
+    face (bold cut at high weight); with no family hint, or a missing mapped file, we fall
+    back to DejaVu — preserving the previous behaviour for unlabeled lines."""
+    size = max(_MIN_SIZE, int(size))
     if _has_cjk(text):
         cjk = _cjk_font_path()
-        if cjk:
-            names = (cjk, *names)
+        return _first_loadable((cjk, *_FONT_NAMES) if cjk else _FONT_NAMES, size)
+    mapped = _load_mapped_font(family, weight, size)
+    if mapped is not None:
+        return mapped
+    return _first_loadable(_FONT_NAMES, size)
+
+
+def _first_loadable(names: tuple[str | None, ...], size: int) -> ImageFont.FreeTypeFont:
     for name in names:
+        if not name:
+            continue
         try:
             return ImageFont.truetype(name, size)
         except Exception:
             continue
     return ImageFont.load_default()
+
+
+def _font_category(family: str) -> str:
+    lowered = family.lower()
+    if any(hint in lowered for hint in _MONO_HINTS):
+        return "mono"
+    if any(hint in lowered for hint in _SERIF_HINTS):
+        return "serif"
+    return "sans"
+
+
+def _load_mapped_font(family: str | None, weight: int | None, size: int) -> ImageFont.FreeTypeFont | None:
+    """Mapped face for a VLM family/weight, or None to let the caller fall back to DejaVu."""
+    if not str(family or "").strip():
+        return None
+    regular, bold = _FAMILY_FONTS[_font_category(family)]
+    want_bold = weight is not None and int(weight) >= _BOLD_THRESHOLD
+    try:
+        if want_bold and bold is not None:
+            return ImageFont.truetype(str(_GF_DIR / bold), size)
+        font = ImageFont.truetype(str(_GF_DIR / regular), size)
+        if want_bold:  # variable family with no separate bold cut -> push the weight axis
+            try:
+                font.set_variation_by_axes([int(weight)])
+            except Exception:
+                pass
+        return font
+    except Exception:
+        return None
 
 
 def fit_text(

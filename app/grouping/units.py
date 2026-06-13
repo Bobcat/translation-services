@@ -53,6 +53,11 @@ class TranslationUnit:
     level: str | None = None
     block_id: int | None = None
     alignment: str | None = None
+    # The VLM's per-element typography for this hint line: a named font family and a
+    # weight (100-900). The renderer maps the family to an installed face and picks a bold
+    # cut when the weight is high. None for leftovers and unlabeled lines.
+    font_family: str | None = None
+    font_weight: int | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -63,6 +68,8 @@ class TranslationUnit:
             "level": self.level,
             "block_id": self.block_id,
             "alignment": self.alignment,
+            "font_family": self.font_family,
+            "font_weight": self.font_weight,
             "members": [member.to_dict() for member in self.members],
         }
 
