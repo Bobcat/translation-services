@@ -208,15 +208,15 @@ def test_upload_canonicalizes_exif_orientation(tmp_path: Path, monkeypatch) -> N
         assert completed["response"]["artifacts"]["input"]["mime_type"] == "image/jpeg"
 
 
-def test_resolve_ocr_language_maps_paddleocr_codes() -> None:
+def test_resolve_ocr_language_routes_on_hint_script() -> None:
     settings = OcrSettings(backend="paddleocr", language="")
 
-    assert resolve_ocr_language(settings, "en") == "en"
-    assert resolve_ocr_language(settings, "nl") == "nl"
-    assert resolve_ocr_language(settings, "ja") == "japan"
-    assert resolve_ocr_language(settings, "zh-tw") == "chinese_cht"
-    assert resolve_ocr_language(settings, "unknown") == "en"
-    assert resolve_ocr_language(OcrSettings(backend="paddleocr", language="latin"), "en") == "latin"
+    assert resolve_ocr_language(settings, ["DINER", "€8,50", "Franse vissoep"]) == "en"
+    assert resolve_ocr_language(settings, ["HÆTTA!", "DANGER!", "危險"]) == "ch"
+    assert resolve_ocr_language(settings, ["ラーメン"]) == "ch"
+    assert resolve_ocr_language(settings, ["one stray 危 glyph"]) == "en"
+    assert resolve_ocr_language(settings, []) == "en"
+    assert resolve_ocr_language(OcrSettings(backend="paddleocr", language="latin"), ["危險"]) == "latin"
 
 
 def test_paddleocr_backend_normalizes_chunks_to_visual_lines(tmp_path: Path, monkeypatch) -> None:

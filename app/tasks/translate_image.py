@@ -3,8 +3,9 @@
 Current stages:
 
     ingest (canonical input, done in app.main)
-    -> OCR             app.ocr.run_raw_ocr        (scene route -> cells)
-    -> grouping        app.grouping               (VLM hint -> translation units)
+    -> VLM hint        app.grouping.vlm           (image-only; also routes the OCR model)
+    -> OCR             app.ocr.run_raw_ocr        (hint-routed model -> cells)
+    -> grouping        app.grouping               (hint x cells -> translation units)
     -> routing+xlate   app.translation.translate  (per unit -> translated_text)
     -> overlay debug   app.grouping.overlay       (units drawn on the input)
 
@@ -21,6 +22,7 @@ from typing import Any
 
 from app.core.config import AppSettings
 from app.grouping import group_cells_into_units
+from app.grouping import request_grouping_hint
 from app.grouping.overlay import render_grouping_overlay_debug
 from app.ocr import resolve_ocr_language
 from app.ocr import run_raw_ocr
@@ -63,9 +65,23 @@ def run_translate_image_pipeline(
     source_lang = str(request.get("source_lang_code") or "").strip()
     target_lang = str(request.get("target_lang_code") or "").strip()
     if not source_lang:
-        raise RuntimeError("source_lang_code is required for OCR inspection")
+        raise RuntimeError("source_lang_code is required for translation routing")
 
-    ocr_language = resolve_ocr_language(settings.ocr, source_lang)
+    # The VLM hint is image-only, so it can run before OCR — and its text doubles
+    # as the script signal that picks the OCR model (Han/Kana -> the multilingual
+    # server pair, anything else -> the en recognizer).
+    grouping_model = str(request.get("grouping_model") or "").strip() or settings.llm_pool.grouping_model
+    llm_calls: list[dict[str, Any]] = []  # payload + response of every VLM/LLM call, in order
+    grouping_started_at = time.perf_counter()
+    hint = request_grouping_hint(
+        settings=settings,
+        input_path=input_path,
+        model=grouping_model,
+        call_log=llm_calls,
+    )
+    grouping_wall_ms = _elapsed_ms(grouping_started_at)
+
+    ocr_language = resolve_ocr_language(settings.ocr, hint.units)
 
     ocr_started_at = time.perf_counter()
     ocr_segments = run_raw_ocr(
@@ -81,14 +97,10 @@ def run_translate_image_pipeline(
     )
     cells = _ocr_cells(ocr_segments)
 
-    grouping_model = str(request.get("grouping_model") or "").strip() or settings.llm_pool.grouping_model
-    llm_calls: list[dict[str, Any]] = []  # payload + response of every VLM/LLM call, in order
     grouping = group_cells_into_units(
-        settings=settings,
-        input_path=input_path,
         cells=cells,
+        hint=hint,
         model=grouping_model,
-        call_log=llm_calls,
     )
     grouping_overlay_debug = render_grouping_overlay_debug(
         input_path=input_path,
@@ -153,7 +165,7 @@ def run_translate_image_pipeline(
             "translator_mode": translator_mode,
             "timings_ms": {
                 "ocr": ocr_wall_ms,
-                "grouping": float(grouping.metrics.get("grouping_wall_ms", 0.0)),
+                "grouping": grouping_wall_ms,
                 "translation": translation_wall_ms,
                 "replacement": replacement_wall_ms,
             },
@@ -218,7 +230,7 @@ def run_translate_image_pipeline(
         metadata=metadata,
         metrics={
             "ocr_wall_ms": ocr_wall_ms,
-            "grouping_wall_ms": float(grouping.metrics.get("grouping_wall_ms", 0.0)),
+            "grouping_wall_ms": grouping_wall_ms,
             "translation_wall_ms": translation_wall_ms,
             "replacement_wall_ms": replacement_wall_ms,
             "llm_pool_wall_ms": 0.0,
@@ -228,7 +240,7 @@ def run_translate_image_pipeline(
             "translation_unit_count": len(grouping.units),
             "translated_unit_count": translated_unit_count,
             "ignored_cell_count": len(grouping.ignored_cell_ids),
-            "llm_pool_request_count": (1 if cells else 0) + translation_call_count,
+            "llm_pool_request_count": 1 + translation_call_count,
         },
         ocr={
             "cells": cells,

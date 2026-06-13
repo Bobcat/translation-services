@@ -23,31 +23,44 @@ from app.ocr.segment import OcrSegment
 _ROTATED_TALL_RATIO = 1.5
 
 
-_PADDLEOCR_LANGUAGE_BY_SOURCE = {
-    "en": "en",
-    "ja": "japan",
-    "jp": "japan",
-    "ko": "korean",
-    "zh": "ch",
-    "zh-cn": "ch",
-    "zh-tw": "chinese_cht",
-}
+# Languages whose script the multilingual PP-OCRv5 server models cover (Simplified/
+# Traditional Chinese, Japanese). These get the server det+rec pair; everything
+# else uses the en mobile recognizer — exactly two models, by design (other
+# scripts such as Hangul are out of scope). The server recognizer must NOT be used
+# for Latin images: it is trained on 48x320 crops (~25 chars max) and degrades
+# out-of-distribution on long low-resolution Latin lines — characters garble and
+# inter-word spaces disappear — beyond what hint alignment can absorb.
+_SERVER_PAIR_LANGUAGES = {"japan", "ch", "chinese_cht"}
+_SERVER_PAIR_MODELS = ("PP-OCRv5_server_det", "PP-OCRv5_server_rec")
+
+# Han (U+4E00..U+9FFF) + Hiragana/Katakana (U+3040..U+30FF). A single glyph could
+# be VLM hallucination on a Latin page — and the cost of that false positive is
+# the server pair's long-line degradation — so require at least two.
+_CJK_ROUTING_MIN_GLYPHS = 2
 
 
 _PADDLEOCR_LOCK = threading.Lock()
 _PADDLEOCR_CACHE: dict[tuple[Any, ...], Any] = {}
 
 
-def resolve_paddleocr_language(settings: OcrSettings, source_lang_code: str | None) -> str:
-    source = str(source_lang_code or "").strip().lower()
+def resolve_paddleocr_language(settings: OcrSettings, hint_texts: list[str]) -> str:
+    """The PaddleOCR language (= model choice) for this image.
+
+    A configured ``ocr.language`` pins it: the code goes to PaddleOCR verbatim and
+    its own lookup picks the models. Otherwise the VLM grouping hint decides —
+    enough Han/Kana glyphs in the hint route to the multilingual server pair,
+    everything else to the en recognizer. The request's source language plays no
+    role: the hint reflects what is actually printed on the image.
+    """
     configured = str(settings.language or "").strip()
     if configured:
         return configured
-    if source in _PADDLEOCR_LANGUAGE_BY_SOURCE:
-        return _PADDLEOCR_LANGUAGE_BY_SOURCE[source]
-    if source and len(source) <= 3:
-        return source
-    return "en"
+    glyphs = sum(_count_cjk_glyphs(text) for text in hint_texts)
+    return "ch" if glyphs >= _CJK_ROUTING_MIN_GLYPHS else "en"
+
+
+def _count_cjk_glyphs(text: Any) -> int:
+    return sum(1 for ch in str(text or "") if "一" <= ch <= "鿿" or "぀" <= ch <= "ヿ")
 
 
 def run_paddleocr(
@@ -155,6 +168,8 @@ def _get_paddleocr_engine(settings: OcrSettings, language: str) -> Any:
     det_model = str(settings.det_model or "").strip()
     rec_model = str(settings.rec_model or "").strip()
     lang = str(language or "en")
+    if not det_model and not rec_model and lang in _SERVER_PAIR_LANGUAGES:
+        det_model, rec_model = _SERVER_PAIR_MODELS
     # Explicit model names override PaddleOCR's lang-based selection. When both are
     # set the engine no longer depends on the source language, so collapse it in the
     # cache key to avoid spinning up one (heavy) engine per source language.

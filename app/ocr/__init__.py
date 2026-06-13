@@ -23,9 +23,9 @@ def run_raw_ocr(
     )
 
 
-def resolve_ocr_language(settings: OcrSettings, source_lang_code: str | None) -> str:
+def resolve_ocr_language(settings: OcrSettings, hint_texts: list[str]) -> str:
     _require_paddleocr(settings)
-    return resolve_paddleocr_language(settings, source_lang_code)
+    return resolve_paddleocr_language(settings, hint_texts)
 
 
 def _require_paddleocr(settings: OcrSettings) -> None:
