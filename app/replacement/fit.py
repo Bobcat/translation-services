@@ -209,19 +209,81 @@ def fit_text(
     return FittedText(font=font, lines=lines, line_height=_line_height(font))
 
 
+# Kinsoku: closing punctuation must not START a wrapped line (glue it to the char before),
+# opening punctuation must not END one (glue it to the char after).
+_CJK_CLOSING = set("。、，．！？：；）」』】｝〕》〉")
+_CJK_OPENING = set("（「『【〔《〈｛")
+
+
+def _break_pieces(text: str) -> list[tuple[str, str]]:
+    """Atomic wrap units as (piece, glue) — ``glue`` is the separator to re-insert before the
+    piece when it is not at a line start. Han/Kana/CJK-symbol chars each break individually
+    (the script has no spaces); closing punctuation is kept on the preceding char and opening
+    punctuation on the following one (kinsoku), so a line never starts with 。）」 nor ends with
+    （「. Everything else (Latin, Hangul, digits) stays a whitespace-delimited word, so those
+    scripts wrap exactly as before."""
+    pieces: list[tuple[str, str]] = []
+    word = ""
+    word_glue = ""
+    pending_space = False
+    pending_open = ""      # opening punctuation held to prepend to the next piece
+    pending_open_glue = ""
+
+    def emit(piece: str, glue: str) -> None:
+        nonlocal pending_open, pending_open_glue
+        if pending_open:
+            piece, glue = pending_open + piece, pending_open_glue
+            pending_open, pending_open_glue = "", ""
+        pieces.append((piece, glue))
+
+    for ch in text:
+        if ch.isspace():
+            if word:
+                emit(word, word_glue)
+                word = ""
+            pending_space = True
+            continue
+        glue = " " if pending_space else ""
+        pending_space = False
+        if _has_cjk(ch):
+            if word:
+                emit(word, word_glue)
+                word = ""
+            if ch in _CJK_OPENING:
+                if not pending_open:
+                    pending_open_glue = glue
+                pending_open += ch
+            elif ch in _CJK_CLOSING and pending_open:
+                pending_open += ch  # e.g. "（）" — keep together for the next piece
+            elif ch in _CJK_CLOSING and pieces:
+                prev, prev_glue = pieces[-1]
+                pieces[-1] = (prev + ch, prev_glue)
+            else:
+                emit(ch, glue)
+        elif word:
+            word += ch
+        else:
+            word, word_glue = ch, glue
+    if word:
+        emit(word, word_glue)
+    if pending_open:  # text ended with opening punctuation (degenerate) — emit as its own piece
+        pieces.append((pending_open, pending_open_glue))
+    return pieces
+
+
 def wrap_lines(font: ImageFont.FreeTypeFont, text: str, max_width: int) -> list[str]:
-    words = text.split()
-    if not words:
+    pieces = _break_pieces(text)
+    if not pieces:
         return [""]
     lines: list[str] = []
     current = ""
-    for word in words:
-        candidate = f"{current} {word}".strip()
+    for piece, glue in pieces:
+        candidate = current + (glue if current else "") + piece
         if not current or _text_width(font, candidate) <= max_width:
             current = candidate
         else:
             lines.append(current)
-            current = word
+            current = piece
     if current:
         lines.append(current)
     return lines
