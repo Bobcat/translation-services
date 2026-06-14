@@ -33,6 +33,11 @@ _FAMILY_FONTS = {
     "serif": ("Tinos-Regular.ttf", "Tinos-Bold.ttf"),
     "mono": ("Cousine-Regular.ttf", "Cousine-Bold.ttf"),
 }
+# Korean (Hangul) is in neither PingFang nor DejaVu, so it renders as tofu there. Route it to
+# Noto Sans KR in the same per-user fonts dir. It is a variable font whose default instance is
+# Thin, so we pin a regular weight when loading. Missing file degrades to the CJK/DejaVu chain.
+_KOREAN_FONT = _GF_DIR / "NotoSansKR[wght].ttf"
+_REGULAR_WEIGHT = 400
 _SERIF_HINTS = ("times", "georgia", "serif", "garamond", "minion", "cambria", "palatino", "baskerville", "didot", "book antiqua")
 _MONO_HINTS = ("courier", "mono", "consol", "menlo", "monaco", "typewriter")
 
@@ -49,6 +54,22 @@ def _has_cjk(text: str) -> bool:
     )
 
 
+def _has_hangul(text: str) -> bool:
+    # Hangul syllables + Jamo + compatibility Jamo — Korean script, tofu in DejaVu and PingFang.
+    return any(
+        "가" <= ch <= "힣"          # U+AC00..U+D7A3 syllables
+        or "ᄀ" <= ch <= "ᇿ"        # U+1100..U+11FF Jamo
+        or "ㄱ" <= ch <= "ㆎ"        # U+3130..U+318E compatibility Jamo
+        for ch in str(text or "")
+    )
+
+
+def is_cjk_text(text: str) -> bool:
+    """True when the text contains CJK script (Han/Kana/CJK symbols or Hangul). The renderer
+    uses this to size CJK lines tighter — their glyphs fill the em, unlike upper-biased Latin."""
+    return _has_cjk(text) or _has_hangul(text)
+
+
 @lru_cache(maxsize=1)
 def _cjk_font_path() -> str | None:
     """Path to a CJK-capable font, reusing the one PaddleX ships (downloaded on first
@@ -57,6 +78,29 @@ def _cjk_font_path() -> str | None:
         from paddlex.utils.fonts import PINGFANG_FONT
 
         return str(PINGFANG_FONT.path)
+    except Exception:
+        return None
+
+
+@lru_cache(maxsize=1)
+def _korean_font_path() -> str | None:
+    """Path to a Hangul-capable font (Noto Sans KR in the per-user fonts dir), or None when it
+    has not been provisioned — Korean then falls back to the CJK font / tofu."""
+    return str(_KOREAN_FONT) if _KOREAN_FONT.exists() else None
+
+
+def _load_korean_font(size: int) -> ImageFont.FreeTypeFont | None:
+    """Noto Sans KR pinned to a regular weight (a variable font; its default instance is Thin)."""
+    path = _korean_font_path()
+    if not path:
+        return None
+    try:
+        font = ImageFont.truetype(path, size)
+        try:
+            font.set_variation_by_axes([_REGULAR_WEIGHT])
+        except Exception:
+            pass
+        return font
     except Exception:
         return None
 
@@ -71,12 +115,17 @@ class FittedText:
 def load_font(
     size: int, text: str = "", *, family: str | None = None, weight: int | None = None
 ) -> ImageFont.FreeTypeFont:
-    """Font for a rendered line. CJK text always uses the CJK font (it overrides the family,
-    which has no CJK glyphs). Otherwise the VLM ``family``/``weight`` map to an installed
-    face (bold cut at high weight); with no family hint, or a missing mapped file, we fall
-    back to DejaVu — preserving the previous behaviour for unlabeled lines."""
+    """Font for a rendered line. Korean (Hangul) uses Noto Sans KR; other CJK uses the CJK font;
+    both override the family, which has no such glyphs. Otherwise the VLM ``family``/``weight``
+    map to an installed face (bold cut at high weight); with no family hint, or a missing mapped
+    file, we fall back to DejaVu — preserving the previous behaviour for unlabeled lines."""
     size = max(_MIN_SIZE, int(size))
-    if _has_cjk(text):
+    if _has_hangul(text):
+        korean = _load_korean_font(size)
+        if korean is not None:
+            return korean
+        # Noto Sans KR not provisioned: fall through to the CJK font (tofu for Hangul, graceful).
+    if _has_cjk(text) or _has_hangul(text):
         cjk = _cjk_font_path()
         return _first_loadable((cjk, *_FONT_NAMES) if cjk else _FONT_NAMES, size)
     mapped = _load_mapped_font(family, weight, size)
