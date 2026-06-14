@@ -43,6 +43,7 @@ from PIL import ImageDraw
 from app.replacement import geometry as geo
 from app.replacement.color import contrasting_fg
 from app.replacement.color import sample_region_colors
+from app.replacement.fit import is_cjk_text
 from app.replacement.fit import load_font
 from app.replacement.fit import wrap_lines
 
@@ -50,6 +51,11 @@ from app.replacement.fit import wrap_lines
 # Font size from the true (de-skewed) line height. The polygon height spans the full
 # glyph extent, a touch taller than the visual cap; scale down slightly to match.
 _SIZE_RATIO = 0.9
+# CJK glyphs fill the em (ink ~= the full line box), where Latin ink is upper-biased and
+# leaves ~30% leading below it. At _SIZE_RATIO the CJK ink overruns the source line pitch and
+# consecutive lines touch/overlap, so CJK lines map height->size with a smaller ratio, taking
+# roughly the same visual footprint a Latin line would. Hierarchy (relative sizes) is kept.
+_CJK_SIZE_RATIO = 0.72
 
 # Floor on horizontal condensation. The font is sized from the source HEIGHT (so the
 # header/body hierarchy is preserved); a translated line at that height is usually wider
@@ -127,34 +133,39 @@ def _groups(units: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
 
 def _split_table_row(unit: dict[str, Any]) -> list[dict[str, Any]] | None:
     """A table row (the VLM hint carried '|' fields) with >= 2 translatable fields becomes
-    one pseudo-unit per field, each holding a single member. The renderer then places each
-    field in its own cell instead of reflowing the joined line over the row's union — which
-    would collapse the column gaps and shift the description leftward.
+    one pseudo-unit per CELL, so the renderer places each in its own column instead of
+    reflowing the joined line over the row's union — which would collapse the column gaps and
+    shift the text leftward.
 
-    Each (source, translated) field is matched to its cell by the SOURCE text, not by order:
-    the VLM does not always list fields left-to-right. Returns None when the unit is not such
-    a row, the field/member counts disagree, or any field has no confident distinct match
-    (then the normal reflow path runs)."""
+    Each field is bound to the cell whose SOURCE text it best matches (not by order — the VLM
+    does not always list fields left-to-right). Several fields can share one cell: the hint may
+    split 'PRIJS | BEDRAG' where OCR read a single 'PRIJS BEDRAG' box, and that cell then
+    renders both translations in field order. Returns None when the unit is not such a row,
+    there are more cells than fields, a field has no confident match, or a cell ends up with no
+    field at all (then the normal reflow path runs)."""
     pairs = unit.get("field_translations")
     if not pairs or len(pairs) < 2:
         return None
     members = [m for m in (unit.get("members") or []) if m.get("translate") and m.get("bbox")]
-    if len(members) != len(pairs):
+    if not 2 <= len(members) <= len(pairs):
         return None
-    remaining = list(members)
-    cells: list[dict[str, Any]] = []
+    assigned: dict[int, list[str]] = {}
     for source, translated in pairs:
-        best, best_score = None, 0.0
-        for member in remaining:
+        best_index, best_score = None, 0.0
+        for index, member in enumerate(members):
             score = _text_similarity(source, str(member.get("text") or ""))
             if score > best_score:
-                best, best_score = member, score
-        if best is None or best_score < _FIELD_MATCH_MIN:
+                best_index, best_score = index, score
+        if best_index is None or best_score < _FIELD_MATCH_MIN:
             return None
-        remaining.remove(best)
+        assigned.setdefault(best_index, []).append(translated)
+    if len(assigned) != len(members):  # a cell with no field -> fall back to reflow
+        return None
+    cells: list[dict[str, Any]] = []
+    for index, member in enumerate(members):
         cell = dict(unit)
-        cell["translated_text"] = translated
-        cell["members"] = [best]
+        cell["translated_text"] = " ".join(assigned[index])
+        cell["members"] = [member]
         cell["field_translations"] = None  # already split — don't re-enter
         cells.append(cell)
     return cells
@@ -196,13 +207,14 @@ def _plan_group(base: Image.Image, units: list[dict[str, Any]]) -> list[_Job]:
     # several printed lines; a per-line hint yields one unit per line — both cluster
     # to the same planes.
     angle = median(geo.angle_deg(quad) for quad in group_quads)
+    size_ratio = _CJK_SIZE_RATIO if any(is_cjk_text(text) for text in texts) else _SIZE_RATIO
     planes: list[dict[str, Any]] = []
     for quads in _line_clusters(group_quads, angle):
         true_height = median(geo.line_height(quad) for quad in quads)
         x_axis, y_axis, xmin, xmax, ymin, ymax = geo.oriented_frame(quads, angle)
         planes.append({
             "quads": quads,
-            "target": max(8, int(true_height * _SIZE_RATIO)),
+            "target": max(8, int(true_height * size_ratio)),
             "pad": max(2.0, true_height / 6.0),
             "frame": (x_axis, y_axis, xmin, xmax, ymin, ymax),
             "width": xmax - xmin,
