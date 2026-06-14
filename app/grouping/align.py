@@ -69,6 +69,7 @@ def build_units_from_hint(
             previous_cell = cell
 
     groups = _group_consecutive(labels)
+    groups, ignored_indices = _consolidate_hint_claims(groups, cells, hint_units)
     units = [
         _build_unit(
             cells=cells,
@@ -84,14 +85,15 @@ def build_units_from_hint(
         for order, (label, indices) in enumerate(groups, start=1)
     ]
     leftover = sum(1 for label, _ in groups if label is None)
+    ignored_cell_ids = [int(cells[i]["id"]) for i in ignored_indices if cells[i].get("id") is not None]
 
     return GroupingResult(
         units=units,
-        ignored_cell_ids=[],
+        ignored_cell_ids=ignored_cell_ids,
         model=model,
         metrics={
             "translation_unit_count": len(units),
-            "ignored_cell_count": 0,
+            "ignored_cell_count": len(ignored_cell_ids),
             "hint_block_count": len(hint_units),
             "leftover_unit_count": leftover,
             "translatable_member_count": sum(
@@ -99,6 +101,130 @@ def build_units_from_hint(
             ),
         },
     )
+
+
+def _consolidate_hint_claims(
+    groups: list[tuple[int | None, list[int]]],
+    cells: list[dict[str, Any]],
+    hint_units: list[str],
+) -> tuple[list[tuple[int | None, list[int]]], list[int]]:
+    """A hint line should render once per FIELD, not once per cell-group that claims it.
+
+    Several disjoint cell-groups can land on the same hint line: a wrapped element OCR'd as
+    separate rows, the two halves of a ``|`` field row (a receipt's label-left / value-right),
+    or strays whose tokens happen to overlap — an embedded image's "PENGUIN" hitting a
+    "...vintage PENGUIN paperbacks" line, or a common word ("betaling") shared by two lines.
+    ``_resolve_claim_clusters`` decides each claim: a distinct ``|`` field stays its own unit
+    (renders at its own position), a wrapped continuation merges into the line it extends (so
+    the line renders once), and a redundant stray/mismatch is dropped to ``ignored`` (stays
+    original pixels). Leftover groups (matched no line) pass through."""
+    by_label: dict[int, list[list[int]]] = {}
+    out: list[tuple[int | None, list[int]]] = []
+    for label, indices in groups:
+        if label is None:
+            out.append((label, indices))
+        else:
+            by_label.setdefault(label, []).append(indices)
+
+    ignored: list[int] = []
+    for label, claim_lists in by_label.items():
+        if len(claim_lists) == 1:
+            out.append((label, claim_lists[0]))
+            continue
+        kept_clusters, dropped = _resolve_claim_clusters(label, claim_lists, cells, hint_units)
+        for members in kept_clusters:
+            out.append((
+                label,
+                sorted(members, key=lambda i: (cells[i]["bbox"]["top"], cells[i]["bbox"]["left"])),
+            ))
+        ignored.extend(dropped)
+
+    out.sort(key=lambda g: min((cells[i]["bbox"]["top"] for i in g[1]), default=0))
+    return out, ignored
+
+
+def _resolve_claim_clusters(
+    label: int,
+    claim_lists: list[list[int]],
+    cells: list[dict[str, Any]],
+    hint_units: list[str],
+) -> tuple[list[list[int]], list[int]]:
+    """Decide, per group claiming one hint line, whether it is a distinct ``|`` field (keep as
+    its own unit), a wrapped continuation of an already-kept group (merge into it so the line
+    renders once), or redundant — a stray/mismatch that covers no new field and adds no new
+    token (drop to ``ignored``, leaving original pixels). Claims are processed by descending
+    coverage of the line so the fullest claim anchors the rest; only a same-field continuation
+    (new tokens, no new field) is allowed to merge, and only into a spatially adjacent group —
+    so a redundant stray under a kept group (a receipt's "BETALING" below "MAESTRO") is dropped
+    instead of inflating that unit's footprint. Returns (kept_member_lists, dropped_indices)."""
+    fields = _hint_fields(hint_units[label])
+    line_tokens: set[str] = set().union(*fields) if fields else set()
+
+    def tokens_of(members: list[int]) -> set[str]:
+        return {t for i in members for t in _tokens(str(cells[i].get("text") or ""))} & line_tokens
+
+    def fields_of(tokens: set[str]) -> set[int]:
+        return {fi for fi, fset in enumerate(fields) if fset and (tokens & fset)}
+
+    order = sorted(range(len(claim_lists)), key=lambda k: len(tokens_of(claim_lists[k])), reverse=True)
+    kept: list[list[int]] = []
+    dropped: list[int] = []
+    covered_tokens: set[str] = set()
+    covered_fields: set[int] = set()
+    for k in order:
+        members = claim_lists[k]
+        tokens = tokens_of(members)
+        if not kept or (fields_of(tokens) - covered_fields):
+            kept.append(list(members))                       # primary, or a distinct ``|`` field
+        else:
+            target = _merge_target(members, kept, cells) if (tokens - covered_tokens) else None
+            if target is None:
+                dropped.extend(members)                      # redundant stray / mismatch
+                continue
+            target.extend(members)                           # wrapped continuation of its line
+        covered_tokens |= tokens
+        covered_fields |= fields_of(tokens)
+    return kept, dropped
+
+
+def _hint_fields(hint_line: str) -> list[set[str]]:
+    """Token sets of a hint line's ``|`` fields (one entry per field; the whole line as a
+    single field when it carries no ``|``). Used to tell a complementary label/value split
+    from a redundant stray claim."""
+    parts = str(hint_line or "").split("|")
+    return [set(_tokens(part)) for part in parts]
+
+
+def _merge_target(members: list[int], kept: list[list[int]], cells: list[dict[str, Any]]) -> list[int] | None:
+    """The kept group this claim should merge into — the first one it is spatially adjacent to
+    (stacked or split across a line). ``None`` when it stands off on its own (a stray)."""
+    box = _claim_box(members, cells)
+    for cluster in kept:
+        if _near(box, _claim_box(cluster, cells)):
+            return cluster
+    return None
+
+
+def _claim_box(members: list[int], cells: list[dict[str, Any]]) -> tuple[float, float, float, float]:
+    ls = [float(cells[i]["bbox"]["left"]) for i in members]
+    ts = [float(cells[i]["bbox"]["top"]) for i in members]
+    rs = [float(cells[i]["bbox"]["left"]) + float(cells[i]["bbox"].get("width", 0)) for i in members]
+    bs = [float(cells[i]["bbox"]["top"]) + float(cells[i]["bbox"].get("height", 0)) for i in members]
+    return min(ls), min(ts), max(rs), max(bs)
+
+
+def _near(a: tuple[float, ...], b: tuple[float, ...]) -> bool:
+    """Two boxes are adjacent enough to be one wrapped element: x-ranges overlap and they are
+    vertically close (stacked onto the next row), or y-ranges overlap and they are horizontally
+    close (split across one line). A far-off box (an embedded image, a far column) is neither."""
+    height = max(a[3] - a[1], b[3] - b[1], 1.0)
+    x_overlap = min(a[2], b[2]) > max(a[0], b[0])
+    y_overlap = min(a[3], b[3]) > max(a[1], b[1])
+    y_gap = max(0.0, max(a[1], b[1]) - min(a[3], b[3]))
+    x_gap = max(0.0, max(a[0], b[0]) - min(a[2], b[2]))
+    stacked = x_overlap and y_gap <= 1.5 * height       # wrapped onto the next line
+    same_line = y_overlap and x_gap <= 2.0 * height     # split across one line ("... nooit.")
+    return stacked or same_line
 
 
 @dataclass(frozen=True)
