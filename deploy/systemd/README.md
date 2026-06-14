@@ -44,3 +44,25 @@ Add:
 Environment=TRANSLATION_SERVICES_VENV_DIR=/home/gunnar/projects/translation-services/.venv-image
 ```
 
+## Fonts (render prerequisite)
+
+The re-placement renderer loads fonts from `~/.local/share/fonts/gf/` (see
+`app/replacement/fit.py`). These are **not** vendored in the repo; a missing file
+degrades gracefully (Latin falls back to DejaVu, CJK/Korean to tofu), so they must be
+provisioned per host for correct output:
+
+- **Latin** — the Google Fonts metric-compatible faces `Arimo[wght].ttf`,
+  `Tinos-Regular/Bold.ttf`, `Cousine-Regular/Bold.ttf` (Arial/Times/Courier metrics).
+- **Han/Kana** — PingFang, fetched lazily by PaddleX to `~/.paddlex/fonts/` on the
+  first CJK render (no action needed).
+- **Korean (Hangul)** — Noto Sans KR; PingFang has no Hangul glyphs. Install with:
+
+  ```bash
+  mkdir -p ~/.local/share/fonts/gf
+  curl -L -o "$HOME/.local/share/fonts/gf/NotoSansKR[wght].ttf" \
+    "https://raw.githubusercontent.com/google/fonts/main/ofl/notosanskr/NotoSansKR%5Bwght%5D.ttf"
+  ```
+
+  The filename must stay `NotoSansKR[wght].ttf` (the path `fit.py` looks up). It is a
+  variable font; the renderer pins a regular weight at load time.
+
