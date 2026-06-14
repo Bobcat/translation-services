@@ -247,7 +247,7 @@ def parse_grouping_output(output_text: str) -> GroupingHint:
         if not category and not units and line.lower().startswith("category:"):
             category = line.split(":", 1)[1].strip()
             continue
-        cleaned = line.lstrip("-*•#").strip().strip("*").strip()
+        cleaned = line.lstrip("-*#").strip().strip("*").strip()
         if not cleaned or _is_separator(cleaned):
             continue
         units.append(cleaned)

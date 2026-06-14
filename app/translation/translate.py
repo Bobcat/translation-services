@@ -435,7 +435,7 @@ def _parse_blocks(text: str) -> list[list[str]]:
                 blocks.append(current)
                 current = []
             continue
-        cleaned = line.lstrip("-*•#").strip().strip("*").strip()
+        cleaned = line.lstrip("-*#").strip().strip("*").strip()
         if cleaned:
             current.append(cleaned)
     if current:
