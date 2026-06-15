@@ -11,6 +11,7 @@ from pydantic import ValidationError
 
 from app.core.config import AppSettings
 from app.core.schemas import RequestPayload
+from app.tasks.retranslate_image import run_retranslate_image_pipeline
 from app.tasks.translate_image import run_translate_image_pipeline
 from app.core.util import iso_utc
 from app.core.util import safe_token
@@ -292,8 +293,70 @@ class RequestRuntime:
                 self._emit_completion(rec, event="request_completed")
             self._cond.notify_all()
 
+    async def submit_retranslate(
+        self, *, source_request_id: str, body: dict[str, Any]
+    ) -> tuple[int, dict[str, Any]]:
+        """Queue a ``retranslate_image`` run that reuses the source run's cached image,
+        languages and models, applying an alternative ``translation_prompt``."""
+        sid = str(source_request_id or "").strip()
+        async with self._lock:
+            source = self._record_store.get(sid)
+            if source is None:
+                return 404, {
+                    "code": "REQUEST_NOT_FOUND",
+                    "message": "source request_id not found",
+                    "retryable": False,
+                    "details": {"request_id": sid},
+                }
+            source_request = dict(source.request)
+        grouping_path = (self.work_root / safe_token(sid) / "grouping.json").resolve()
+        if not grouping_path.exists():
+            return 409, {
+                "code": "REQUEST_SOURCE_GROUPING_MISSING",
+                "message": "source run has no cached grouping to re-translate (it may have been pruned)",
+                "retryable": False,
+                "details": {"request_id": sid},
+            }
+        payload: dict[str, Any] = {
+            "task": "retranslate_image",
+            "source_request_id": sid,
+            "image": dict(source_request.get("image") or {}),
+            "source_lang_code": source_request.get("source_lang_code"),
+            "target_lang_code": str(body.get("target_lang_code") or "").strip()
+            or source_request.get("target_lang_code"),
+            "translator_model": source_request.get("translator_model"),
+            "translator_mode": source_request.get("translator_mode"),
+            "translation_prompt": str(body.get("translation_prompt") or ""),
+            "translation_prompt_id": str(body.get("translation_prompt_id") or ""),
+        }
+        request_id = str(body.get("request_id") or "").strip()
+        if request_id:
+            payload["request_id"] = request_id
+        return await self.submit(payload)
+
     def _process_request(self, request_id: str, request: dict[str, Any]) -> dict[str, Any]:
+        if str(request.get("task")) == "retranslate_image":
+            return self._process_retranslate_image_request(request_id, request)
         return self._process_translate_image_request(request_id, request)
+
+    def _process_retranslate_image_request(self, request_id: str, request: dict[str, Any]) -> dict[str, Any]:
+        image = dict(request.get("image") or {})
+        input_path = Path(str(image.get("local_path") or "")).resolve()
+        if not input_path.exists() or not input_path.is_file():
+            raise RuntimeError("source input image file is missing")
+        source_request_id = str(request.get("source_request_id") or "").strip()
+        grouping_path = (self.work_root / safe_token(source_request_id) / "grouping.json").resolve()
+        if not grouping_path.exists():
+            raise RuntimeError("source run grouping is missing (it may have been pruned)")
+        source_grouping = json.loads(grouping_path.read_text(encoding="utf-8"))
+
+        result = run_retranslate_image_pipeline(
+            settings=self._settings,
+            input_path=input_path,
+            source_grouping=source_grouping,
+            request=request,
+        )
+        return self._persist_result(request_id, request, input_path, str(image.get("mime_type") or "image/png"), result)
 
     def _process_translate_image_request(self, request_id: str, request: dict[str, Any]) -> dict[str, Any]:
         image = dict(request.get("image") or {})
@@ -308,7 +371,16 @@ class RequestRuntime:
             input_mime_type=input_mime_type,
             request=request,
         )
+        return self._persist_result(request_id, request, input_path, input_mime_type, result)
 
+    def _persist_result(
+        self,
+        request_id: str,
+        request: dict[str, Any],
+        input_path: Path,
+        input_mime_type: str,
+        result: Any,
+    ) -> dict[str, Any]:
         job_root = (self.work_root / safe_token(request_id)).resolve()
         job_root.mkdir(parents=True, exist_ok=True)
         output_path = (job_root / "output.png").resolve()

@@ -7,7 +7,7 @@ from pydantic import BaseModel
 from pydantic import Field
 
 
-TaskName = Literal["translate_image"]
+TaskName = Literal["translate_image", "retranslate_image"]
 RequestState = Literal["queued", "running", "completed", "failed", "cancelled", "cancel_requested"]
 TranslatorMode = Literal["translategemma", "generic"]
 
@@ -20,10 +20,14 @@ class RequestPayload(BaseModel):
     translator_model: str | None = None
     translator_mode: TranslatorMode | None = None
     grouping_model: str | None = None
-    # Opt-in eval harness: when set (conventionally "auto"), the pipeline resolves the
-    # translation from a registered gold fixture matched on the image instead of calling
-    # llm-pool (see app/translation/gold.py). Empty/absent = normal translation.
-    translation_fixture: str | None = None
+    # Structured-route prompt selection (see app/translation/prompts). Precedence:
+    # ``translation_prompt`` (an ad-hoc raw system prompt) > ``translation_prompt_id`` (a
+    # saved library prompt) > the pipeline default. ``source_request_id`` points the
+    # ``retranslate_image`` task at a prior completed run whose cached grouping/units it
+    # reuses (no VLM/OCR/grouping again).
+    translation_prompt: str | None = None
+    translation_prompt_id: str | None = None
+    source_request_id: str | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 

@@ -24,16 +24,14 @@ from app.core.config import AppSettings
 from app.grouping import group_cells_into_units
 from app.grouping import request_grouping_hint
 from app.grouping.overlay import render_grouping_overlay_debug
-from app.grouping.vlm import parse_grouping_output
 from app.ocr import resolve_ocr_language
 from app.ocr import run_raw_ocr
 from app.ocr.overlay import render_original_ocr_overlay_debug
 from app.ocr.segment import OcrSegment
 from app.replacement import render_translated_image
-from app.translation.gold import GoldFixtureError
-from app.translation.gold import image_identity
-from app.translation.gold import load_fixture_for_image
-from app.translation.gold import resolve_gold_units
+from app.translation.prompts import resolve_structured_prompt
+from app.translation.prompts import store_for
+from app.translation.prompts.templates import IMAGE_DEFAULT_ID
 from app.translation.translate import translate_units
 
 
@@ -77,26 +75,13 @@ def run_translate_image_pipeline(
     # server pair, anything else -> the en recognizer).
     grouping_model = str(request.get("grouping_model") or "").strip() or settings.llm_pool.grouping_model
     llm_calls: list[dict[str, Any]] = []  # payload + response of every VLM/LLM call, in order
-    # Opt-in reference run: simulate BOTH llm-pool responses from the fixture — the VLM hint
-    # here (so the units are pinned/deterministic) and the translation below. A normal run
-    # calls the VLM as usual. No fixture match -> fail (the caller asked for a reference run).
-    fixture_name = str(request.get("translation_fixture") or "").strip()
-    gold_fixture = load_fixture_for_image(input_path) if fixture_name else None
-    if fixture_name and gold_fixture is None:
-        raise GoldFixtureError(
-            "translation_fixture run requested but no gold fixture matches this image "
-            f"(sha256={image_identity(input_path)})"
-        )
     grouping_started_at = time.perf_counter()
-    if gold_fixture is not None:
-        hint = parse_grouping_output(gold_fixture.vlm_output)
-    else:
-        hint = request_grouping_hint(
-            settings=settings,
-            input_path=input_path,
-            model=grouping_model,
-            call_log=llm_calls,
-        )
+    hint = request_grouping_hint(
+        settings=settings,
+        input_path=input_path,
+        model=grouping_model,
+        call_log=llm_calls,
+    )
     grouping_wall_ms = _elapsed_ms(grouping_started_at)
 
     ocr_language = resolve_ocr_language(settings.ocr, hint.units)
@@ -129,26 +114,26 @@ def run_translate_image_pipeline(
     image_category = str(grouping.metadata.get("category") or "")
     translator_model = str(request.get("translator_model") or "").strip() or settings.llm_pool.translator_model
     translator_mode = str(request.get("translator_mode") or "").strip() or settings.llm_pool.translator_mode
-    # Reference run: each unit takes its translation from the fixture's reference blocks by
-    # hint_index (the canned hint and the reference are 1:1), so no llm-pool call. Unmatched
-    # units (aligned to no hint line) stay untranslated.
-    gold_unmatched: list[int] = []
     translation_started = time.perf_counter()
-    if gold_fixture is not None:
-        translations, gold_unmatched = resolve_gold_units(grouping.units, gold_fixture.reference_blocks)
-    else:
-        translations = translate_units(
-            settings=settings,
-            units=grouping.units,
-            source_lang_code=source_lang,
-            target_lang_code=target_lang,
-            translator_model=translator_model,
-            translator_mode=translator_mode,
-            category=image_category,
-            hint_units=grouping.hint_units,
-            hint_block_ids=grouping.hint_block_ids,
-            call_log=llm_calls,
-        )
+    prompt = resolve_structured_prompt(
+        store_for(settings.service.prompts_root),
+        raw_prompt=request.get("translation_prompt"),
+        prompt_id=request.get("translation_prompt_id"),
+        default_id=IMAGE_DEFAULT_ID,
+    )
+    translations = translate_units(
+        settings=settings,
+        units=grouping.units,
+        source_lang_code=source_lang,
+        target_lang_code=target_lang,
+        translator_model=translator_model,
+        translator_mode=translator_mode,
+        category=image_category,
+        hint_units=grouping.hint_units,
+        hint_block_ids=grouping.hint_block_ids,
+        prompt=prompt,
+        call_log=llm_calls,
+    )
     translation_wall_ms = _elapsed_ms(translation_started)
     translation_by_id = {item.unit_id: item for item in translations}
     translation_units: list[dict[str, Any]] = []
@@ -163,10 +148,9 @@ def run_translate_image_pipeline(
         translation_units.append(unit_dict)
     translated_unit_count = sum(1 for item in translations if item.translated_text)
     # Actual llm-pool calls: one shared batch call (if any unit was batched) + one per
-    # batch-fallback + one per plain per-unit (translategemma) translation. A gold-fixture
-    # run makes no translation calls.
+    # batch-fallback + one per plain per-unit (translategemma) translation.
     routes = [item.translation_route for item in translations]
-    translation_call_count = 0 if fixture_name else (
+    translation_call_count = (
         (1 if any(route.endswith("_batch") for route in routes) else 0)
         + sum(1 for route in routes if route.endswith("_batch_fallback"))
         + sum(
@@ -178,6 +162,7 @@ def run_translate_image_pipeline(
         )
     )
     full_translated_text = "\n".join(item.translated_text for item in translations if item.translated_text)
+    sent_input, sent_instructions = _translation_call_io(llm_calls)
 
     replacement_started = time.perf_counter()
     rendered_image = render_translated_image(input_path, translation_units)
@@ -230,12 +215,11 @@ def run_translate_image_pipeline(
         "target_lang_code": target_lang,
         "translator_model": translator_model,
         "translator_mode": translator_mode,
-        "translation_source": "gold_fixture" if fixture_name else "llm_pool",
+        "translation_source": "llm_pool",
+        "translation_input": sent_input,
+        "translation_instructions": sent_instructions,
         "note": "Returns OCR cells, VLM grouping, per-unit translations, and a Tier-1 re-placement rendering (model-free simple replace).",
     }
-    if gold_fixture is not None:
-        metadata["gold_fixture"] = gold_fixture.name
-        metadata["gold_unmatched_unit_ids"] = gold_unmatched
     metadata.update(projected_overlay_debug.metadata)
     metadata["grouping_model"] = grouping.model
     metadata["image_category"] = image_category
@@ -271,7 +255,7 @@ def run_translate_image_pipeline(
             "translation_unit_count": len(grouping.units),
             "translated_unit_count": translated_unit_count,
             "ignored_cell_count": len(grouping.ignored_cell_ids),
-            "llm_pool_request_count": 0 if fixture_name else 1 + translation_call_count,
+            "llm_pool_request_count": 1 + translation_call_count,
         },
         ocr={
             "cells": cells,
@@ -298,6 +282,17 @@ def _ocr_cells(ocr_segments: list[OcrSegment]) -> list[dict[str, Any]]:
             payload["polygon"] = [dict(point) for point in segment.polygon]
         cells.append(payload)
     return cells
+
+
+def _translation_call_io(llm_calls: list[dict[str, Any]]) -> tuple[str, str]:
+    """The input + instructions of the primary translation call (the structured/batch
+    call), so the workbench can show — and copy — exactly what was sent to the LLM.
+    Empty when no translation call was made."""
+    for call in llm_calls:
+        if str(call.get("role") or "").startswith("translation"):
+            payload = call.get("payload") or {}
+            return str(payload.get("input") or ""), str(payload.get("instructions") or "")
+    return "", ""
 
 
 def _input_png_bytes(input_path: Path) -> bytes:

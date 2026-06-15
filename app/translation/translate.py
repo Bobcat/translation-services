@@ -31,6 +31,10 @@ import httpx
 from app.core.config import AppSettings
 from app.grouping.align import _is_nontranslatable
 from app.grouping.units import TranslationUnit
+from app.translation.prompts import PromptEntry
+from app.translation.prompts.templates import IMAGE_DEFAULT_ID
+from app.translation.prompts import render_template
+from app.translation.prompts.templates import BUILTIN_PROMPTS
 from app.translation.routing import resolve_translation_route
 
 
@@ -85,6 +89,7 @@ def translate_units(
     category: str = "",
     hint_units: list[str] | None = None,
     hint_block_ids: list[int] | None = None,
+    prompt: PromptEntry | None = None,
     call_log: list[dict[str, Any]] | None = None,
 ) -> list[TranslatedUnit]:
     decision = resolve_translation_route(
@@ -117,8 +122,10 @@ def translate_units(
                 units=units,
                 hint_units=hint_units,
                 hint_block_ids=hint_block_ids,
+                source_lang_code=source_lang_code,
                 target_lang_code=target_lang_code,
                 category=category,
+                prompt=prompt or BUILTIN_PROMPTS[IMAGE_DEFAULT_ID],
                 call_log=call_log,
             )
         if not batch:
@@ -320,8 +327,10 @@ def _translate_structured(
     units: list[TranslationUnit],
     hint_units: list[str],
     hint_block_ids: list[int] | None,
+    source_lang_code: str,
     target_lang_code: str,
     category: str,
+    prompt: PromptEntry,
     call_log: list[dict[str, Any]] | None = None,
 ) -> tuple[dict[int, str], dict[int, list[tuple[str, str]]]]:
     """Translate all clean hint lines in ONE call — blocks joined by ``###`` separator
@@ -342,10 +351,17 @@ def _translate_structured(
     ]
     if leftovers:
         source_blocks = source_blocks + [[text for _unit_id, text in leftovers]]
+    source_window = "\n###\n".join("\n".join(block) for block in source_blocks)
+    variables = {
+        "source_window": source_window,
+        "source_lang": _lang_name(source_lang_code),
+        "target_lang": _lang_name(target_lang_code),
+        "category": str(category or "").strip() or "unknown",
+    }
     payload: dict[str, Any] = {
         "model": model,
-        "input": "\n###\n".join("\n".join(block) for block in source_blocks),
-        "instructions": _structured_system_prompt(target_lang_code, category),
+        "input": render_template(prompt.user, variables),
+        "instructions": render_template(prompt.system, variables),
         "stream": False,
         "decoding": {"top_k": 1, "top_p": 1, "temperature": 0.0, "repetition_penalty": 1.0, "max_tokens": 4096},
     }
@@ -474,18 +490,6 @@ def _field_pairs(source_line: str, translated_line: str) -> list[tuple[str, str]
         return None
     pairs = [(s, t) for s, t in zip(src, dst) if t and not _is_nontranslatable(t)]
     return pairs or None
-
-
-def _structured_system_prompt(target_lang_code: str, category: str = "") -> str:
-    target = _lang_name(target_lang_code)
-    cat = str(category or "").strip() or "unknown"
-    return (
-        "You are a translation engine. \n"
-        f"The input are translation units from an image in category: {cat}.\n"
-        f"Translate the translation units to {target} and preserve the newlines and the "
-        "'|' delimiters .\n"
-        "Output only the translations."
-    )
 
 
 def _lang_name(code: str) -> str:

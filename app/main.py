@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any
 import uuid
 
+from fastapi import Body
 from fastapi import FastAPI
 from fastapi import File
 from fastapi import Form
@@ -29,20 +30,48 @@ from fastapi import UploadFile
 from fastapi.responses import FileResponse
 from fastapi.responses import JSONResponse
 
+from pydantic import BaseModel
+from pydantic import Field
+
 from app.core.config import load_settings
 from app.runtime.service import RequestRuntime
 from app.core.schemas import CompletionsEnvelope
 from app.core.schemas import RequestLifecycle
 from app.core.schemas import RequestSubmitEnvelope
 from app.core.util import safe_token
+from app.translation.prompts import PromptConflictError
+from app.translation.prompts import PromptEntry
+from app.translation.prompts import PromptNotFoundError
+from app.translation.prompts import PromptValidationError
+from app.translation.prompts import store_for
+from app.translation.prompts.templates import DEFAULT_USER_TEMPLATE
 
 
 SUPPORTED_IMAGE_MIME_TYPES = {"image/jpeg", "image/png", "image/webp"}
 
 
+class PromptBody(BaseModel):
+    system: str
+    user: str = DEFAULT_USER_TEMPLATE
+    tags: list[str] = Field(default_factory=list)
+
+    def to_entry(self, prompt_id: str) -> PromptEntry:
+        return PromptEntry(
+            id=prompt_id,
+            system=self.system,
+            user=self.user or DEFAULT_USER_TEMPLATE,
+            tags=list(self.tags),
+        )
+
+
+class PromptCreateBody(PromptBody):
+    id: str
+
+
 def create_app(settings_path: str | Path | None = None) -> FastAPI:
     settings = load_settings(settings_path)
     runtime = RequestRuntime(settings=settings)
+    prompt_store = store_for(settings.service.prompts_root)
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
@@ -132,6 +161,52 @@ def create_app(settings_path: str | Path | None = None) -> FastAPI:
         status_code, body = await runtime.submit(parsed)
         return JSONResponse(status_code=int(status_code), content=body)
 
+    @app.post("/v1/requests/{source_request_id}/retranslate", response_model=RequestSubmitEnvelope)
+    async def retranslate_request(
+        source_request_id: str,
+        body: dict[str, Any] = Body(default_factory=dict),
+    ) -> JSONResponse:
+        status_code, payload = await runtime.submit_retranslate(
+            source_request_id=source_request_id, body=dict(body or {})
+        )
+        return JSONResponse(status_code=int(status_code), content=payload)
+
+    @app.get("/v1/prompts")
+    async def list_prompts() -> JSONResponse:
+        return JSONResponse(status_code=200, content={"prompts": [e.to_dict() for e in prompt_store.list()]})
+
+    @app.post("/v1/prompts")
+    async def create_prompt(body: PromptCreateBody) -> JSONResponse:
+        try:
+            entry = prompt_store.create(body.to_entry(body.id))
+        except (PromptConflictError, PromptValidationError, PromptNotFoundError) as exc:
+            return _prompt_error(exc)
+        return JSONResponse(status_code=200, content=entry.to_dict())
+
+    @app.get("/v1/prompts/{prompt_id:path}")
+    async def get_prompt(prompt_id: str) -> JSONResponse:
+        try:
+            entry = prompt_store.get(prompt_id)
+        except (PromptValidationError, PromptNotFoundError) as exc:
+            return _prompt_error(exc)
+        return JSONResponse(status_code=200, content=entry.to_dict())
+
+    @app.put("/v1/prompts/{prompt_id:path}")
+    async def update_prompt(prompt_id: str, body: PromptBody) -> JSONResponse:
+        try:
+            entry = prompt_store.update(prompt_id, body.to_entry(prompt_id))
+        except (PromptValidationError, PromptNotFoundError) as exc:
+            return _prompt_error(exc)
+        return JSONResponse(status_code=200, content=entry.to_dict())
+
+    @app.delete("/v1/prompts/{prompt_id:path}")
+    async def delete_prompt(prompt_id: str) -> JSONResponse:
+        try:
+            prompt_store.delete(prompt_id)
+        except (PromptValidationError, PromptNotFoundError) as exc:
+            return _prompt_error(exc)
+        return JSONResponse(status_code=200, content={"id": prompt_id, "deleted": True})
+
     @app.get("/v1/requests/{request_id}", response_model=RequestLifecycle)
     async def get_request(request_id: str) -> JSONResponse:
         status_code, body = await runtime.get_request(request_id)
@@ -179,6 +254,14 @@ def _error(
     if details:
         payload["details"] = dict(details)
     return JSONResponse(status_code=int(status_code), content=payload)
+
+
+def _prompt_error(exc: Exception) -> JSONResponse:
+    if isinstance(exc, PromptNotFoundError):
+        return _error(404, code="PROMPT_NOT_FOUND", message=str(exc), retryable=False)
+    if isinstance(exc, PromptConflictError):
+        return _error(409, code="PROMPT_CONFLICT", message=str(exc), retryable=False)
+    return _error(400, code="PROMPT_INVALID", message=str(exc), retryable=False)
 
 
 def _suffix_for_mime(mime_type: str) -> str:

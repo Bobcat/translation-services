@@ -34,6 +34,20 @@ class UnitMember:
             member["polygon"] = [dict(point) for point in self.polygon]
         return member
 
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "UnitMember":
+        polygon = data.get("polygon")
+        return cls(
+            cell_id=int(data["cell_id"]),
+            text=str(data.get("text") or ""),
+            translate=bool(data.get("translate", True)),
+            bbox={key: int(value) for key, value in dict(data["bbox"]).items()},
+            order=int(data.get("order") or 0),
+            polygon=[{key: int(value) for key, value in dict(point).items()} for point in polygon]
+            if polygon is not None
+            else None,
+        )
+
 
 @dataclass(frozen=True)
 class TranslationUnit:
@@ -65,6 +79,7 @@ class TranslationUnit:
             "order": self.order,
             "bbox": dict(self.bbox),
             "source_text": self.source_text,
+            "hint_index": self.hint_index,
             "level": self.level,
             "block_id": self.block_id,
             "alignment": self.alignment,
@@ -72,6 +87,25 @@ class TranslationUnit:
             "font_weight": self.font_weight,
             "members": [member.to_dict() for member in self.members],
         }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "TranslationUnit":
+        hint_index = data.get("hint_index")
+        block_id = data.get("block_id")
+        font_weight = data.get("font_weight")
+        return cls(
+            id=int(data["id"]),
+            order=int(data.get("order") or 0),
+            members=[UnitMember.from_dict(member) for member in data.get("members") or []],
+            bbox={key: int(value) for key, value in dict(data["bbox"]).items()},
+            source_text=str(data.get("source_text") or ""),
+            hint_index=int(hint_index) if hint_index is not None else None,
+            level=data.get("level"),
+            block_id=int(block_id) if block_id is not None else None,
+            alignment=data.get("alignment"),
+            font_family=data.get("font_family"),
+            font_weight=int(font_weight) if font_weight is not None else None,
+        )
 
 
 @dataclass(frozen=True)

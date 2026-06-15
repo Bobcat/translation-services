@@ -18,6 +18,7 @@ class ServiceSettings:
     port: int = 8030
     log_level: str = "info"
     work_root: str = "data/requests"
+    prompts_root: str = "data/prompts"
 
 
 @dataclass(frozen=True)
@@ -96,6 +97,7 @@ def load_settings(path: str | Path | None = None) -> AppSettings:
             port=int(service_payload.get("port", 8030)),
             log_level=str(service_payload.get("log_level", "info")),
             work_root=str(service_payload.get("work_root", "data/requests") or "").strip() or "data/requests",
+            prompts_root=str(service_payload.get("prompts_root", "data/prompts") or "").strip() or "data/prompts",
         ),
         scheduler=SchedulerSettings(
             runner_slots=max(1, int(scheduler_payload.get("runner_slots", 2))),

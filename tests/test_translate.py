@@ -110,7 +110,9 @@ def test_structured_translation_carries_leftovers_as_extra_block(monkeypatch) ->
     )
 
     assert len(calls) == 1
-    assert calls[0]["input"] == "Kaarthouder\n###\nKaar thouder"
+    # The default prompt frames the units under a category header; the leftover unit
+    # still rides along as the final ### block of the one call.
+    assert calls[0]["input"].endswith("Kaarthouder\n###\nKaar thouder")
     assert out[0].translated_text == "Cardholder"
     assert out[1].translated_text == "Card holder copy"
     assert out[1].translation_route.endswith("_batch")
