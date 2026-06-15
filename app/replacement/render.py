@@ -62,8 +62,22 @@ _CJK_SIZE_RATIO = 0.72
 # than its original (most sans are wider than the sign's font), so the rendered text is
 # squeezed horizontally to fit the original line's width — keeping height, matching width,
 # the way the reference render does. Never squeeze past this floor: below it the glyphs
-# read as unnaturally narrow, so the line is allowed to overrun the original width instead.
+# read as unnaturally narrow, so the pt size is reduced instead (see _WIDTH_SLACK).
 _CONDENSE_FLOOR = 0.75
+
+# A rendered line may exceed its original plane width by this factor before we spend pt.
+# Order of accommodation for a too-long translation: condense horizontally to the floor,
+# then allow up to this much overrun, and only if it STILL doesn't fit reduce the source
+# pt size (re-wrapping) — so the source size (and the header/body hierarchy) is preserved
+# unless the line genuinely cannot fit the box within the slack.
+_WIDTH_SLACK = 1.04
+# Floor on the pt-shrink search (matches the plane target floor in _plan_group).
+_MIN_RENDER_SIZE = 8
+
+# Below this group angle (degrees) the text is treated as horizontal and placed axis-aligned,
+# so OCR detection noise on a flat image isn't warped into a visible slant. A genuine page
+# tilt is well above it (a photographed menukaart sits at ~6°), so real perspective is kept.
+_ANGLE_DEADZONE_DEG = 3.0
 
 # Minimum source-text similarity to bind a table-row field to a cell. Below it the row is
 # not split into cells (the renderer reflows it instead) — a wrong field/cell match would
@@ -74,6 +88,13 @@ _FIELD_MATCH_MIN = 0.5
 # colour: within it the planes are one surface sampled with texture noise; beyond it
 # they are genuinely different (a gradient, two panels) and stay per-plane.
 _BG_SNAP_DELTA = 24
+
+# Erase margin ABOVE/BELOW the original text. The OCR polygon's ``ymin``/``ymax`` already bound
+# the glyphs (descenders included), so vertically the erase needs only a thin anti-alias margin
+# — not the full ``pad``. The full pad would reach into whatever sits just above or below the
+# line (a coloured header band a few px away) and erase it; a tight vertical margin keeps the
+# fill on the text. The sides keep ``pad`` (and grow with the tile) for horizontal blending.
+_ERASE_MARGIN = 2.0
 
 
 @dataclass(frozen=True)
@@ -89,8 +110,10 @@ def render_translated_image(input_path: Path, translation_units: list[dict[str, 
     base = Image.open(input_path).convert("RGB")
 
     jobs: list[_Job] = []
-    for group in _groups(translation_units):
-        jobs.extend(_plan_group(base, group))
+    groups = _groups(translation_units)
+    snap_horizontal = _image_is_flat(translation_units)
+    for group in groups:
+        jobs.extend(_plan_group(base, group, snap_horizontal=snap_horizontal))
 
     # Pass 1: cover every original (along the slant) so no source text peeks through.
     erase = ImageDraw.Draw(base)
@@ -129,6 +152,23 @@ def _groups(units: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
             groups.append(current)
         previous = key
     return groups
+
+
+def _image_is_flat(units: list[dict[str, Any]]) -> bool:
+    """True when the image as a whole reads as fronto-parallel — its lines are near-horizontal
+    with no real page tilt, so per-line angles are OCR detection noise to be snapped away. A
+    photographed sign at an angle has a perspective gradient with a sizeable median angle and is
+    NOT flat, so its (real) angles are kept. Median over all member quads is robust to the odd
+    rotated stray (a lone tall glyph) that a mean would be skewed by."""
+    angles: list[float] = []
+    for unit in units:
+        for member in unit.get("members") or []:
+            if not member.get("bbox"):
+                continue
+            quad = geo.quad_of(member)
+            if quad is not None:
+                angles.append(abs(geo.angle_deg(quad)))
+    return bool(angles) and median(angles) < _ANGLE_DEADZONE_DEG
 
 
 def _split_table_row(unit: dict[str, Any]) -> list[dict[str, Any]] | None:
@@ -181,11 +221,11 @@ def _text_similarity(a: str, b: str) -> float:
     return difflib.SequenceMatcher(None, na, nb).ratio()
 
 
-def _plan_group(base: Image.Image, units: list[dict[str, Any]]) -> list[_Job]:
+def _plan_group(base: Image.Image, units: list[dict[str, Any]], *, snap_horizontal: bool = False) -> list[_Job]:
     if len(units) == 1:
         cells = _split_table_row(units[0])
         if cells is not None:
-            return [job for cell in cells for job in _plan_group(base, [cell])]
+            return [job for cell in cells for job in _plan_group(base, [cell], snap_horizontal=snap_horizontal)]
 
     texts: list[str] = []
     group_quads: list = []
@@ -206,7 +246,15 @@ def _plan_group(base: Image.Image, units: list[dict[str, Any]]) -> list[_Job]:
     # quads into physical text lines. An element-level hint yields ONE unit spanning
     # several printed lines; a per-line hint yields one unit per line — both cluster
     # to the same planes.
+    # On a flat (digital / fronto-parallel) image the lines are truly horizontal; OCR still
+    # detects each quad a degree or so off, and warping the tile to that noise turns straight
+    # text visibly slanted. When the WHOLE image reads as flat (``snap_horizontal``), snap a
+    # near-horizontal group angle to 0. A genuinely tilted sign is NOT flat (its angles form a
+    # perspective gradient — afstand-houden runs ~1° at the top to ~8° at the bottom), so its
+    # small top-line angles are kept; snapping only those would break the gradient.
     angle = median(geo.angle_deg(quad) for quad in group_quads)
+    if snap_horizontal and abs(angle) < _ANGLE_DEADZONE_DEG:
+        angle = 0.0
     size_ratio = _CJK_SIZE_RATIO if any(is_cjk_text(text) for text in texts) else _SIZE_RATIO
     planes: list[dict[str, Any]] = []
     for quads in _line_clusters(group_quads, angle):
@@ -229,14 +277,17 @@ def _plan_group(base: Image.Image, units: list[dict[str, Any]]) -> list[_Job]:
     family = next((u.get("font_family") for u in units if u.get("font_family")), None)
     weight = next((u.get("font_weight") for u in units if u.get("font_weight")), None)
     joined = " ".join(texts)
-    font, lines = _fit_group(
-        joined,
-        size=min(plane["target"] for plane in planes),
-        n_lines=len(planes),
-        max_line_w=max(plane["width"] for plane in planes),
-        family=family,
-        weight=weight,
-    )
+    n_lines = len(planes)
+    max_line_w = max(plane["width"] for plane in planes)
+    # Render at the source size, but spend pt only as a last resort: if even at the condense
+    # floor a line would still exceed its plane by more than _WIDTH_SLACK, step the size down
+    # (which re-wraps) until the floor suffices or the size floor is hit — below that the line
+    # is allowed to overrun. Above it, condense + slack absorb the width at the source size.
+    size = min(plane["target"] for plane in planes)
+    font, lines = _fit_group(joined, size=size, n_lines=n_lines, max_line_w=max_line_w, family=family, weight=weight)
+    while size > _MIN_RENDER_SIZE and _raw_condense(font, lines, planes) < _CONDENSE_FLOOR:
+        size -= 1
+        font, lines = _fit_group(joined, size=size, n_lines=n_lines, max_line_w=max_line_w, family=family, weight=weight)
     ascent, descent = font.getmetrics()
     centered = any(str(unit.get("alignment") or "") == "center" for unit in units)
 
@@ -266,7 +317,12 @@ def _plan_group(base: Image.Image, units: list[dict[str, Any]]) -> list[_Job]:
         # A centered element anchors each line on its plane's CENTRE instead (the VLM
         # alignment hint); a wrong hint only moves text within the plane, nothing else.
         oy = ymin - pad
-        ex0, ex1, ey1 = xmin - pad, xmax + pad, ymax + pad
+        # Erase hugs the glyph extent vertically: only an AA margin beyond the text top/bottom,
+        # not the full ``pad``, so the fill doesn't bite into a neighbour (a coloured band) just
+        # above or below the line. Sides keep ``pad`` and grow with the tile (below).
+        margin = min(pad, _ERASE_MARGIN)
+        ey0 = ymin - margin
+        ex0, ex1, ey1 = xmin - pad, xmax + pad, ymax + margin
         tile: Image.Image | None = None
         dst_quad: list[tuple[float, float]] | None = None
         line = lines[index] if index < len(lines) else None  # extra planes: erase only
@@ -291,13 +347,15 @@ def _plan_group(base: Image.Image, units: list[dict[str, Any]]) -> list[_Job]:
                 geo.to_image(ox + tile_w, oy + tile_h, x_axis, y_axis),
                 geo.to_image(ox, oy + tile_h, x_axis, y_axis),
             ]
-            # Erase the original extent, grown to cover the (possibly wider) line.
+            # Erase the original extent, grown to cover the (possibly wider) rendered line:
+            # full tile width on the sides, but only the rendered INK depth below (text bottom
+            # = ymin + text_h), not the tile's padded bottom, so it stays off the line below.
             ex0 = min(ex0, ox)
             ex1 = max(ex1, ox + tile_w)
-            ey1 = max(ey1, oy + tile_h)
+            ey1 = max(ey1, ymin + text_h + margin)
         erase_quad = [
-            _ipoint(geo.to_image(ex0, oy, x_axis, y_axis)),
-            _ipoint(geo.to_image(ex1, oy, x_axis, y_axis)),
+            _ipoint(geo.to_image(ex0, ey0, x_axis, y_axis)),
+            _ipoint(geo.to_image(ex1, ey0, x_axis, y_axis)),
             _ipoint(geo.to_image(ex1, ey1, x_axis, y_axis)),
             _ipoint(geo.to_image(ex0, ey1, x_axis, y_axis)),
         ]
@@ -345,22 +403,28 @@ def _fit_group(
     return font, _wrap_balanced(font, text, n_lines, max_line_w)
 
 
-def _condense_scale(font: Any, lines: list[str], planes: list[dict[str, Any]]) -> float:
-    """Horizontal scale that squeezes the group's lines into their original widths.
+def _raw_condense(font: Any, lines: list[str], planes: list[dict[str, Any]]) -> float:
+    """Unclamped horizontal scale needed to bring every line within its plane width + slack.
 
-    Per line: original plane width / the line's natural rendered width. The group takes the
-    tightest line's factor (so a multi-line block condenses uniformly), clamped to
-    [``_CONDENSE_FLOOR``, 1.0] — never stretch a short line, never squeeze past the floor."""
+    Per line: ``plane width * _WIDTH_SLACK / natural rendered width``; the group takes the
+    tightest (smallest) line factor. ``>= 1.0`` means the lines already fit within the slack;
+    below ``_CONDENSE_FLOOR`` means even maximum condensation leaves a line more than the slack
+    too wide (the caller then reduces the pt size)."""
     factors: list[float] = []
     for index, line in enumerate(lines):
         if index >= len(planes) or not line:
             continue
         natural = font.getlength(line)
         if natural > 0:
-            factors.append(planes[index]["width"] / natural)
-    if not factors:
-        return 1.0
-    return max(_CONDENSE_FLOOR, min(1.0, min(factors)))
+            factors.append(planes[index]["width"] * _WIDTH_SLACK / natural)
+    return min(factors) if factors else 1.0
+
+
+def _condense_scale(font: Any, lines: list[str], planes: list[dict[str, Any]]) -> float:
+    """Horizontal scale that squeezes the group's lines into their original widths (plus the
+    width slack), clamped to [``_CONDENSE_FLOOR``, 1.0] — never stretch a short line, never
+    squeeze past the floor (the pt size is reduced upstream instead)."""
+    return max(_CONDENSE_FLOOR, min(1.0, _raw_condense(font, lines, planes)))
 
 
 def _wrap_balanced(font: Any, text: str, n_lines: int, max_width: float) -> list[str]:
