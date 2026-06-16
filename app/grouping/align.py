@@ -14,12 +14,15 @@ by small rules, not by the model.
 """
 from __future__ import annotations
 
-import difflib
-import re
-import unicodedata
 from dataclasses import dataclass
 from typing import Any
 
+from app.grouping.heuristics import _is_continuation
+from app.grouping.heuristics import _is_icon_fragment
+from app.grouping.heuristics import _is_nontranslatable
+from app.grouping.heuristics import _near
+from app.grouping.heuristics import _token_score
+from app.grouping.heuristics import _tokens
 from app.grouping.units import GroupingResult
 from app.grouping.units import TranslationUnit
 from app.grouping.units import UnitMember
@@ -27,15 +30,7 @@ from app.grouping.units import union_bbox
 
 
 _MATCH_THRESHOLD = 0.4
-_FUZZY_MIN_LEN = 4
-_FUZZY_RATIO = 0.8
 _POSITION_GUARD = 3.0
-_URL_SUFFIX = re.compile(r"\.(com|nl|org|net|io|de|fr|co|eu)\b")
-# A money/amount token, optionally followed by a single UPPERCASE tax-class letter (a
-# receipt's "1,69 B", "4,99 B", "€ 8,50", "-2,00"): the trailing letter slipped past the "no
-# alpha" rule below, so the price leaked into the translation and was re-drawn over the
-# original. Uppercase-only keeps lowercase measurements like "25 m" translatable as before.
-_PRICE_TAX = re.compile(r"^[€$£]?\s*[-+]?\s*\d[\d.,]*\s*[A-Z]?$")
 
 
 def build_units_from_hint(
@@ -70,6 +65,8 @@ def build_units_from_hint(
 
     groups = _group_consecutive(labels)
     groups, ignored_indices = _consolidate_hint_claims(groups, cells, hint_units)
+    groups, icon_indices = _drop_icon_fragments(groups, cells)
+    ignored_indices = list(ignored_indices) + icon_indices
     units = [
         _build_unit(
             cells=cells,
@@ -187,6 +184,28 @@ def _resolve_claim_clusters(
     return kept, dropped
 
 
+def _drop_icon_fragments(
+    groups: list[tuple[int | None, list[int]]],
+    cells: list[dict[str, Any]],
+) -> tuple[list[tuple[int | None, list[int]]], list[int]]:
+    """Drop a member that duplicates a word already in its unit AND is far smaller than the rest
+    of the line — an icon/badge's tiny embedded label OCR read as text (e.g. a "postnl" logo next
+    to "Bezorging door PostNL"). Such a fragment otherwise drags the unit's left edge and erase
+    onto the icon and pulls the rendered line height down. Dropped cells go to ``ignored`` (their
+    original pixels stay). Never empties a group."""
+    out: list[tuple[int | None, list[int]]] = []
+    dropped: list[int] = []
+    for label, indices in groups:
+        if label is None or len(indices) < 2:
+            out.append((label, indices))
+            continue
+        kept = [i for i in indices if not _is_icon_fragment(i, indices, cells)]
+        out.append((label, kept if kept else indices))
+        if kept:
+            dropped.extend(i for i in indices if i not in kept)
+    return out, dropped
+
+
 def _hint_fields(hint_line: str) -> list[set[str]]:
     """Token sets of a hint line's ``|`` fields (one entry per field; the whole line as a
     single field when it carries no ``|``). Used to tell a complementary label/value split
@@ -213,24 +232,11 @@ def _claim_box(members: list[int], cells: list[dict[str, Any]]) -> tuple[float, 
     return min(ls), min(ts), max(rs), max(bs)
 
 
-def _near(a: tuple[float, ...], b: tuple[float, ...]) -> bool:
-    """Two boxes are adjacent enough to be one wrapped element: x-ranges overlap and they are
-    vertically close (stacked onto the next row), or y-ranges overlap and they are horizontally
-    close (split across one line). A far-off box (an embedded image, a far column) is neither."""
-    height = max(a[3] - a[1], b[3] - b[1], 1.0)
-    x_overlap = min(a[2], b[2]) > max(a[0], b[0])
-    y_overlap = min(a[3], b[3]) > max(a[1], b[1])
-    y_gap = max(0.0, max(a[1], b[1]) - min(a[3], b[3]))
-    x_gap = max(0.0, max(a[0], b[0]) - min(a[2], b[2]))
-    stacked = x_overlap and y_gap <= 1.5 * height       # wrapped onto the next line
-    same_line = y_overlap and x_gap <= 2.0 * height     # split across one line ("... nooit.")
-    return stacked or same_line
-
-
 @dataclass(frozen=True)
 class _Match:
     candidates: list[int]  # hint indices sharing the best token-overlap score
     score: float           # best matched-token mass / cell token count
+    full: tuple[int, ...] = ()  # of those, the lines the cell fully accounts for (every token)
 
 
 def _match_scores(cell: dict[str, Any], hint_token_sets: list[set[str]]) -> _Match:
@@ -249,9 +255,11 @@ def _match_scores(cell: dict[str, Any], hint_token_sets: list[set[str]]) -> _Mat
                 best_matched = matched
     if not best_matched:
         return _Match(candidates=[], score=0.0)
+    candidates = [index for index, matched in matched_by_index if matched == best_matched]
     return _Match(
-        candidates=[index for index, matched in matched_by_index if matched == best_matched],
+        candidates=candidates,
         score=best_matched / len(cell_tokens),
+        full=tuple(index for index in candidates if best_matched + 1e-9 >= len(hint_token_sets[index])),
     )
 
 
@@ -270,7 +278,12 @@ def _pick_hint(
     # cell to the hint nearest its place on the page.
     if sticky is not None and sticky in match.candidates:
         return sticky
-    best = min(match.candidates, key=lambda index: abs(index - preferred_index))
+    # Among equally-scored candidates, prefer a hint line the cell FULLY accounts for (it carries
+    # every token of that line): a short brand/eyebrow that is a prefix of the title, a label above
+    # its value. Without this, such a cell is a fragment of the longer neighbour too and gets pulled
+    # into it on position alone. Position still breaks any remaining tie.
+    pool = list(match.full) or match.candidates
+    best = min(pool, key=lambda index: abs(index - preferred_index))
     # A cell whose only matches lie far from its anchored reading position is almost
     # certainly noise that stole a token — e.g. a price sliver bleeding in from an
     # adjacent page ("50") matching a dish line's price digits. Binding it would
@@ -281,48 +294,6 @@ def _pick_hint(
     if position_reliable and abs(best - preferred_index) > _POSITION_GUARD:
         return None
     return best
-
-
-def _is_continuation(previous_cell: dict[str, Any] | None, cell: dict[str, Any]) -> bool:
-    """A wrapped continuation line starts at ~the same left margin as, and directly
-    below, its element's previous line. A price in the right column or the next row of
-    a receipt does not qualify, so genuinely repeated rows ("BONUS ...") still bind by
-    position."""
-    if previous_cell is None:
-        return False
-    prev, this = previous_cell.get("bbox") or {}, cell.get("bbox") or {}
-    height = float(this.get("height") or 0.0) or float(prev.get("height") or 0.0)
-    if height <= 0:
-        return False
-    drop = float(this.get("top") or 0.0) - float(prev.get("top") or 0.0)
-    indent = abs(float(this.get("left") or 0.0) - float(prev.get("left") or 0.0))
-    return 0 < drop <= 2.5 * height and indent <= 2.0 * height
-
-
-def _token_score(token: str, hint_set: set[str]) -> float:
-    """1.0 exact, else fuzzy (slightly lower, so exact wins a tie) for OCR garble: the cell
-    must still bind to its clean VLM line when OCR splits a word ("Kaar thouder" vs
-    "Kaarthouder") or drops/adds a character ("AHNEDAARDBEI" vs "AHNEDAARBEI") — otherwise
-    the cell becomes a leftover, the per-unit fallback translates the garbled text in
-    isolation, and the good structured translation of the VLM line is orphaned. Fuzzy =
-    substring or high character similarity, both only for tokens long enough that they
-    cannot collide by chance; below exact so "Kaart" still binds its own line, not
-    "Kaarthouder"."""
-    if token in hint_set:
-        return 1.0
-    if len(token) < _FUZZY_MIN_LEN:
-        return 0.0
-    for hint_token in hint_set:
-        if len(hint_token) < _FUZZY_MIN_LEN:
-            continue
-        if token in hint_token or hint_token in token:
-            return 0.9
-        shorter, longer = sorted((len(token), len(hint_token)))
-        if 2 * shorter / (shorter + longer) < _FUZZY_RATIO:  # ratio can't reach the bar
-            continue
-        if difflib.SequenceMatcher(None, token, hint_token).ratio() >= _FUZZY_RATIO:
-            return 0.9
-    return 0.0
 
 
 def _anchored_positions(
@@ -465,21 +436,3 @@ def _build_unit(
         font_family=font_family,
         font_weight=font_weight,
     )
-
-
-def _tokens(text: str) -> list[str]:
-    normalized = unicodedata.normalize("NFKD", str(text or "").lower())
-    stripped = "".join(char for char in normalized if not unicodedata.combining(char))
-    return re.findall(r"[a-z0-9]+", stripped)
-
-
-def _is_nontranslatable(text: str) -> bool:
-    stripped = str(text or "").strip()
-    if not stripped:
-        return True
-    lowered = stripped.lower()
-    if "://" in lowered or lowered.startswith("www.") or _URL_SUFFIX.search(lowered):
-        return True
-    if _PRICE_TAX.match(stripped):
-        return True
-    return not any(char.isalpha() for char in stripped)

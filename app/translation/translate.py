@@ -29,7 +29,7 @@ from typing import Any
 import httpx
 
 from app.core.config import AppSettings
-from app.grouping.align import _is_nontranslatable
+from app.grouping.heuristics import _is_nontranslatable
 from app.grouping.units import TranslationUnit
 from app.translation.prompts import PromptEntry
 from app.translation.prompts.templates import IMAGE_DEFAULT_ID
