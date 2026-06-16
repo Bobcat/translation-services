@@ -24,10 +24,12 @@ import copy
 import re
 from dataclasses import dataclass
 from dataclasses import field
+from io import BytesIO
 from pathlib import Path
 from typing import Any
 
 import httpx
+from PIL import Image
 
 from app.core.config import AppSettings
 
@@ -50,8 +52,9 @@ _MAX_OUTPUT_TOKENS = 4096
 #     instead of one hard-coded font.
 #   - alignment is EXCEPTION-marked ("| centered" inside the label, left = default):
 #     near-free in tokens, ambiguity falls back to left. The shared-left-margin clause is
-#     load-bearing; the tilt clause was dropped (verified unnecessary and it cost tokens).
-#     A wrong hint is only cosmetic: the renderer moves the anchor within the same plane.
+#     load-bearing. A required left/center/right field was tried to prop up a weak quant, but
+#     the nvfp4 model marks "| centered" reliably (body 5/5, fonts stable), so the simpler
+#     exception form stays. A wrong hint is only cosmetic: the renderer moves the in-plane anchor.
 #   - "table row -> '|' between its fields" marks tabular layout; at element level it
 #     also splits a menu dish from its price column. (This is the field '|' in the text,
 #     distinct from the '|' separating the label's font fields inside the brackets.)
@@ -97,6 +100,14 @@ _MIME_BY_SUFFIX = {
     ".png": "image/png",
     ".webp": "image/webp",
 }
+
+# Image formats the VLM backend can decode. llama-server (llama.cpp's mtmd/clip) loads images
+# through stb_image, which handles JPEG/PNG but NOT WebP: a webp data-URI is silently dropped
+# and the model answers as if no image was sent (it refuses with "please provide the image").
+# So we transcode any non-JPEG/PNG input to PNG before sending — this keeps the grouping hint
+# backend-agnostic (a vLLM/Pillow backend would accept webp, llama-server does not). Done here
+# rather than in the pool only because translation-services is the single client that needs it.
+_VLM_SAFE_MIME = {"image/jpeg", "image/png"}
 
 
 class GroupingHintError(RuntimeError):
@@ -165,6 +176,12 @@ def request_grouping_hint(
 # The model emits the label in Markdown (we ask for it), so tolerate bold/emphasis and a
 # colon around the bracket: "**[Level 1 / Title]** text", "[Level 3 / Body]: text", etc.
 _LABELED_LINE = re.compile(r"^\**\s*\[(?P<label>[^\[\]]+)\]\**\s*:?\s*\**\s*(?P<rest>.*)$")
+
+# Alignment field values. Both British/American spellings ("centre"/"center") and the
+# "centred"/"centered" the model wavers between must read as centred. Only "center" is acted
+# on downstream; "left"/"right" are recognised so they aren't mistaken for a font-family field.
+_ALIGN_CENTER = re.compile(r"\bcent(?:ered|er|red|re)\b")
+_ALIGN_WORD = re.compile(r"cent(?:ered|er|red|re)|left|right")
 
 # Substring -> level, checked in order. "level N" first: the model sometimes drops the
 # word after the slash; the word checks catch the "[Metadata/Footer]" style labels.
@@ -238,7 +255,7 @@ def parse_grouping_output(output_text: str) -> GroupingHint:
                 close_block()  # a label starts a new element
                 line = text
                 block_level = level
-                block_alignment = "center" if re.search(r"\bcent(?:e?red)\b", label.lower()) else None
+                block_alignment = "center" if _ALIGN_CENTER.search(label.lower()) else None
                 block_family, block_weight = _parse_label_fonts(label)
                 if not line:  # standalone "[Level 3 / Body]" -> labels the lines below
                     continue
@@ -283,14 +300,15 @@ def _parse_label_fonts(label: str) -> tuple[str | None, int | None]:
     The label reads "Level n / Role | <font-family> | <font-size>pt | <font-weight> |
     centered"; only some fields may be present and their order can wobble. Weight is the
     100-900 integer; family is the first remaining field that is not a size ("18pt"), a
-    weight, or the centred marker. Size is deliberately discarded. Returns (None, None)
-    when the label carries no font fields (e.g. a bare "[Metadata/Footer]")."""
+    weight, or an alignment word (centered/left/right — left/right are tolerated although the
+    prompt only emits "centered"). Size is deliberately discarded. Returns (None, None) when
+    the label carries no font fields (e.g. a bare "[Metadata/Footer]")."""
     parts = [part.strip() for part in label.split("|")]
     family: str | None = None
     weight: int | None = None
     for part in parts[1:]:  # parts[0] is the "Level n / Role" field
         lowered = part.lower()
-        if not part or re.fullmatch(r"cent(?:e?red)", lowered):
+        if not part or _ALIGN_WORD.fullmatch(lowered):
             continue
         if re.fullmatch(r"\d{1,3}\s*pt", lowered):  # font-size: parsed off, not kept
             continue
@@ -356,5 +374,19 @@ def _data_uri(input_path: Path) -> str:
     mime = _MIME_BY_SUFFIX.get(suffix)
     if mime is None:
         raise GroupingHintError(f"unsupported image type for grouping: {suffix or 'unknown'}")
-    encoded = base64.b64encode(input_path.read_bytes()).decode("ascii")
+    raw = input_path.read_bytes()
+    if mime not in _VLM_SAFE_MIME:  # e.g. webp -> PNG, so stb_image can decode it
+        raw, mime = _to_png(raw), "image/png"
+    encoded = base64.b64encode(raw).decode("ascii")
     return f"data:{mime};base64,{encoded}"
+
+
+def _to_png(raw: bytes) -> bytes:
+    """Decode an image the VLM backend can't read (webp) and re-encode it as PNG."""
+    try:
+        with Image.open(BytesIO(raw)) as img:
+            buffer = BytesIO()
+            img.convert("RGB").save(buffer, format="PNG")
+    except Exception as exc:
+        raise GroupingHintError(f"failed to transcode image to PNG for grouping: {exc}") from exc
+    return buffer.getvalue()
