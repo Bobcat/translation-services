@@ -191,6 +191,12 @@ class RequestRuntime:
                 "running": int(running),
                 "queue_depth": int(queue_depth),
                 "records": {"count": int(len(self._record_store.records))},
+                # The configured default models a request uses when it passes none. Clients
+                # surface this (e.g. to mark the default in a model picker).
+                "llm_pool": {
+                    "translator_model": str(self._settings.llm_pool.translator_model or ""),
+                    "grouping_model": str(self._settings.llm_pool.grouping_model or ""),
+                },
             }
 
     async def artifact_path(self, *, request_id: str, artifact_name: str) -> tuple[int, dict[str, Any]]:
@@ -324,7 +330,8 @@ class RequestRuntime:
             "source_lang_code": source_request.get("source_lang_code"),
             "target_lang_code": str(body.get("target_lang_code") or "").strip()
             or source_request.get("target_lang_code"),
-            "translator_model": source_request.get("translator_model"),
+            "translator_model": str(body.get("translator_model") or "").strip()
+            or source_request.get("translator_model"),
             "translator_mode": source_request.get("translator_mode"),
             "translation_prompt": str(body.get("translation_prompt") or ""),
             "translation_prompt_id": str(body.get("translation_prompt_id") or ""),
@@ -466,6 +473,11 @@ class RequestRuntime:
             "segments": result.segments,
             "metadata": dict(result.metadata),
             "metrics": dict(result.metrics),
+            # The full VLM/LLM call log (payload + response, image data-URIs already redacted),
+            # in order. Carried only on the terminal response (never while running), so clients
+            # can show the exact grouping/translation prompts and responses without re-reading
+            # the per-call files. May be empty for tasks that make no model calls.
+            "llm_calls": list(debug.get("llm_calls") or []),
         }
         if result.ocr is not None:
             response["ocr"] = dict(result.ocr)
