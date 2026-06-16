@@ -1,101 +1,129 @@
 # translation-services
 
-A FastAPI service for **queued translation jobs**. You submit a request (an
-image, later also plain text or a PDF), it runs through a task pipeline, and you
-poll for the result and its artifacts.
+A FastAPI service for **queued image-translation jobs**. You submit a request
+(an image plus a source/target language), it runs through a task pipeline — OCR,
+structural grouping, translation, and re-rendering the translated text back onto
+the image — and you poll for the result and its artifacts.
 
-It owns translation *input/output and orchestration*; it does not run language
-models itself — text translation is delegated to **`llm-pool`** over HTTP, and
-OCR runs locally via **PaddleOCR**.
+The service owns translation *input/output and orchestration*. It does not run
+language models itself: text translation and the vision grouping hint are
+delegated to a separate model pool (`llm-pool`) over HTTP, and OCR runs locally
+via PaddleOCR.
 
-## Tasks
+## Index
 
-| Task | In → out | Status |
-|---|---|---|
-| `translate_image` | image → translated image | in development (grouping + translation wired; rendering next) |
-| `translate_text` | text → translated text | planned (reuses routing + translation core) |
-| `translate_pdf` | pdf → translated pdf | later |
+- [What It Does](#what-it-does)
+- [Repository Role](#repository-role)
+- [Related Repositories](#related-repositories)
+- [Code Map](#code-map)
+- [API Surface](#api-surface)
+- [Runtime Model](#runtime-model)
+- [Configuration](#configuration)
+- [Development](#development)
+- [Tests](#tests)
+- [Deployment Notes](#deployment-notes)
+- [License](#license)
 
-A request carries a `task`; each task is a pipeline composed of shared stages.
+## What It Does
 
-## Architecture (composition root)
+- Accepts an uploaded image (`image/jpeg`, `image/png`, `image/webp`) and a
+  source/target language, and returns a **translated image**: the original text
+  is erased and the translation is re-rendered in place, matching line geometry,
+  size hierarchy, font family/weight, and alignment.
+- Runs the `translate_image` pipeline in stages:
+  1. **OCR** — PaddleOCR detects and recognizes text cells (with merge and
+     upright re-recognition passes). OCR cells stay authoritative for text and
+     bounding boxes.
+  2. **Grouping** — a vision-language model returns a structural hint (reading
+     order, hierarchy level, font, alignment); the aligner maps it back onto the
+     OCR cells and builds translation **units**. A weak hint lowers quality but
+     does not fail the job.
+  3. **Translation** — units are translated through `llm-pool`, with
+     language-pair routing and an optional prompt from the prompt library.
+  4. **Replacement** — the renderer erases the source text and draws the
+     translation back onto the image footprint.
+- Supports **re-translation** (`retranslate_image`): reuse a prior request's
+  cached OCR/grouping and only re-run translation with a different prompt or
+  target language — no OCR/VLM again.
+- Stores every stage as an inspectable **artifact** per request (grouping,
+  segments, translation, debug overlays, the rendered output, and the raw model
+  calls).
+- Exposes a small **prompt library** (CRUD) of saved translation system prompts.
+
+## Repository Role
+
+This repo owns:
+
+- The HTTP API and the request lifecycle (submit → queue → run → poll).
+- The job scheduler (FIFO queue, bounded concurrency, lifecycle records with
+  TTL).
+- The image pipeline stages (OCR, grouping/alignment, translation routing,
+  re-placement rendering) and their artifacts.
+
+It deliberately does **not** own:
+
+- The translation or vision models themselves — those are served by `llm-pool`
+  and selected by name in configuration.
+- Any client UI — callers are separate apps.
+
+## Related Repositories
+
+- **`llm-pool`** — serves the translation and vision-language models over an
+  HTTP `/v1/responses` API. `translation-services` calls it for both the
+  grouping hint and text translation; the model names are set in configuration.
+  Without it, OCR still runs but translation fails.
+- **Client apps** — any frontend that submits requests to this service's `/v1`
+  API (for example a translation workbench, or a webapp's image/camera flow).
+
+## Code Map
 
 `app/main.py` is the composition root and ASGI entry (`app.main:app`). It wires
-settings → runtime and exposes the API. Everything else is grouped by concern:
+settings → runtime and registers the HTTP routes. Everything else is grouped by
+concern:
 
 ```
 app/
-  main.py            # HTTP composition root
+  main.py            # HTTP composition root + route registration
   core/              # settings, request/response schemas, helpers
   runtime/           # job execution: FIFO queue, runner loop, lifecycle store
   tasks/             # feature pipelines — one module per task (the readable flows)
     translate_image.py
-  ocr/               # OCR component: paddle backend, merge, overlay
-  grouping/          # grouping component: VLM hint + aligner -> translation units
-  translation/       # translation component: language-pair routing + llm-pool translate
+    retranslate_image.py
+  ocr/               # OCR component: paddle backend, cell merge, segment, overlay
+  grouping/          # VLM hint + aligner -> translation units
+  translation/       # language-pair routing, llm-pool translate, prompt library
+  replacement/       # erase + re-render: geometry, fit, color, render
 ```
 
 To see how a feature works, open `tasks/<task>.py` — it reads as a recipe that
 calls named stages.
 
-## The translate_image pipeline
+## API Surface
 
-Vocabulary: a **cell** is one OCR box (text + bbox + confidence). A **translation
-unit** is a group of cells that are translated together, tagged **`flow`** (lines
-of one continuous text, e.g. a wrapped heading or paragraph) or **`field`** (a
-standalone label or value, e.g. a price or a table cell).
+All routes are versioned under `/v1`.
 
-| # | Stage | What | Status |
-|---|---|---|---|
-| 1 | **Ingest** | store canonical input (EXIF-transposed) | ✅ done (`app/main.py`) |
-| 2 | **OCR** | PaddleOCR → cells (detection resolution via `text_det_limit_side_len`); the recognition model is routed per image on the #5 hint's script (Han/Kana → multilingual server pair, else the en recognizer), so the hint is requested first | ✅ done (`ocr/`) |
-| 3 | **Orientation rescue** | re-recognise low-confidence cells by cropping + rotating (fixes garbled rotated text) | ⏳ planned |
-| 4 | **Coverage gate** | compare the VLM transcription (#5) to the cells; escalate OCR (higher `text_det_limit_side_len`) when much is missing | 🟡 byproduct of #5 available; gate itself parked |
-| 5 | **Grouping** (VLM-based) | a VLM groups text that belongs together (a heading, paragraph or item) so each coherent piece is translated as one unit; an aligner maps the groups onto the OCR cells | ✅ done (`grouping/`) |
-| 6 | **Routing** | single direct A→B path: the configured translator model + mode (seam for richer routing later) | ✅ done (`translation/routing.py`) |
-| 7 | **Translation** | call `llm-pool` (`/v1/responses`) per unit | ✅ done (`translation/translate.py`) |
-| 8 | **Re-placement** | render translated text back into the image ([design directions](docs/re-placement.md)) | 🟡 Tier-1 done (model-free simple replace) |
-
-OCR cells stay **authoritative** for text + bbox; the VLM is only a grouping
-*hint*, so a weak/incomplete VLM lowers quality but does not fail the job. That
-same VLM transcription doubles as the coverage reference for #4.
-
-Translation (#7) is **one `llm-pool` call per unit**, so dense images (receipts,
-menus) are costly. Batching several units into one call — if the translator
-handles it well without cross-talk — is a future optimization, not yet tried.
-
-## Current status
-
-Phase: **Tier-1 re-placement.** `translate_image` runs ingest → VLM hint (also
-routes the OCR model) → OCR → grouping alignment → per-unit routing + translation
-→ re-placement, and returns the OCR cells, the
-translation units (each with `translated_text`, `kind`, members), a grouping debug
-overlay, and the **`rendered`** artifact — the translated image (Tier-1 model-free
-simple replace; see [docs/re-placement.md](docs/re-placement.md) for the upgrade
-path). Translations also live in the response JSON (`ocr.translation_units`,
-`metadata.full_translated_text`).
-
-## Topology
-
-Runs on **dc1** (RTX 5070 Ti, port 8030). OCR runs locally on the GPU
-(PaddleOCR / PP-OCRv5, paddlepaddle-gpu cu130, ~2.5 GB).
-Translation is delegated to **`llm-pool` on dc2** via the existing SSH tunnel
-(`llm-pool-dc2-tunnel`, `127.0.0.1:8011`), where the larger translation models
-live.
-
-## API
-
-| Method | Path | |
+| Method | Path | Purpose |
 |---|---|---|
-| POST | `/v1/requests` | submit a job (`request_json` form field + `image_file`) |
-| GET | `/v1/requests/{id}` | lifecycle + result |
-| POST | `/v1/requests/{id}/cancel` | cancel |
-| GET | `/v1/requests/{id}/artifacts/{name}` | fetch an artifact (image/json) |
-| GET | `/v1/completions` | recent completion events |
-| GET | `/v1/status` | queue / runner status |
+| `POST` | `/v1/requests` | Submit a job. Multipart: `request_json` (a JSON object) + `image_file`. Returns the lifecycle envelope with a `request_id`. |
+| `GET` | `/v1/requests/{id}` | Poll the request lifecycle (`state`, `stage`, `timings`, `response`, `error`). |
+| `POST` | `/v1/requests/{id}/cancel` | Request cancellation. |
+| `POST` | `/v1/requests/{id}/retranslate` | Re-translate a completed request's cached units with a new prompt/target language. |
+| `GET` | `/v1/requests/{id}/artifacts/{name}` | Fetch a stored artifact (e.g. `rendered.png`, `translation.json`). |
+| `GET` `POST` | `/v1/prompts` | List / create saved prompts. |
+| `GET` `PUT` `DELETE` | `/v1/prompts/{id}` | Read / update / delete a saved prompt. |
+| `GET` | `/v1/completions` | Poll completed-request events (`events` + `next_seq` cursor). |
+| `GET` | `/v1/status` | Service status / health. |
 
-`request_json` fields: `task`, `source_lang_code`, `target_lang_code`, optional
-`translator_model` / `translator_mode`, optional `grouping_model`, optional `request_id`.
+`request_json` fields: `task` (`translate_image` \| `retranslate_image`),
+`source_lang_code` (**required for routing**), `target_lang_code`, optional
+`translator_model`, `translator_mode` (`generic` \| `translategemma`),
+`grouping_model`, `translation_prompt` / `translation_prompt_id`,
+`source_request_id` (for re-translate), `metadata`, `request_id`.
+
+Lifecycle `state`: `queued` → `running` → `completed` \| `failed` \|
+`cancelled` (with `cancel_requested` in between).
+
+Submit example:
 
 ```bash
 curl -sS -X POST http://127.0.0.1:8030/v1/requests \
@@ -103,26 +131,79 @@ curl -sS -X POST http://127.0.0.1:8030/v1/requests \
   -F 'image_file=@input.jpg;type=image/jpeg'
 ```
 
+## Runtime Model
+
+- Requests are admitted to a **FIFO queue** (bounded by `scheduler.queue_limit`)
+  and executed by a fixed number of concurrent **runner slots**
+  (`scheduler.runner_slots`). uvicorn runs without `--reload`, so code edits
+  require a restart.
+- Each request gets a directory under the configured `work_root` holding the
+  uploaded input and every stage artifact (grouping, segments, translation,
+  debug overlays, `rendered.png` / `output.png`, and the raw `llm_calls/`).
+- Terminal records are retained in memory with a per-state **TTL**
+  (`scheduler.records_ttl_s`) and capped at `scheduler.records_max`.
+- External dependency: `llm-pool` at `llm_pool.base_url` for the grouping hint
+  and translation calls.
+
 ## Configuration
 
-`config/settings.json` (version-controlled) + optional `config/local.json`
-(per-machine, gitignored, deep-merged). Key sections: `service`, `scheduler`
-(`runner_slots`, `queue_limit`), `ocr` (`backend`, `language`, `device`,
-`ocr_version`, `min_confidence`, `text_det_limit_side_len`, `text_det_limit_type`),
-`llm_pool` (`base_url`, `translator_model`, `translator_mode`, `grouping_model`).
+Settings load from `config/settings.json`, with an optional `config/local.json`
+overlaying per-host overrides (deep-merged, gitignored). The settings file path
+can be overridden with the `TRANSLATION_SERVICES_SETTINGS_PATH` environment
+variable.
 
-Translation is a single A→B path: `translator_model` is called in `translator_mode`
-(`generic` = a target-language prompt, auto-detects the source; `translategemma` =
-the dedicated model, needs `source_lang_code`). Per-pair/content routing was removed
-and will be reintroduced in `translation/routing.py` if testing shows the need.
+Key sections (see `app/core/config.py` for all defaults):
+
+- `service` — `host`, `port` (default `8030`), `log_level`, `work_root`,
+  `prompts_root`.
+- `scheduler` — `runner_slots`, `queue_limit`, `records_max`, `records_ttl_s`.
+- `llm_pool` — `base_url`, `translator_model`, `translator_mode`,
+  `grouping_model`, `request_timeout_s`. The model fields are names the pool
+  resolves; set them to models the pool actually serves.
+- `ocr` — `backend`, `language` (empty = route the recognizer per image from the
+  grouping hint), `min_confidence`, `device` (`cpu` / `gpu:0`), `ocr_version`,
+  detection limits, and optional explicit `det_model` / `rec_model`.
+
+`translator_mode`: `generic` uses a target-language prompt and auto-detects the
+source; `translategemma` uses the dedicated model and needs `source_lang_code`.
 
 ## Development
 
+Requires Python 3.11+.
+
 ```bash
-python3 -m venv .venv && .venv/bin/python -m pip install -e .
+python -m venv .venv
+.venv/bin/pip install -e .
 .venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 8030
-.venv/bin/python -m pytest tests/test_api.py
 ```
 
-Deploy: systemd user unit in `deploy/systemd/` (symlinked into
-`~/.config/systemd/user/translation-services.service`).
+PaddleOCR / PaddleX are heavy dependencies; the first OCR run downloads model
+weights. OCR can run on CPU or GPU via `ocr.device`. Translation requires a
+reachable `llm-pool`.
+
+## Tests
+
+```bash
+.venv/bin/python -m pytest tests/
+```
+
+`tests/` covers the API surface (`test_api.py`), grouping/alignment
+(`test_grouping.py`), re-placement rendering (`test_replacement.py`), and
+translation routing (`test_translate.py`).
+
+## Deployment Notes
+
+A systemd **user** unit and start script live under `deploy/systemd/` (the start
+script reads the port from `service.port` or `DEFAULT_PORT`). See
+`deploy/systemd/README.md` for install commands and the per-host venv override.
+
+**Render fonts are a prerequisite** and are not vendored: the renderer loads
+metric-compatible Latin faces (and Noto Sans KR for Korean) from a per-host
+fonts directory; Han/Kana fonts are fetched lazily by PaddleX. A missing font
+degrades gracefully (Latin falls back; CJK/Korean render as tofu), so fonts must
+be provisioned per host for correct output. Exact filenames and install steps
+are in `deploy/systemd/README.md`.
+
+## License
+
+No license file is present in this repository.
