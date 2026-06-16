@@ -17,9 +17,9 @@
   },
   "llm_pool": {
     "base_url": "http://127.0.0.1:8011",
-    "translator_model": "gemma-4-26b-a4b-it-nvidia-nvfp4-vllm",
+    "translator_model": "gemma-4-26b-a4b-it-nvidia-nvfp4-vllm-serve",
     "translator_mode": "generic",
-    "grouping_model": "gemma-4-26b-a4b-it-nvidia-nvfp4-vllm",
+    "grouping_model": "gemma-4-26b-a4b-it-nvidia-nvfp4-vllm-serve",
     "request_timeout_s": 120
   },
   "ocr": {
