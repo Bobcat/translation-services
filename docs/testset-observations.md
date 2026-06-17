@@ -173,10 +173,11 @@ footer, and parse the trailing `l/c/r` alignment field (`c` → center, recognis
 
 ## `cartoon.jpg` (meme with speech bubbles, Dutch, nl→en)
 
-Speech-bubble translation. Fixed: an inline non-translatable token ("1, 2, 3, 4?") was doubled
-(kept original + reproduced by the translation) and, once erased, briefly pushed its line out of
-the bubble. The renderer now erases a reproduced token's full footprint but takes the line's
-text size/position from the translatable members only.
+Speech-bubble translation. An inline non-translatable token ("1, 2, 3, 4?") was doubled (kept
+original + reproduced by the translation). A first render-side fix (erase a reproduced token's
+full footprint; size the line from the translatable members) was **reverted** — it made the
+cartoon worse overall — so this is **parked to revisit**; cartoon currently shows the doubled
+token again.
 
 Open / parked — **rounded-bubble erase clips the border.** The erase is an axis-aligned rectangle
 covering the original text extent (+pad). A speech bubble is rounded with an outline just outside
