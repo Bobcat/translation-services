@@ -169,3 +169,17 @@ from the per-line edges.
 (`app/grouping/vlm.py`): map the single-letter importance codes `t/h/b/m` → title/header/body/
 footer, and parse the trailing `l/c/r` alignment field (`c` → center, recognise `r`). The current
 `_level_of` / `_ALIGN_CENTER` only understand full words.
+
+
+## `cartoon.jpg` (meme with speech bubbles, Dutch, nl→en)
+
+Speech-bubble translation. Fixed: an inline non-translatable token ("1, 2, 3, 4?") was doubled
+(kept original + reproduced by the translation) and, once erased, briefly pushed its line out of
+the bubble. The renderer now erases a reproduced token's full footprint but takes the line's
+text size/position from the translatable members only.
+
+Open / parked — **rounded-bubble erase clips the border.** The erase is an axis-aligned rectangle
+covering the original text extent (+pad). A speech bubble is rounded with an outline just outside
+the text; when the translation is much shorter (e.g. "Hoedje van papier?" -> "Paper hat?"), the
+wide erase wipes the bubble's right rounded border and spills a little onto the photo. A clean fix
+needs the bubble shape (erase within the rounded outline / inpaint), so it is parked.
