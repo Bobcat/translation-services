@@ -269,13 +269,16 @@ def _plan_group(base: Image.Image, units: list[dict[str, Any]], *, snap_horizont
         })
 
     # Bullet items: keep the original bullet glyph by starting the erase/anchor at the text on
-    # the first (topmost) plane — the line that carries the bullet. The VLM flag makes this safe.
+    # the first (topmost) plane — the line that carries the bullet — and centre the re-rendered
+    # text on the bullet so they line up. The VLM flag makes this safe.
     if planes and any(u.get("bullet") for u in units):
         x_axis, y_axis, xmin, xmax, ymin, ymax = planes[0]["frame"]
-        text_start = _bullet_text_start(base, planes[0]["frame"], angle)
-        if text_start is not None and xmin < text_start < xmax:
+        geometry = _bullet_geometry(base, planes[0]["frame"], angle)
+        if geometry is not None and xmin < geometry[0] < xmax:
+            text_start, bullet_y = geometry
             planes[0]["frame"] = (x_axis, y_axis, text_start, xmax, ymin, ymax)
             planes[0]["width"] = xmax - text_start
+            planes[0]["bullet_y"] = bullet_y
 
     # The whole group renders at ONE size = the original's source size (true line height),
     # NOT a size chosen to fit the width. So a heading keeps heading size and body keeps
@@ -345,6 +348,11 @@ def _plan_group(base: Image.Image, units: list[dict[str, Any]], *, snap_horizont
             text_w = max(1, int(round(text_w_nat * condense)))
             if text_w != text_w_nat:
                 text_img = text_img.resize((text_w, text_h), Image.LANCZOS)
+            bullet_y = plane.get("bullet_y")
+            if bullet_y is not None:  # centre the text's ink on the preserved bullet glyph
+                rows = np.where((np.asarray(text_img)[:, :, 3] > 0).any(axis=1))[0]
+                if len(rows):
+                    oy = bullet_y - pad - (int(rows[0]) + int(rows[-1])) / 2.0
             tile_w = max(1, text_w + 2 * int(pad))
             tile_h = max(1, text_h + 2 * int(pad))
             ox = (xmin + xmax) / 2 - tile_w / 2 if centered else xmin - pad
@@ -372,14 +380,15 @@ def _plan_group(base: Image.Image, units: list[dict[str, Any]], *, snap_horizont
     return jobs
 
 
-def _bullet_text_start(base: Image.Image, frame: tuple, angle: float) -> float | None:
-    """Absolute x where the text starts on a bullet line — past the leading bullet glyph and
-    its gap — or None when no clear glyph+gap is found (or the line is tilted, where the
-    axis-aligned scan is unreliable). Scans the line's vertical band from a margin LEFT of the
-    plane edge, because the OCR cell box's left wanders relative to the fixed bullet (sometimes
-    landing right of it). The original bullet stays in the image; the caller starts the
-    erase/anchor here so it is not overwritten. Triggered only when the VLM flagged the unit as
-    a bullet item, so a stray short first word can't be mistaken for a bullet."""
+def _bullet_geometry(base: Image.Image, frame: tuple, angle: float) -> tuple[float, float] | None:
+    """For a bullet line, return (text_start_x, bullet_y_center) — where the text starts (past
+    the leading bullet glyph and its gap) and the bullet glyph's vertical centre. None when no
+    clear glyph+gap is found (or the line is tilted, where the axis-aligned scan is unreliable).
+    Scans the line's vertical band from a margin LEFT of the plane edge, because the OCR cell
+    box's left wanders relative to the fixed bullet (sometimes landing right of it). The original
+    bullet stays in the image; the caller starts the erase/anchor at the text and centres the
+    re-rendered text on the bullet. Triggered only when the VLM flagged the unit as a bullet
+    item, so a stray short first word can't be mistaken for a bullet."""
     if abs(angle) > _ANGLE_DEADZONE_DEG:
         return None
     _, _, xmin, xmax, ymin, ymax = frame
@@ -391,18 +400,20 @@ def _bullet_text_start(base: Image.Image, frame: tuple, angle: float) -> float |
         return None
     arr = np.asarray(base.crop((x0, y0, x1, y1)).convert("L")).astype(int)
     bg = int(np.median(arr))
-    ink = (np.abs(arr - bg) > 60).any(axis=0)              # columns holding a high-contrast pixel
+    mask = np.abs(arr - bg) > 60
+    ink = mask.any(axis=0)                                 # columns holding a high-contrast pixel
     runs = _ink_runs(ink)
     # Find the bullet: the first SMALL (dot-sized) run that is followed by a clear gap and then
-    # the text; return that text start. Skipping wider runs avoids mistaking adjacent layout ink
-    # (a coloured panel/book edge next to the column) for the bullet. The VLM flag guarantees a
-    # real bullet is present, so a small run + gap is it.
+    # the text. Skipping wider runs avoids mistaking adjacent layout ink (a coloured panel/book
+    # edge next to the column) for the bullet; the VLM flag guarantees a real bullet is present.
     min_width = max(2.0, 0.06 * line_h)  # a 1px anti-alias speck is not a bullet
     for i in range(len(runs) - 1):
         width = runs[i][1] - runs[i][0] + 1
         gap = runs[i + 1][0] - runs[i][1] - 1
         if min_width <= width <= 0.4 * line_h and gap >= 0.12 * line_h:
-            return float(x0 + runs[i + 1][0])
+            rows = np.where(mask[:, runs[i][0]:runs[i][1] + 1].any(axis=1))[0]
+            bullet_y = y0 + (rows.min() + rows.max()) / 2.0 if len(rows) else (y0 + y1) / 2.0
+            return float(x0 + runs[i + 1][0]), float(bullet_y)
     return None
 
 
