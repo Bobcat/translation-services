@@ -7,17 +7,13 @@ cell/text/box data, so this module has no dependency on ``align``.
 """
 from __future__ import annotations
 
-import difflib
 import re
-import unicodedata
 from statistics import median
 from typing import Any
 
+from app.grouping.tokens import _token_score
+from app.grouping.tokens import _tokens
 
-# Fuzzy token-match bounds: a token must be at least this long before a substring/ratio match
-# counts (so short tokens cannot collide by chance), and similarity must reach this ratio.
-_FUZZY_MIN_LEN = 4
-_FUZZY_RATIO = 0.8
 
 # Below this fraction of the line's text height a same-unit member is treated as an icon/badge
 # label rather than body text (see _is_icon_fragment).
@@ -30,38 +26,6 @@ _URL_SUFFIX = re.compile(r"\.(com|nl|org|net|io|de|fr|co|eu)\b")
 # alpha" rule below, so the price leaked into the translation and was re-drawn over the
 # original. Uppercase-only keeps lowercase measurements like "25 m" translatable as before.
 _PRICE_TAX = re.compile(r"^[€$£]?\s*[-+]?\s*\d[\d.,]*\s*[A-Z]?$")
-
-
-def _tokens(text: str) -> list[str]:
-    normalized = unicodedata.normalize("NFKD", str(text or "").lower())
-    stripped = "".join(char for char in normalized if not unicodedata.combining(char))
-    return re.findall(r"[a-z0-9]+", stripped)
-
-
-def _token_score(token: str, hint_set: set[str]) -> float:
-    """1.0 exact, else fuzzy (slightly lower, so exact wins a tie) for OCR garble: the cell
-    must still bind to its clean VLM line when OCR splits a word ("Kaar thouder" vs
-    "Kaarthouder") or drops/adds a character ("AHNEDAARDBEI" vs "AHNEDAARBEI") — otherwise
-    the cell becomes a leftover, the per-unit fallback translates the garbled text in
-    isolation, and the good structured translation of the VLM line is orphaned. Fuzzy =
-    substring or high character similarity, both only for tokens long enough that they
-    cannot collide by chance; below exact so "Kaart" still binds its own line, not
-    "Kaarthouder"."""
-    if token in hint_set:
-        return 1.0
-    if len(token) < _FUZZY_MIN_LEN:
-        return 0.0
-    for hint_token in hint_set:
-        if len(hint_token) < _FUZZY_MIN_LEN:
-            continue
-        if token in hint_token or hint_token in token:
-            return 0.9
-        shorter, longer = sorted((len(token), len(hint_token)))
-        if 2 * shorter / (shorter + longer) < _FUZZY_RATIO:  # ratio can't reach the bar
-            continue
-        if difflib.SequenceMatcher(None, token, hint_token).ratio() >= _FUZZY_RATIO:
-            return 0.9
-    return 0.0
 
 
 def _is_nontranslatable(text: str) -> bool:

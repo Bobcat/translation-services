@@ -21,8 +21,8 @@ from app.grouping.heuristics import _is_continuation
 from app.grouping.heuristics import _is_icon_fragment
 from app.grouping.heuristics import _is_nontranslatable
 from app.grouping.heuristics import _near
-from app.grouping.heuristics import _token_score
-from app.grouping.heuristics import _tokens
+from app.grouping.tokens import _token_score
+from app.grouping.tokens import _tokens
 from app.grouping.units import GroupingResult
 from app.grouping.units import TranslationUnit
 from app.grouping.units import UnitMember
