@@ -228,7 +228,7 @@ def _plan_group(base: Image.Image, units: list[dict[str, Any]], *, snap_horizont
             return [job for cell in cells for job in _plan_group(base, [cell], snap_horizontal=snap_horizontal)]
 
     texts: list[str] = []
-    group_quads: list = []
+    group_items: list = []  # (quad, is_translatable) per member
     for unit in units:
         translated = str(unit.get("translated_text") or "").strip()
         if len(translated) <= 1:  # empty / OCR-noise single char -> leave the original alone
@@ -238,18 +238,20 @@ def _plan_group(base: Image.Image, units: list[dict[str, Any]], *, snap_horizont
         # doesn't leave a doubled original. A standalone price/code the translation does not
         # contain (a receipt amount, a menu price) is left as its original pixels.
         norm_translated = _norm(translated)
-        members = [
-            m for m in (unit.get("members") or [])
-            if m.get("bbox") and (
-                m.get("translate")
-                or (len(_norm(m.get("text"))) >= 2 and _norm(m.get("text")) in norm_translated)
-            )
-        ]
-        quads = [quad for quad in (geo.quad_of(m) for m in members) if quad is not None]
-        if not quads:
+        unit_items: list = []
+        for m in (unit.get("members") or []):
+            if not m.get("bbox"):
+                continue
+            translatable = bool(m.get("translate"))
+            if not translatable and not (len(_norm(m.get("text"))) >= 2 and _norm(m.get("text")) in norm_translated):
+                continue
+            quad = geo.quad_of(m)
+            if quad is not None:
+                unit_items.append((quad, translatable))
+        if not unit_items:
             continue
         texts.append(translated)
-        group_quads.extend(quads)
+        group_items.extend(unit_items)
     if not texts:
         return []
 
@@ -263,19 +265,26 @@ def _plan_group(base: Image.Image, units: list[dict[str, Any]], *, snap_horizont
     # near-horizontal group angle to 0. A genuinely tilted sign is NOT flat (its angles form a
     # perspective gradient — afstand-houden runs ~1° at the top to ~8° at the bottom), so its
     # small top-line angles are kept; snapping only those would break the gradient.
-    angle = median(geo.angle_deg(quad) for quad in group_quads)
+    angle = median(geo.angle_deg(quad) for quad, _ in group_items)
     if snap_horizontal and abs(angle) < _ANGLE_DEADZONE_DEG:
         angle = 0.0
     size_ratio = _CJK_SIZE_RATIO if any(is_cjk_text(text) for text in texts) else _SIZE_RATIO
     planes: list[dict[str, Any]] = []
-    for quads in _line_clusters(group_quads, angle):
-        true_height = median(geo.line_height(quad) for quad in quads)
-        x_axis, y_axis, xmin, xmax, ymin, ymax = geo.oriented_frame(quads, angle)
+    for cluster in _line_clusters(group_items, angle):
+        all_quads = [quad for quad, _ in cluster]
+        # Text size/position follow the TRANSLATABLE members; a reproduced non-translatable token
+        # (a taller inline number) widens the line and is erased, but must not push the text line
+        # taller/lower than the words. The erase still spans all members so the token is removed.
+        text_quads = [quad for quad, translatable in cluster if translatable] or all_quads
+        true_height = median(geo.line_height(quad) for quad in text_quads)
+        _, _, _, _, tymin, tymax = geo.oriented_frame(text_quads, angle)
+        x_axis, y_axis, xmin, xmax, eymin, eymax = geo.oriented_frame(all_quads, angle)
         planes.append({
-            "quads": quads,
+            "quads": all_quads,
             "target": max(8, int(true_height * size_ratio)),
             "pad": max(2.0, true_height / 6.0),
-            "frame": (x_axis, y_axis, xmin, xmax, ymin, ymax),
+            "frame": (x_axis, y_axis, xmin, xmax, tymin, tymax),
+            "erase_y": (eymin, eymax),
             "width": xmax - xmin,
         })
 
@@ -342,10 +351,12 @@ def _plan_group(base: Image.Image, units: list[dict[str, Any]], *, snap_horizont
         oy = ymin - pad
         # Erase hugs the glyph extent vertically: only an AA margin beyond the text top/bottom,
         # not the full ``pad``, so the fill doesn't bite into a neighbour (a coloured band) just
-        # above or below the line. Sides keep ``pad`` and grow with the tile (below).
+        # above or below the line. Sides keep ``pad`` and grow with the tile (below). The erase
+        # spans all members vertically (``erase_y``) so a taller reproduced token is fully removed.
         margin = min(pad, _ERASE_MARGIN)
-        ey0 = ymin - margin
-        ex0, ex1, ey1 = xmin - pad, xmax + pad, ymax + margin
+        eymin, eymax = plane.get("erase_y", (ymin, ymax))
+        ey0 = eymin - margin
+        ex0, ex1, ey1 = xmin - pad, xmax + pad, eymax + margin
         tile: Image.Image | None = None
         dst_quad: list[tuple[float, float]] | None = None
         line = lines[index] if index < len(lines) else None  # extra planes: erase only
@@ -449,24 +460,25 @@ def _ink_runs(mask) -> list[tuple[int, int]]:
     return runs
 
 
-def _line_clusters(quads: list, angle: float) -> list[list]:
-    """Cluster member quads into physical text lines (top to bottom in the oriented
-    frame): a quad whose vertical centre falls inside the running cluster's extent is
-    on the same line; line pitch puts the next line's centre below it."""
+def _line_clusters(items: list, angle: float) -> list[list]:
+    """Cluster member (quad, is_translatable) items into physical text lines (top to bottom in
+    the oriented frame): a quad whose vertical centre falls inside the running cluster's extent
+    is on the same line; line pitch puts the next line's centre below it. The flag is carried
+    through so a line's text geometry can be taken from its translatable members only."""
     measured = []
-    for quad in quads:
+    for quad, translatable in items:
         _, _, _, _, oymin, oymax = geo.oriented_frame([quad], angle)
-        measured.append((oymin, oymax, quad))
+        measured.append((oymin, oymax, quad, translatable))
     measured.sort(key=lambda item: (item[0] + item[1]) / 2)
     clusters: list[list] = []
     extent_max = float("-inf")
-    for oymin, oymax, quad in measured:
+    for oymin, oymax, quad, translatable in measured:
         center = (oymin + oymax) / 2
         if clusters and center <= extent_max:
-            clusters[-1].append(quad)
+            clusters[-1].append((quad, translatable))
             extent_max = max(extent_max, oymax)
         else:
-            clusters.append([quad])
+            clusters.append([(quad, translatable)])
             extent_max = oymax
     return clusters
 
