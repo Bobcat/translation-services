@@ -233,7 +233,13 @@ def _plan_group(base: Image.Image, units: list[dict[str, Any]], *, snap_horizont
         translated = str(unit.get("translated_text") or "").strip()
         if len(translated) <= 1:  # empty / OCR-noise single char -> leave the original alone
             continue
-        members = [m for m in (unit.get("members") or []) if m.get("translate") and m.get("bbox")]
+        members = [m for m in (unit.get("members") or []) if m.get("bbox")]
+        # The translation reproduces this unit's whole text, including non-translatable tokens it
+        # contains (digits, "1, 2, 3, 4?"), so erase the FULL footprint — keeping those originals
+        # would double them. A unit with no translatable member at all (a standalone price/URL)
+        # has an empty translation and was already skipped above, so its pixels stay untouched.
+        if not any(m.get("translate") for m in members):
+            continue
         quads = [quad for quad in (geo.quad_of(m) for m in members) if quad is not None]
         if not quads:
             continue
