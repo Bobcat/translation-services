@@ -73,6 +73,10 @@ _USER_INSTRUCTION = (
     "2. **Reading order:** Process the text from top to bottom, following the natural "
     "reading order. For every piece of text, immediately precede it with its "
     "classification.\n\n"
+    "2.1 **Icons:** Ignore graphical icons and pictograms (a calendar, home, gear, "
+    "magnifier, info '(i)', a brand logo, etc.). They are not text and not part of any "
+    "element — do not output them or a name/placeholder for them. (List bullets are handled "
+    "in 4.1.)\n\n"
     "3. **Table rows :** If an element is a **table row**, put '|' between its fields.\n\n"
     "4. **Field values:** If an element has the format <Field-label> <Field-value>, put "
     "'|' between the label and the value.\n\n"
@@ -83,10 +87,10 @@ _USER_INSTRUCTION = (
     "6. **Alignment:** Determine the text elements alignment on the document. Put an l for "
     "left, c for centered or an r for right inside the label. Table rows and header rows "
     "are never centered.\n\n"
-    "# OUTPUT FORMAT (STRICT)\n"
-    "[Image classification: <classification in a few words>]\n"
-    "[<Importance t, h, b or m>|<font-family>|<font-size>pt| font-weight (100-900)>|"
-    "<alignment l, c or r>]: <text element>"
+    "# OUTPUT FORMAT (EXACT)\n"
+    "**Image classification: <classification in a few words>**\n"
+    "**<Importance t, h, b or m>|<font-family>|<font-size>pt| font-weight (100-900)>|"
+    "<alignment l, c or r>**: <text element>"
 )
 
 _MIME_BY_SUFFIX = {
@@ -172,9 +176,19 @@ def request_grouping_hint(
     return parse_grouping_output(output_text)
 
 
-# The model emits the label in Markdown (we ask for it), so tolerate bold/emphasis and a
-# colon around the bracket: "**[Level 1 / Title]** text", "[Level 3 / Body]: text", etc.
-_LABELED_LINE = re.compile(r"^\**\s*\[(?P<label>[^\[\]]+)\]\**\s*:?\s*\**\s*(?P<rest>.*)$")
+# The label's wrapper is whatever the model emits — it wavers between "[...]", "**...**" and no
+# wrapper at all from run to run. Match all three so a dropped wrapper never leaks the label into
+# the text: an optionally-bold "[label]", a "**label**", or a bare "t|...:" (the importance code +
+# fields, used to recognise an unwrapped label without catching ordinary "word: ..." text).
+_LABELED_LINE = re.compile(
+    r"^\s*(?:"
+    r"\**\s*\[(?P<br>[^\[\]]+)\]\**"
+    r"|\*\*(?P<st>(?:(?!\*\*).)+?)\*\*"
+    r"|\*(?P<si>[^*\n]+?)\*"
+    r"|(?P<bare>[thbm]\s*\|[^:\[\]\n]*)"
+    r")\s*:?\s*\**\s*(?P<rest>.*)$",
+    re.IGNORECASE,
+)
 
 # Alignment values. The prompt asks for a single-letter l/c/r field, but tolerate the spelled
 # words and both British/American "centre"/"center"/"centred"/"centered" spellings. Only
@@ -250,7 +264,7 @@ def parse_grouping_output(output_text: str) -> GroupingHint:
         level: str | None = None
         match = _LABELED_LINE.match(line)
         if match:
-            label = match.group("label").strip()
+            label = (match.group("br") or match.group("st") or match.group("si") or match.group("bare") or "").strip()
             text = match.group("rest").strip()
             if not text and ":" in label:  # "[Metadata/Footer: 23:53]" variant
                 label, text = (part.strip() for part in label.split(":", 1))
