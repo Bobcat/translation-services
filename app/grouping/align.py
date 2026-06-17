@@ -43,6 +43,7 @@ def build_units_from_hint(
     hint_alignments: list[str | None] | None = None,
     hint_families: list[str | None] | None = None,
     hint_weights: list[int | None] | None = None,
+    hint_bullets: list[bool] | None = None,
 ) -> GroupingResult:
     hint_token_sets = [set(_tokens(text)) for text in hint_units]
     matches = [_match_scores(cell, hint_token_sets) for cell in cells]
@@ -78,6 +79,7 @@ def build_units_from_hint(
             alignment=_hint_meta(label, hint_alignments),
             font_family=_hint_meta(label, hint_families),
             font_weight=_hint_meta(label, hint_weights),
+            bullet=bool(_hint_meta(label, hint_bullets)),
         )
         for order, (label, indices) in enumerate(groups, start=1)
     ]
@@ -405,6 +407,7 @@ def _build_unit(
     alignment: str | None = None,
     font_family: str | None = None,
     font_weight: int | None = None,
+    bullet: bool = False,
 ) -> TranslationUnit:
     members: list[UnitMember] = []
     for order, cell_index in enumerate(indices, start=1):
@@ -435,4 +438,5 @@ def _build_unit(
         alignment=alignment,
         font_family=font_family,
         font_weight=font_weight,
+        bullet=bullet,
     )

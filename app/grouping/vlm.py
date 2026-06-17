@@ -43,55 +43,50 @@ _MAX_OUTPUT_TOKENS = 4096
 #     wrapped lines merged, a receipt row, a paragraph). The label boundary IS the item
 #     boundary — each labeled line becomes its own block, and the renderer reflows the
 #     translation over the element's physical lines (recovered by geometry).
-#   - the label carries the visual typography OCR cannot give:
-#     "[Level n / Role | <font-family> | <font-size>pt | <font-weight> | centered]".
-#     parse_grouping_output strips it into a per-line level, font_family and font_weight.
-#     Size is requested but currently unused (OCR true-height drives the rendered size).
-#     font_family/weight are PER ELEMENT — a title and a body line can differ (e.g. an ad
-#     with a sans headline and a serif paragraph) — so the renderer picks a face per unit
-#     instead of one hard-coded font.
-#   - alignment is EXCEPTION-marked ("| centered" inside the label, left = default):
-#     near-free in tokens, ambiguity falls back to left. The shared-left-margin clause is
-#     load-bearing. A required left/center/right field was tried to prop up a weak quant, but
-#     the nvfp4 model marks "| centered" reliably (body 5/5, fonts stable), so the simpler
-#     exception form stays. A wrong hint is only cosmetic: the renderer moves the in-plane anchor.
+#   - the label carries the visual typography OCR cannot give, as a strict pipe-delimited
+#     field list: "[<importance t/h/b/m> | <font-family> | <font-size>pt | <font-weight> |
+#     <alignment l/c/r>]: text". parse_grouping_output strips it into a per-line level,
+#     font_family, font_weight and alignment. Size is requested but currently unused (OCR
+#     true-height drives the rendered size). font_family/weight are PER ELEMENT — a title and
+#     a body line can differ (e.g. an ad with a sans headline and a serif paragraph) — so the
+#     renderer picks a face per unit instead of one hard-coded font.
+#   - alignment is a REQUIRED l/c/r field (the strict format emits it every line, which keeps
+#     the ':' separator and the per-line label stable — an earlier exception-marked "| centered"
+#     drifted, omitting the ':' and re-emitting labels mid-row that leaked into the text). Only
+#     "c" is acted on; l/r both anchor at the line's own edge. A wrong hint is only cosmetic:
+#     the renderer moves the in-plane anchor.
 #   - "table row -> '|' between its fields" marks tabular layout; at element level it
 #     also splits a menu dish from its price column. (This is the field '|' in the text,
-#     distinct from the '|' separating the label's font fields inside the brackets.)
+#     distinct from the '|' separating the label's fields inside the brackets.)
 # Price/number cells are flagged non-translatable in align (_is_nontranslatable); the
 # '|' itself is not yet parsed into field structure.
 _SYSTEM_PROMPT = " "
 
 _USER_INSTRUCTION = (
-    "**Perform a structural analysis of the text in this image. Reconstruct the "
-    "document's hierarchy by labeling each element in its natural reading order.**\n\n"
-    "**Instructions:**\n\n"
+    "# TASK\n"
+    "Perform a structural analysis of the text in this image. Reconstruct the document's "
+    "hierarchy by labeling each element in its natural reading order.**\n\n"
+    "# INSTRUCTIONS\n"
     "1. **Analyze Visual Cues:** Use font size, font weight (boldness), spatial "
-    "positioning, and grouping to determine the importance of each text element.\n\n"
-    "2. **Linear Labeling (Do Not Group):** Do **not** group all elements of the same "
-    "level together. Instead, process the text from top to bottom, following the "
-    "natural reading order. For every piece of text, immediately precede it with its "
-    "classification:\n"
-    "    * **[Level 1 / Title | <font-family> | <font-size>pt | <font-weight (100-900)>]:** "
-    "The most prominent text (largest/boldest).\n"
-    "    * **[Level 2 / Header | <font-family> | <font-size>pt | <font-weight (100-900)>]:** "
-    "Sub-headings that introduce new sections.\n"
-    "    * **[Level 3 / Body | <font-family> | <font-size>pt | <font-weight (100-900)>]:** "
-    "Descriptive or supporting text.\n"
-    "    * **[Metadata/Footer]:** Small text at the edges, such as contact info, "
-    "dates, or fine print.\n\n"
-    "3. **Tables:** If an element is a table row, put '|' between its fields.\n\n"
-    "3.1. **Field values:** If an element has the format <Field-label> <Field-value>, "
-    "put '|' between the label and the value.\n\n"
-    "4. For font-family, provide your best best guess for a **specific font name** do "
+    "positioning, and grouping to determine the importance of each text element. Put a t "
+    "for title, h for header, b for body or a m for metadata/footers.\n\n"
+    "2. **Reading order:** Process the text from top to bottom, following the natural "
+    "reading order. For every piece of text, immediately precede it with its "
+    "classification.\n\n"
+    "3. **Table rows :** If an element is a **table row**, put '|' between its fields.\n\n"
+    "4. **Field values:** If an element has the format <Field-label> <Field-value>, put "
+    "'|' between the label and the value.\n\n"
+    "4.1 **Bullet-list items:** If an element has the format <bullet> <item>, output as "
+    "|@bullet|<item>.\n\n"
+    "5. For **font-family**, provide your best best guess for a **specific font name** do "
     "NOT just mention serif or sans-serif.\n\n"
-    "5. **Centered:** Append ' | centered' inside the classification only when an "
-    "element is horizontally centered. Elements that share a common left margin (a "
-    "list, a column) are left-aligned, never centered.\n\n"
-    "6. **Output Format:** Present the final structure using **Markdown formatting**. "
-    "The output must begin with a single line in the format **[Image Classification: "
-    "<just a few words>]**, followed by a continuous stream of labeled text that "
-    "follows the visual flow of the document. Output only the text."
+    "6. **Alignment:** Determine the text elements alignment on the document. Put an l for "
+    "left, c for centered or an r for right inside the label. Table rows and header rows "
+    "are never centered.\n\n"
+    "# OUTPUT FORMAT (STRICT)\n"
+    "[Image classification: <classification in a few words>]\n"
+    "[<Importance t, h, b or m>|<font-family>|<font-size>pt| font-weight (100-900)>|"
+    "<alignment l, c or r>]: <text element>"
 )
 
 _MIME_BY_SUFFIX = {
@@ -130,6 +125,10 @@ class GroupingHint:
     alignments: list[str | None] = field(default_factory=list)
     font_families: list[str | None] = field(default_factory=list)
     font_weights: list[int | None] = field(default_factory=list)
+    # Parallel to ``units``: True when the line was a bullet-list item (the VLM prefixed it
+    # with the "@blt|" sentinel, stripped here). The original bullet glyph is left in the image;
+    # the renderer only insets the text past it so the translation does not overwrite it.
+    bullets: list[bool] = field(default_factory=list)
 
 
 def request_grouping_hint(
@@ -177,14 +176,22 @@ def request_grouping_hint(
 # colon around the bracket: "**[Level 1 / Title]** text", "[Level 3 / Body]: text", etc.
 _LABELED_LINE = re.compile(r"^\**\s*\[(?P<label>[^\[\]]+)\]\**\s*:?\s*\**\s*(?P<rest>.*)$")
 
-# Alignment field values. Both British/American spellings ("centre"/"center") and the
-# "centred"/"centered" the model wavers between must read as centred. Only "center" is acted
-# on downstream; "left"/"right" are recognised so they aren't mistaken for a font-family field.
+# Alignment values. The prompt asks for a single-letter l/c/r field, but tolerate the spelled
+# words and both British/American "centre"/"center"/"centred"/"centered" spellings. Only
+# "center" is acted on downstream; left/right both anchor at the line's own edge. The words and
+# single letters are also skipped by _parse_label_fonts so they aren't taken for a font family.
 _ALIGN_CENTER = re.compile(r"\bcent(?:ered|er|red|re)\b")
-_ALIGN_WORD = re.compile(r"cent(?:ered|er|red|re)|left|right")
+_ALIGN_WORD = re.compile(r"cent(?:ered|er|red|re)|left|right|[lcr]")
 
-# Substring -> level, checked in order. "level N" first: the model sometimes drops the
-# word after the slash; the word checks catch the "[Metadata/Footer]" style labels.
+# A bullet-list item: the prompt has the VLM emit the text element as "|@bullet|<item>". We strip
+# the sentinel (tolerating leading/trailing pipes and the older "@blt" marker) and flag the unit;
+# the original bullet glyph stays in the image (the renderer insets the text past it).
+_BULLET_SENTINEL = re.compile(r"^\s*\|?\s*@(?:bullet|blt)\b\s*\|?\s*", re.IGNORECASE)
+
+# The label's first '|'-field is a single-letter importance code (the v3 prompt: t/h/b/m).
+_LEVEL_BY_CODE = {"t": "title", "h": "header", "b": "body", "m": "footer"}
+
+# Fallback substring -> level for a spelled-out role or the legacy "[Level n / Role]" wording.
 _LEVEL_BY_LABEL = (
     ("level 1", "title"),
     ("level 2", "header"),
@@ -217,6 +224,7 @@ def parse_grouping_output(output_text: str) -> GroupingHint:
     alignments: list[str | None] = []
     font_families: list[str | None] = []
     font_weights: list[int | None] = []
+    bullets: list[bool] = []
     block = 0
     block_open = False
     block_level: str | None = None
@@ -255,7 +263,7 @@ def parse_grouping_output(output_text: str) -> GroupingHint:
                 close_block()  # a label starts a new element
                 line = text
                 block_level = level
-                block_alignment = "center" if _ALIGN_CENTER.search(label.lower()) else None
+                block_alignment = _alignment_of(label)
                 block_family, block_weight = _parse_label_fonts(label)
                 if not line:  # standalone "[Level 3 / Body]" -> labels the lines below
                     continue
@@ -265,6 +273,9 @@ def parse_grouping_output(output_text: str) -> GroupingHint:
             category = line.split(":", 1)[1].strip()
             continue
         cleaned = line.lstrip("-*#").strip().strip("*").strip()
+        bullet = bool(_BULLET_SENTINEL.match(cleaned))
+        if bullet:  # strip the "@blt|" sentinel; the glyph itself stays in the image
+            cleaned = _BULLET_SENTINEL.sub("", cleaned).strip()
         if not cleaned or _is_separator(cleaned):
             continue
         units.append(cleaned)
@@ -273,6 +284,7 @@ def parse_grouping_output(output_text: str) -> GroupingHint:
         alignments.append(block_alignment)
         font_families.append(block_family)
         font_weights.append(block_weight)
+        bullets.append(bullet)
         block_open = True
     return GroupingHint(
         category=category,
@@ -283,10 +295,18 @@ def parse_grouping_output(output_text: str) -> GroupingHint:
         alignments=alignments,
         font_families=font_families,
         font_weights=font_weights,
+        bullets=bullets,
     )
 
 
 def _level_of(label: str) -> str | None:
+    # v3: the first '|'-field is the importance code (t/h/b/m); take it (exact, then by first
+    # letter so "title"/"header"/"body"/"metadata" also map). Else fall back to substring words.
+    first = label.split("|", 1)[0].strip().lower()
+    if first in _LEVEL_BY_CODE:
+        return _LEVEL_BY_CODE[first]
+    if first[:1] in _LEVEL_BY_CODE:
+        return _LEVEL_BY_CODE[first[:1]]
     lowered = label.lower()
     for key, level in _LEVEL_BY_LABEL:
         if key in lowered:
@@ -294,19 +314,30 @@ def _level_of(label: str) -> str | None:
     return None
 
 
+def _alignment_of(label: str) -> str | None:
+    """The alignment field (the v3 prompt's trailing l/c/r): 'c'/'centered' -> "center";
+    'l'/'r' -> None (left and right both anchor at the line's own edge). Falls back to a
+    legacy "| centered" appended anywhere in the label."""
+    last = label.rsplit("|", 1)[-1].strip().lower() if "|" in label else ""
+    if last in {"c", "center", "centre", "centered", "centred"}:
+        return "center"
+    if last in {"l", "left", "r", "right"}:
+        return None
+    return "center" if _ALIGN_CENTER.search(label.lower()) else None
+
+
 def _parse_label_fonts(label: str) -> tuple[str | None, int | None]:
     """Pull the font-family and font-weight out of a typography label.
 
-    The label reads "Level n / Role | <font-family> | <font-size>pt | <font-weight> |
-    centered"; only some fields may be present and their order can wobble. Weight is the
-    100-900 integer; family is the first remaining field that is not a size ("18pt"), a
-    weight, or an alignment word (centered/left/right — left/right are tolerated although the
-    prompt only emits "centered"). Size is deliberately discarded. Returns (None, None) when
-    the label carries no font fields (e.g. a bare "[Metadata/Footer]")."""
+    The v3 label reads "<importance> | <font-family> | <font-size>pt | <font-weight> |
+    <alignment>"; only some fields may be present and their order can wobble. Weight is the
+    100-900 integer; family is the first remaining field that is not a size ("18pt"), a weight,
+    or an alignment token (l/c/r or centered/left/right). Size is deliberately discarded.
+    Returns (None, None) when the label carries no font fields."""
     parts = [part.strip() for part in label.split("|")]
     family: str | None = None
     weight: int | None = None
-    for part in parts[1:]:  # parts[0] is the "Level n / Role" field
+    for part in parts[1:]:  # parts[0] is the importance code (t/h/b/m)
         lowered = part.lower()
         if not part or _ALIGN_WORD.fullmatch(lowered):
             continue

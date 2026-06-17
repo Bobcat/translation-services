@@ -72,6 +72,9 @@ class TranslationUnit:
     # cut when the weight is high. None for leftovers and unlabeled lines.
     font_family: str | None = None
     font_weight: int | None = None
+    # True when the hint line was a bullet-list item. The renderer insets the text past the
+    # original bullet glyph (left in the image) so the translation does not overwrite it.
+    bullet: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -85,6 +88,7 @@ class TranslationUnit:
             "alignment": self.alignment,
             "font_family": self.font_family,
             "font_weight": self.font_weight,
+            "bullet": self.bullet,
             "members": [member.to_dict() for member in self.members],
         }
 
@@ -105,6 +109,7 @@ class TranslationUnit:
             alignment=data.get("alignment"),
             font_family=data.get("font_family"),
             font_weight=int(font_weight) if font_weight is not None else None,
+            bullet=bool(data.get("bullet", False)),
         )
 
 
