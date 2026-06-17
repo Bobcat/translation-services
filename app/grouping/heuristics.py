@@ -106,20 +106,43 @@ def _near(a: tuple[float, ...], b: tuple[float, ...]) -> bool:
     return stacked or same_line
 
 
-def _is_icon_fragment(index: int, group_indices: list[int], cells: list[dict[str, Any]]) -> bool:
-    """A group member is an icon-label fragment when its glyphs are much shorter than the line's
-    other members (``_ICON_HEIGHT_RATIO``) and every token it carries is already covered by those
-    others (it adds no new word). Height alone would be too eager; redundancy alone would drop a
-    legitimate small repeat — together they pinpoint a badge label, regardless of where it sits."""
+def _cell_box(cell: dict[str, Any]) -> tuple[float, float, float, float]:
+    bbox = cell.get("bbox") or {}
+    left = float(bbox.get("left") or 0.0)
+    top = float(bbox.get("top") or 0.0)
+    return left, top, left + float(bbox.get("width") or 0.0), top + float(bbox.get("height") or 0.0)
+
+
+def _is_icon_fragment(
+    index: int,
+    group_indices: list[int],
+    cells: list[dict[str, Any]],
+    allow_detached: bool = True,
+) -> bool:
+    """A group member is an icon/logo fragment when every token it carries is already covered by
+    the line's other members (it adds no new word) AND it is set apart from them — either its
+    glyphs are much shorter than theirs (``_ICON_HEIGHT_RATIO``, a tiny badge label sitting on the
+    line, e.g. a "postnl" logo next to "Bezorging door PostNL") or it is a spatial outlier adjacent
+    to none of them (a logo elsewhere in the image, e.g. the "NIKE" on a shoe pulled into a body
+    line that names the product). Redundancy alone would drop a legitimate small repeat; height
+    alone misses a logo larger than the text; the set-apart test marks it as not part of the line.
+
+    ``allow_detached`` gates the spatial-outlier branch: the caller turns it off for ``|`` field
+    rows, whose fields are meant to sit apart, so a far-left quantity is not mistaken for a logo."""
     others = [j for j in group_indices if j != index]
     if not others:
         return False
     tokens = _tokens(str(cells[index].get("text") or ""))
     if not tokens:
         return False
+    other_tokens = {t for j in others for t in _tokens(str(cells[j].get("text") or ""))}
+    if not all(_token_score(token, other_tokens) > 0 for token in tokens):
+        return False  # carries a new word -> real content, keep it
     height = float((cells[index].get("bbox") or {}).get("height") or 0.0)
     others_median = median([float((cells[j].get("bbox") or {}).get("height") or 0.0) for j in others])
-    if height <= 0 or others_median <= 0 or height >= _ICON_HEIGHT_RATIO * others_median:
+    if 0.0 < height < _ICON_HEIGHT_RATIO * others_median:
+        return True
+    if not allow_detached:
         return False
-    other_tokens = {t for j in others for t in _tokens(str(cells[j].get("text") or ""))}
-    return all(_token_score(token, other_tokens) > 0 for token in tokens)
+    box = _cell_box(cells[index])
+    return not any(_near(box, _cell_box(cells[j])) for j in others)

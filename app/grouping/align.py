@@ -66,7 +66,7 @@ def build_units_from_hint(
 
     groups = _group_consecutive(labels)
     groups, ignored_indices = _consolidate_hint_claims(groups, cells, hint_units)
-    groups, icon_indices = _drop_icon_fragments(groups, cells)
+    groups, icon_indices = _drop_icon_fragments(groups, cells, hint_units)
     ignored_indices = list(ignored_indices) + icon_indices
     units = [
         _build_unit(
@@ -189,19 +189,23 @@ def _resolve_claim_clusters(
 def _drop_icon_fragments(
     groups: list[tuple[int | None, list[int]]],
     cells: list[dict[str, Any]],
+    hint_units: list[str],
 ) -> tuple[list[tuple[int | None, list[int]]], list[int]]:
-    """Drop a member that duplicates a word already in its unit AND is far smaller than the rest
-    of the line — an icon/badge's tiny embedded label OCR read as text (e.g. a "postnl" logo next
-    to "Bezorging door PostNL"). Such a fragment otherwise drags the unit's left edge and erase
-    onto the icon and pulls the rendered line height down. Dropped cells go to ``ignored`` (their
-    original pixels stay). Never empties a group."""
+    """Drop a member that duplicates a word already in its unit AND is set apart from the rest of
+    the line — an icon/badge's tiny embedded label OCR read as text (a "postnl" logo next to
+    "Bezorging door PostNL") or a logo elsewhere in the image bound to a line that names it (the
+    "NIKE" on a shoe pulled into a "Nike Sweet Classic …" body line). Such a fragment otherwise
+    drags the unit's box onto the icon. Dropped cells go to ``ignored`` (their original pixels
+    stay). Never empties a group. The spatial-outlier test is suppressed on ``|`` field rows, whose
+    fields (a receipt's far-left quantity vs far-right price) are *meant* to sit apart."""
     out: list[tuple[int | None, list[int]]] = []
     dropped: list[int] = []
     for label, indices in groups:
         if label is None or len(indices) < 2:
             out.append((label, indices))
             continue
-        kept = [i for i in indices if not _is_icon_fragment(i, indices, cells)]
+        single_field = "|" not in str(hint_units[label] or "")
+        kept = [i for i in indices if not _is_icon_fragment(i, indices, cells, allow_detached=single_field)]
         out.append((label, kept if kept else indices))
         if kept:
             dropped.extend(i for i in indices if i not in kept)
