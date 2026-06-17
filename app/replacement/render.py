@@ -233,13 +233,18 @@ def _plan_group(base: Image.Image, units: list[dict[str, Any]], *, snap_horizont
         translated = str(unit.get("translated_text") or "").strip()
         if len(translated) <= 1:  # empty / OCR-noise single char -> leave the original alone
             continue
-        members = [m for m in (unit.get("members") or []) if m.get("bbox")]
-        # The translation reproduces this unit's whole text, including non-translatable tokens it
-        # contains (digits, "1, 2, 3, 4?"), so erase the FULL footprint — keeping those originals
-        # would double them. A unit with no translatable member at all (a standalone price/URL)
-        # has an empty translation and was already skipped above, so its pixels stay untouched.
-        if not any(m.get("translate") for m in members):
-            continue
+        # Translatable members always; plus a non-translatable token ONLY when the translation
+        # reproduces it (an inline number/symbol like the meme's "1, 2, 3, 4?"), so erasing it
+        # doesn't leave a doubled original. A standalone price/code the translation does not
+        # contain (a receipt amount, a menu price) is left as its original pixels.
+        norm_translated = _norm(translated)
+        members = [
+            m for m in (unit.get("members") or [])
+            if m.get("bbox") and (
+                m.get("translate")
+                or (len(_norm(m.get("text"))) >= 2 and _norm(m.get("text")) in norm_translated)
+            )
+        ]
         quads = [quad for quad in (geo.quad_of(m) for m in members) if quad is not None]
         if not quads:
             continue
@@ -421,6 +426,12 @@ def _bullet_geometry(base: Image.Image, frame: tuple, angle: float) -> tuple[flo
             bullet_y = y0 + (rows.min() + rows.max()) / 2.0 if len(rows) else (y0 + y1) / 2.0
             return float(x0 + runs[i + 1][0]), float(bullet_y)
     return None
+
+
+def _norm(text: str | None) -> str:
+    """Whitespace-stripped, lowercased text for a loose containment test (e.g. is a cell's
+    '1,2,3,4?' reproduced inside a unit's translated '... 1, 2, 3, 4?')."""
+    return re.sub(r"\s+", "", str(text or "")).lower()
 
 
 def _ink_runs(mask) -> list[tuple[int, int]]:
