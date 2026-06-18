@@ -46,7 +46,11 @@ def build_units_from_hint(
     hint_bullets: list[bool] | None = None,
 ) -> GroupingResult:
     hint_token_sets = [set(_tokens(text)) for text in hint_units]
-    matches = [_match_scores(cell, hint_token_sets) for cell in cells]
+    token_to_hints = _build_hint_index(hint_token_sets)
+    matches = [
+        _match_scores(cell, hint_token_sets, _candidate_hints(cell, token_to_hints))
+        for cell in cells
+    ]
     positions, positions_anchored = _anchored_positions(cells, matches, len(hint_units))
     labels: list[int | None] = []
     previous_label: int | None = None
@@ -245,13 +249,46 @@ class _Match:
     full: tuple[int, ...] = ()  # of those, the lines the cell fully accounts for (every token)
 
 
-def _match_scores(cell: dict[str, Any], hint_token_sets: list[set[str]]) -> _Match:
+def _build_hint_index(hint_token_sets: list[set[str]]) -> dict[str, set[int]]:
+    """Inverted index: each hint token -> the line indices that contain it. Lets a cell be scored
+    against only the lines its tokens land in, instead of every line (O(cells x hints) -> ~O(cells)
+    for ordinary text where a token is shared by few lines)."""
+    index: dict[str, set[int]] = {}
+    for line, hint_set in enumerate(hint_token_sets):
+        for token in hint_set:
+            index.setdefault(token, set()).add(line)
+    return index
+
+
+def _candidate_hints(cell: dict[str, Any], token_to_hints: dict[str, set[int]]) -> set[int] | None:
+    """The hint lines a cell shares an EXACT token with — the only lines worth scoring for a
+    cleanly-read cell. ``None`` when it shares none: its tokens are OCR garble (or non-translatable)
+    that can still bind by the fuzzy substring/ratio match in _token_score, which the exact index
+    cannot see, so the caller falls back to scanning every line. Garble is the minority, so the
+    fallback is rare and the match stays near-linear. Verified to reproduce the full-scan result
+    across the testset (incl. garbled receipts) and the fixtures; see _match_scores."""
+    candidates: set[int] = set()
+    for token in _tokens(str(cell.get("text") or "")):
+        candidates.update(token_to_hints.get(token, ()))
+    return candidates or None
+
+
+def _match_scores(
+    cell: dict[str, Any],
+    hint_token_sets: list[set[str]],
+    candidate_indices: set[int] | None = None,
+) -> _Match:
     cell_tokens = _tokens(str(cell.get("text") or ""))
     if not cell_tokens:
         return _Match(candidates=[], score=0.0)
+    # ``candidate_indices`` (from _build_hint_index) are the only lines that can score > 0; the rest
+    # would add a 0 and be dropped anyway. Iterate them in index order so the result — ties and the
+    # ``full`` set — is identical to scanning every line. None = scan all (the unindexed path).
+    indices = range(len(hint_token_sets)) if candidate_indices is None else sorted(candidate_indices)
     matched_by_index: list[tuple[int, float]] = []
     best_matched = 0.0
-    for index, hint_set in enumerate(hint_token_sets):
+    for index in indices:
+        hint_set = hint_token_sets[index]
         if not hint_set:
             continue
         matched = sum(_token_score(token, hint_set) for token in cell_tokens)

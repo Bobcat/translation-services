@@ -1,7 +1,35 @@
 from __future__ import annotations
 
+from app.grouping.align import _build_hint_index
+from app.grouping.align import _candidate_hints
+from app.grouping.align import _match_scores
 from app.grouping.align import build_units_from_hint
 from app.grouping.hint_parser import parse_grouping_output
+from app.grouping.tokens import _tokens
+
+
+def test_candidate_hints_prunes_to_exact_lines_and_falls_back_on_garble() -> None:
+    hint_sets = [
+        set(_tokens("Franse vissoep met venkel")),
+        set(_tokens("Kaarthouder pas")),
+        set(_tokens("1 KARNEMELK 1,69")),
+    ]
+    index = _build_hint_index(hint_sets)
+    # a cleanly-read cell shares an exact token -> only the line(s) that hold it
+    assert _candidate_hints({"text": "vissoep"}, index) == {0}
+    # OCR garble shares no exact token -> None, so the caller full-scans and the fuzzy match in
+    # _token_score ("Kaarthuder" ~ "Kaarthouder") can still bind it
+    assert _candidate_hints({"text": "Kaarthuder"}, index) is None
+
+
+def test_match_scores_indexed_equals_full_scan() -> None:
+    hint_sets = [set(_tokens("alpha bravo")), set(_tokens("bravo charlie")), set(_tokens("delta"))]
+    index = _build_hint_index(hint_sets)
+    for text in ("bravo", "alpha bravo", "charlie delta", "Kaarthuder", "zzz"):
+        cell = {"text": text}
+        full = _match_scores(cell, hint_sets, None)
+        indexed = _match_scores(cell, hint_sets, _candidate_hints(cell, index))
+        assert (full.candidates, full.score, full.full) == (indexed.candidates, indexed.score, indexed.full), text
 
 
 def _cells() -> list[dict]:
