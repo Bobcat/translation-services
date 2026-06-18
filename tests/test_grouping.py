@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from app.grouping.align import build_units_from_hint
-from app.grouping.vlm import parse_grouping_output
+from app.grouping.hint_parser import parse_grouping_output
 
 
 def _cells() -> list[dict]:
@@ -206,17 +206,32 @@ def test_parse_grouping_output_strips_bullets_and_separators() -> None:
     assert hint.units == ["Alpha", "Beta", "Voorgerechten:", "Gamma"]
 
 
+def test_parse_colon_less_bullet_item_keeps_text_and_flags_bullet() -> None:
+    # The model emits a bullet item as "|@bullet|<item>" and sometimes jams it straight onto the
+    # label with no colon ("b|Roboto|24pt|400|l|@bullet|Auto kapot"). The bare label run must stop
+    # at "@" so the item survives in the text and the unit is flagged a bullet — not swallowed
+    # whole and dropped as an empty-text standalone label.
+    raw = (
+        "b|Roboto|24pt|400|l|@bullet|Auto kapot, ziek\n"
+        "b|Roboto|24pt|400|l|@bullet|Plots extra geld nodig\n"
+    )
+    hint = parse_grouping_output(raw)
+    assert hint.units == ["Auto kapot, ziek", "Plots extra geld nodig"]
+    assert hint.bullets == [True, True]
+    assert hint.levels == ["body", "body"]
+
+
 def test_parse_labeled_output_extracts_levels_and_blocks() -> None:
     # Every labeled line is its own element, so its own block.
     raw = (
-        "[Image Classification: Informational sign]\n"
+        "**Image classification: Informational sign**\n"
         "\n"
-        "[Level 1 / Title]: 25 m\n"
+        "t|DejaVu|28pt|700|c: 25 m\n"
         "\n"
-        "[Level 2 / Header] U bent te gast.\n"
-        "[Level 3 / Body] Zij kunnen u schade toebrengen.\n"
+        "h|DejaVu|20pt|500|l: U bent te gast.\n"
+        "b|DejaVu|16pt|400|l: Zij kunnen u schade toebrengen.\n"
         "\n"
-        "[Metadata/Footer]: 050 - 313 59 01\n"
+        "m|DejaVu|12pt|400|l: 050 - 313 59 01\n"
     )
     hint = parse_grouping_output(raw)
     assert hint.category == "Informational sign"
@@ -227,9 +242,10 @@ def test_parse_labeled_output_extracts_levels_and_blocks() -> None:
     assert hint.block_ids == [0, 1, 2, 3]
 
 
-def test_parse_labeled_output_text_inside_bracket_variant() -> None:
-    # The model wavers between "[Label] text" and "[Label: text]" — both must parse.
-    raw = "[Metadata/Footer: 23:53]\n[Level 1 / Title: 48 STUKS]\n"
+def test_parse_wrapped_label_with_text_inside_or_after() -> None:
+    # The model wavers between text inside the wrapped label ("**...: text**") and after it
+    # ("**...**: text") — both must parse to the same unit + level.
+    raw = "**m|Mono|12pt|400|l: 23:53**\n**t|Mono|28pt|700|l**: 48 STUKS\n"
     hint = parse_grouping_output(raw)
     assert hint.units == ["23:53", "48 STUKS"]
     assert hint.levels == ["footer", "title"]
@@ -239,9 +255,9 @@ def test_parse_continuation_lines_inherit_block_level_and_block() -> None:
     # If the model wraps an element over output lines anyway, the unlabeled
     # continuation inherits level AND block; the next label starts the next element.
     raw = (
-        "[Level 3 / Body] Biefstuk van de grill met rode wijn | € 18,75\n"
+        "b|Serif|16pt|400|l: Biefstuk van de grill met rode wijn | € 18,75\n"
         "jus, sjalotten, spitskool en frites\n"
-        "[Level 3 / Body] HESP classic burger met kaas, | € 14\n"
+        "b|Serif|16pt|400|l: HESP classic burger met kaas, | € 14\n"
         "tomaat, augurk, uitjes en frites\n"
     )
     hint = parse_grouping_output(raw)
@@ -249,14 +265,31 @@ def test_parse_continuation_lines_inherit_block_level_and_block() -> None:
     assert hint.block_ids == [0, 0, 1, 1]
 
 
-def test_parse_label_wrapped_in_markdown_bold() -> None:
-    # We ask for Markdown, so the model sometimes wraps the label in bold:
-    # "**[Level 1 / Title | centered]** DINER". The label must still parse, or every
-    # line falls into block 0 with no level and the whole document reflows as one group.
+def test_parse_single_star_colon_inside_label_is_the_locked_format() -> None:
+    # The locked-in prompt wraps the label in single stars with the ':' inside: "*label:* text"
+    # (the model drops the template's surrounding quotes). Classification, element level/font,
+    # a | field row kept verbatim, and a bullet must all parse cleanly.
     raw = (
-        "**[Level 1 / Title | centered]** DINER\n"
-        "**[Level 3 / Body]** Franse vissoep | € 8,50\n"
-        "**[Level 2 / Header]:** HOOFDGERECHTEN\n"
+        "*Image classification:* Weather application interface\n"
+        "*t|Roboto|28pt|400|l:* Springfield\n"
+        "*b|Roboto|16pt|400|l:* 8 jun | Vandaag | 11° / 21°\n"
+        "*b|Roboto|24pt|400|l:* |@bullet| Plots extra geld nodig\n"
+    )
+    hint = parse_grouping_output(raw)
+    assert hint.category == "Weather application interface"
+    assert hint.units == ["Springfield", "8 jun | Vandaag | 11° / 21°", "Plots extra geld nodig"]
+    assert hint.levels == ["title", "body", "body"]
+    assert hint.bullets == [False, False, True]
+    assert hint.font_families == ["Roboto", "Roboto", "Roboto"]
+
+
+def test_parse_label_wrapped_in_markdown_bold() -> None:
+    # The model often wraps the whole label in bold ("**t|Inter|28pt|700|c**: DINER"). It must
+    # still parse, or every line falls into block 0 with no level and reflows as one group.
+    raw = (
+        "**t|Inter|28pt|700|c**: DINER\n"
+        "**b|Inter|16pt|400|l**: Franse vissoep | € 8,50\n"
+        "**h|Inter|20pt|600|l:** HOOFDGERECHTEN\n"
     )
     hint = parse_grouping_output(raw)
     assert hint.units == ["DINER", "Franse vissoep | € 8,50", "HOOFDGERECHTEN"]
@@ -265,17 +298,9 @@ def test_parse_label_wrapped_in_markdown_bold() -> None:
     assert hint.block_ids == [0, 1, 2]
 
 
-def test_parse_level_label_without_type_word() -> None:
-    # The model sometimes drops the "/ Body" part: "[Level 3]" / "[Level 3 | centered]".
-    raw = "[Level 3] 25 m\n[Level 3 | centered] U bent te gast.\n"
-    hint = parse_grouping_output(raw)
-    assert hint.levels == ["body", "body"]
-    assert hint.alignments == [None, "center"]
-
-
 def test_parse_standalone_label_applies_to_following_lines() -> None:
     # Receipt style: the label on its own line, the text below it.
-    raw = "[Level 2 / Header]\nBETAALD MET:\n\n[Level 3 / Body]\nPINNEN | 58,51\n"
+    raw = "h|Mono|14pt|600|l:\nBETAALD MET:\n\nb|Mono|12pt|400|l:\nPINNEN | 58,51\n"
     hint = parse_grouping_output(raw)
     assert hint.units == ["BETAALD MET:", "PINNEN | 58,51"]
     assert hint.levels == ["header", "body"]
@@ -283,11 +308,12 @@ def test_parse_standalone_label_applies_to_following_lines() -> None:
 
 
 def test_parse_alignment_suffix_in_label() -> None:
-    # Alignment is exception-marked inside the label; unmarked elements stay None (left).
+    # The trailing l/c/r field sets alignment: 'c' -> center; 'l'/'r' -> None (both anchor at
+    # the line's own edge).
     raw = (
-        "[Level 2 / Header | centered] VOORGERECHTEN\n"
-        "[Level 3 / Body] Franse vissoep met venkel | € 8,50\n"
-        "[Level 1 / Title | centred]: DINER\n"
+        "h|Sans|20pt|600|c: VOORGERECHTEN\n"
+        "b|Sans|16pt|400|l: Franse vissoep met venkel | € 8,50\n"
+        "t|Sans|28pt|700|c: DINER\n"
     )
     hint = parse_grouping_output(raw)
     assert hint.alignments == ["center", None, "center"]
@@ -295,13 +321,42 @@ def test_parse_alignment_suffix_in_label() -> None:
     assert hint.units[0] == "VOORGERECHTEN"
 
 
-def test_parse_labeled_separator_content_is_dropped() -> None:
-    # A label wrapping a ruled line ("[Level 3 / Body] ------") is table decoration,
-    # not a unit; the receipt rows around it stay separate elements.
+def test_parse_typography_label_without_level_code_is_stripped() -> None:
+    # Some grouping models drop the leading t/h/b/m importance code and emit only the typography
+    # fields ("|Roboto|16pt|400|l: ..."). The label must still be stripped (else it leaks into the
+    # translated text), the font is still read, and the level falls back to None for that element.
     raw = (
-        "[Level 3 / Body] 1 | KARNEMELK | | 1,69 B\n"
-        "[Level 3 / Body] ------------------------\n"
-        "[Level 3 / Body] 20 | SUBTOTAAL | | 60,95\n"
+        "h|Roboto|16pt|400|l: Meerdaagse vooruitzichten\n"
+        "|Roboto|16pt|400|l: 8 jun | Vandaag | 11° / 21°\n"
+        "|Roboto|16pt|400|l: 9 jun | Morgen | 9° / 16°\n"
+    )
+    hint = parse_grouping_output(raw)
+    assert hint.units == [
+        "Meerdaagse vooruitzichten",
+        "8 jun | Vandaag | 11° / 21°",
+        "9 jun | Morgen | 9° / 16°",
+    ]
+    assert hint.levels == ["header", None, None]
+    assert hint.font_families == ["Roboto", "Roboto", "Roboto"]
+    # The no-level rows are their own elements, not continuations of the header block.
+    assert hint.block_ids == [0, 1, 2]
+
+
+def test_parse_field_row_without_typography_label_is_kept_verbatim() -> None:
+    # A real | field row carries no "<digits>pt" field, so it must not be mistaken for a label.
+    raw = "b|Roboto|16pt|400|l: 8 jun | Vandaag | 11° / 21°\n"
+    hint = parse_grouping_output(raw)
+    assert hint.units == ["8 jun | Vandaag | 11° / 21°"]
+    assert hint.levels == ["body"]
+
+
+def test_parse_labeled_separator_content_is_dropped() -> None:
+    # A label wrapping a ruled line ("b|...: ------") is table decoration, not a unit; the
+    # receipt rows around it stay separate elements.
+    raw = (
+        "b|Mono|14pt|400|l: 1 | KARNEMELK | | 1,69 B\n"
+        "b|Mono|14pt|400|l: ------------------------\n"
+        "b|Mono|14pt|400|l: 20 | SUBTOTAAL | | 60,95\n"
     )
     hint = parse_grouping_output(raw)
     assert hint.units == ["1 | KARNEMELK | | 1,69 B", "20 | SUBTOTAAL | | 60,95"]

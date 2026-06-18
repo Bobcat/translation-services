@@ -21,9 +21,6 @@ from __future__ import annotations
 
 import base64
 import copy
-import re
-from dataclasses import dataclass
-from dataclasses import field
 from io import BytesIO
 from pathlib import Path
 from typing import Any
@@ -32,6 +29,8 @@ import httpx
 from PIL import Image
 
 from app.core.config import AppSettings
+from app.grouping.hint_parser import GroupingHint
+from app.grouping.hint_parser import parse_grouping_output
 
 
 _RESPONSES_PATH = "/v1/responses"
@@ -113,28 +112,6 @@ class GroupingHintError(RuntimeError):
     """Raised when the grouping VLM call itself fails (transport / empty)."""
 
 
-@dataclass(frozen=True)
-class GroupingHint:
-    category: str
-    units: list[str]
-    raw: str = ""
-    # Parallel to ``units``: the visual hierarchy level of each line
-    # ("title" | "header" | "body" | "footer", None when unlabeled), the index of the
-    # element block it belongs to, its horizontal alignment ("center", None = left), and
-    # the VLM's per-element typography: font_family (a named font, None when unlabeled)
-    # and font_weight (100-900, None when unlabeled). The label's font-size is parsed off
-    # but intentionally not kept — OCR true-height drives the rendered size.
-    levels: list[str | None] = field(default_factory=list)
-    block_ids: list[int] = field(default_factory=list)
-    alignments: list[str | None] = field(default_factory=list)
-    font_families: list[str | None] = field(default_factory=list)
-    font_weights: list[int | None] = field(default_factory=list)
-    # Parallel to ``units``: True when the line was a bullet-list item (the VLM prefixed it
-    # with the "@blt|" sentinel, stripped here). The original bullet glyph is left in the image;
-    # the renderer only insets the text past it so the translation does not overwrite it.
-    bullets: list[bool] = field(default_factory=list)
-
-
 def request_grouping_hint(
     *,
     settings: AppSettings,
@@ -174,201 +151,6 @@ def request_grouping_hint(
         call_log=call_log,
     )
     return parse_grouping_output(output_text)
-
-
-# The label's wrapper is whatever the model emits — it wavers between "[...]", "**...**" and no
-# wrapper at all from run to run. Match all three so a dropped wrapper never leaks the label into
-# the text: an optionally-bold "[label]", a "**label**", or a bare "t|...:" (the importance code +
-# fields, used to recognise an unwrapped label without catching ordinary "word: ..." text).
-_LABELED_LINE = re.compile(
-    r"^\s*(?:"
-    r"\**\s*\[(?P<br>[^\[\]]+)\]\**"
-    r"|\*\*(?P<st>(?:(?!\*\*).)+?)\*\*"
-    r"|\*(?P<si>[^*\n]+?)\*"
-    r"|(?P<bare>[thbm]\s*\|[^:\[\]\n]*)"
-    r")\s*:?\s*\**\s*(?P<rest>.*)$",
-    re.IGNORECASE,
-)
-
-# Alignment values. The prompt asks for a single-letter l/c/r field, but tolerate the spelled
-# words and both British/American "centre"/"center"/"centred"/"centered" spellings. Only
-# "center" is acted on downstream; left/right both anchor at the line's own edge. The words and
-# single letters are also skipped by _parse_label_fonts so they aren't taken for a font family.
-_ALIGN_CENTER = re.compile(r"\bcent(?:ered|er|red|re)\b")
-_ALIGN_WORD = re.compile(r"cent(?:ered|er|red|re)|left|right|[lcr]")
-
-# A bullet-list item: the prompt has the VLM emit the text element as "|@bullet|<item>". We strip
-# the sentinel (tolerating leading/trailing pipes and the older "@blt" marker) and flag the unit;
-# the original bullet glyph stays in the image (the renderer insets the text past it).
-_BULLET_SENTINEL = re.compile(r"^\s*\|?\s*@(?:bullet|blt)\b\s*\|?\s*", re.IGNORECASE)
-
-# The label's first '|'-field is a single-letter importance code (the v3 prompt: t/h/b/m).
-_LEVEL_BY_CODE = {"t": "title", "h": "header", "b": "body", "m": "footer"}
-
-# Fallback substring -> level for a spelled-out role or the legacy "[Level n / Role]" wording.
-_LEVEL_BY_LABEL = (
-    ("level 1", "title"),
-    ("level 2", "header"),
-    ("level 3", "body"),
-    ("title", "title"),
-    ("header", "header"),
-    ("body", "body"),
-    ("footer", "footer"),
-    ("metadata", "footer"),
-)
-
-
-def parse_grouping_output(output_text: str) -> GroupingHint:
-    """Split the VLM output into the classification and the labeled hint lines.
-
-    The leading ``[Image Classification: ...]`` line becomes the category; every other
-    non-empty line is one unit. A ``[Level n / ...]`` / ``[Metadata/Footer]`` prefix is
-    stripped into the line's level — the model wavers between ``[Label] text``,
-    ``[Label: text]`` and a standalone ``[Label]`` line above the text; all three parse.
-    Every LABELED line starts a new block (the label boundary is the element boundary);
-    unlabeled lines (a wrapped continuation) join the block and inherit its level.
-    Blank lines and separator lines (``###`` / ``-----``) also close the block; leading
-    bullet/markdown markers are dropped. A legacy ``CATEGORY:`` first line still parses
-    as the category.
-    """
-    category = ""
-    units: list[str] = []
-    levels: list[str | None] = []
-    block_ids: list[int] = []
-    alignments: list[str | None] = []
-    font_families: list[str | None] = []
-    font_weights: list[int | None] = []
-    bullets: list[bool] = []
-    block = 0
-    block_open = False
-    block_level: str | None = None
-    block_alignment: str | None = None
-    block_family: str | None = None
-    block_weight: int | None = None
-
-    def close_block() -> None:
-        nonlocal block, block_open, block_level, block_alignment, block_family, block_weight
-        if block_open:
-            block += 1
-            block_open = False
-        block_level = None
-        block_alignment = None
-        block_family = None
-        block_weight = None
-
-    for raw in str(output_text or "").splitlines():
-        line = raw.strip()
-        if not line or _is_separator(line):
-            close_block()
-            continue
-        level: str | None = None
-        match = _LABELED_LINE.match(line)
-        if match:
-            label = (match.group("br") or match.group("st") or match.group("si") or match.group("bare") or "").strip()
-            text = match.group("rest").strip()
-            if not text and ":" in label:  # "[Metadata/Footer: 23:53]" variant
-                label, text = (part.strip() for part in label.split(":", 1))
-            if label.lower().startswith("image classification"):
-                if not category:
-                    category = text
-                continue
-            level = _level_of(label)
-            if level is not None:
-                close_block()  # a label starts a new element
-                line = text
-                block_level = level
-                block_alignment = _alignment_of(label)
-                block_family, block_weight = _parse_label_fonts(label)
-                if not line:  # standalone "[Level 3 / Body]" -> labels the lines below
-                    continue
-        if level is None:
-            level = block_level  # continuation line inherits the block's level
-        if not category and not units and line.lower().startswith("category:"):
-            category = line.split(":", 1)[1].strip()
-            continue
-        cleaned = line.lstrip("-*#").strip().strip("*").strip()
-        bullet = bool(_BULLET_SENTINEL.match(cleaned))
-        if bullet:  # strip the "@blt|" sentinel; the glyph itself stays in the image
-            cleaned = _BULLET_SENTINEL.sub("", cleaned).strip()
-        if not cleaned or _is_separator(cleaned):
-            continue
-        units.append(cleaned)
-        levels.append(level)
-        block_ids.append(block)
-        alignments.append(block_alignment)
-        font_families.append(block_family)
-        font_weights.append(block_weight)
-        bullets.append(bullet)
-        block_open = True
-    return GroupingHint(
-        category=category,
-        units=units,
-        raw=str(output_text or ""),
-        levels=levels,
-        block_ids=block_ids,
-        alignments=alignments,
-        font_families=font_families,
-        font_weights=font_weights,
-        bullets=bullets,
-    )
-
-
-def _level_of(label: str) -> str | None:
-    # v3: the first '|'-field is the importance code (t/h/b/m); take it (exact, then by first
-    # letter so "title"/"header"/"body"/"metadata" also map). Else fall back to substring words.
-    first = label.split("|", 1)[0].strip().lower()
-    if first in _LEVEL_BY_CODE:
-        return _LEVEL_BY_CODE[first]
-    if first[:1] in _LEVEL_BY_CODE:
-        return _LEVEL_BY_CODE[first[:1]]
-    lowered = label.lower()
-    for key, level in _LEVEL_BY_LABEL:
-        if key in lowered:
-            return level
-    return None
-
-
-def _alignment_of(label: str) -> str | None:
-    """The alignment field (the v3 prompt's trailing l/c/r): 'c'/'centered' -> "center";
-    'l'/'r' -> None (left and right both anchor at the line's own edge). Falls back to a
-    legacy "| centered" appended anywhere in the label."""
-    last = label.rsplit("|", 1)[-1].strip().lower() if "|" in label else ""
-    if last in {"c", "center", "centre", "centered", "centred"}:
-        return "center"
-    if last in {"l", "left", "r", "right"}:
-        return None
-    return "center" if _ALIGN_CENTER.search(label.lower()) else None
-
-
-def _parse_label_fonts(label: str) -> tuple[str | None, int | None]:
-    """Pull the font-family and font-weight out of a typography label.
-
-    The v3 label reads "<importance> | <font-family> | <font-size>pt | <font-weight> |
-    <alignment>"; only some fields may be present and their order can wobble. Weight is the
-    100-900 integer; family is the first remaining field that is not a size ("18pt"), a weight,
-    or an alignment token (l/c/r or centered/left/right). Size is deliberately discarded.
-    Returns (None, None) when the label carries no font fields."""
-    parts = [part.strip() for part in label.split("|")]
-    family: str | None = None
-    weight: int | None = None
-    for part in parts[1:]:  # parts[0] is the importance code (t/h/b/m)
-        lowered = part.lower()
-        if not part or _ALIGN_WORD.fullmatch(lowered):
-            continue
-        if re.fullmatch(r"\d{1,3}\s*pt", lowered):  # font-size: parsed off, not kept
-            continue
-        match = re.fullmatch(r"[1-9]00", part)
-        if match:
-            weight = int(part)
-            continue
-        if family is None:
-            family = part
-    return family, weight
-
-
-def _is_separator(line: str) -> bool:
-    compact = line.replace(" ", "")
-    return len(compact) >= 3 and set(compact) <= {"#", "-", "=", "*", ":"}
 
 
 def _redact_payload(payload: dict[str, Any]) -> dict[str, Any]:

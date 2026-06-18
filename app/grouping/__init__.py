@@ -16,7 +16,7 @@ from app.grouping.align import build_units_from_hint
 from app.grouping.units import GroupingResult
 from app.grouping.units import TranslationUnit
 from app.grouping.units import UnitMember
-from app.grouping.vlm import GroupingHint
+from app.grouping.hint_parser import GroupingHint
 from app.grouping.vlm import GroupingHintError
 from app.grouping.vlm import request_grouping_hint
 
