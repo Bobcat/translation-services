@@ -7,9 +7,21 @@ from PIL import Image
 from PIL import ImageDraw
 
 from app.replacement.color import sample_region_colors
+from app.replacement.fit import _dominant_script
 from app.replacement.fit import fit_text
 from app.replacement.render import _reproduced_in
 from app.replacement.render import render_translated_image
+
+
+def test_dominant_script_routes_by_majority_not_shared_danda() -> None:
+    # The Devanagari danda U+0964 ("।") ends Bengali / Tamil / Devanagari sentences alike; the face
+    # must follow the line's own (majority) script, not the first range that the danda falls in
+    # (which would send a whole Bengali line to the Devanagari face -> tofu).
+    assert _dominant_script("আপনি প্রবেশ করছেন।") == "NotoSansBengali[wght].ttf"
+    assert _dominant_script("வணக்கம் உலகம்।") == "NotoSansTamil[wght].ttf"
+    assert _dominant_script("नमस्ते दुनिया।") == "NotoSansDevanagari[wght].ttf"
+    assert _dominant_script("مرحبا بالعالم") == "NotoSansArabic[wght].ttf"
+    assert _dominant_script("Hello, world!") is None  # Latin -> family / DejaVu chain
 
 
 def test_reproduced_in_erases_inline_token_the_translation_repeats() -> None:

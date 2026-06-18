@@ -38,6 +38,18 @@ _FAMILY_FONTS = {
 # Thin, so we pin a regular weight when loading. Missing file degrades to the CJK/DejaVu chain.
 _KOREAN_FONT = _GF_DIR / "NotoSansKR[wght].ttf"
 _REGULAR_WEIGHT = 400
+# Scripts the Latin family faces (and mostly DejaVu) render as tofu — route each to its Noto Sans
+# face in the same per-user fonts dir when the text uses it. Variable fonts: their Regular instance
+# is pinned at load (some, e.g. Hebrew, default to Thin). A missing file degrades to the family /
+# DejaVu chain. (CJK + Hangul are handled separately above.) Each entry: (file, char ranges).
+_SCRIPT_FONTS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
+    ("NotoSansArabic[wght].ttf", (("؀", "ۿ"), ("ݐ", "ݿ"), ("ࢠ", "ࣿ"))),   # Arabic (+ Urdu, Persian)
+    ("NotoSansDevanagari[wght].ttf", (("ऀ", "ॿ"),)),                       # Hindi
+    ("NotoSansBengali[wght].ttf", (("ঀ", "৿"),)),
+    ("NotoSansThai[wght].ttf", (("฀", "๿"),)),
+    ("NotoSansHebrew[wght].ttf", (("֐", "׿"),)),
+    ("NotoSansTamil[wght].ttf", (("஀", "௿"),)),
+)
 _SERIF_HINTS = ("times", "georgia", "serif", "garamond", "minion", "cambria", "palatino", "baskerville", "didot", "book antiqua")
 _MONO_HINTS = ("courier", "mono", "consol", "menlo", "monaco", "typewriter")
 
@@ -105,6 +117,41 @@ def _load_korean_font(size: int) -> ImageFont.FreeTypeFont | None:
         return None
 
 
+def _dominant_script(text: str) -> str | None:
+    """The Noto font file for the complex script (Arabic / Devanagari / Bengali / Thai / Hebrew /
+    Tamil) covering the MOST of ``text``, or None. Majority, not first match: the Devanagari danda
+    "।" (U+0964/0965) ends Bengali, Tamil, … sentences too, so a first-match scan would send a whole
+    Bengali line to the Devanagari face (tofu) on that one shared char — counting keeps the line on
+    its own script, the danda being one char against its many letters."""
+    best_file: str | None = None
+    best_count = 0
+    for font_file, ranges in _SCRIPT_FONTS:
+        count = sum(lo <= ch <= hi for ch in text for lo, hi in ranges)
+        if count > best_count:
+            best_file, best_count = font_file, count
+    return best_file
+
+
+def _load_script_font(text: str, size: int) -> ImageFont.FreeTypeFont | None:
+    """The complex-script face for ``text`` (see _dominant_script), pinned to its Regular instance,
+    else None so the caller falls back to the family / DejaVu chain. Missing file -> None."""
+    font_file = _dominant_script(text)
+    if font_file is None:
+        return None
+    path = _GF_DIR / font_file
+    if not path.exists():
+        return None
+    try:
+        font = ImageFont.truetype(str(path), size)
+        try:
+            font.set_variation_by_name("Regular")
+        except Exception:
+            pass
+        return font
+    except Exception:
+        return None
+
+
 @dataclass(frozen=True)
 class FittedText:
     font: ImageFont.FreeTypeFont
@@ -115,10 +162,11 @@ class FittedText:
 def load_font(
     size: int, text: str = "", *, family: str | None = None, weight: int | None = None
 ) -> ImageFont.FreeTypeFont:
-    """Font for a rendered line. Korean (Hangul) uses Noto Sans KR; other CJK uses the CJK font;
-    both override the family, which has no such glyphs. Otherwise the VLM ``family``/``weight``
-    map to an installed face (bold cut at high weight); with no family hint, or a missing mapped
-    file, we fall back to DejaVu — preserving the previous behaviour for unlabeled lines."""
+    """Font for a rendered line, by script. Korean (Hangul) uses Noto Sans KR; other CJK uses the
+    CJK font; a complex script (Arabic/Devanagari/Bengali/Thai/Hebrew/Tamil) uses its Noto Sans
+    face — all override the family, which has no such glyphs. Otherwise the VLM ``family``/
+    ``weight`` map to an installed face (bold cut at high weight); with no family hint, or a missing
+    mapped file, we fall back to DejaVu — preserving the previous behaviour for unlabeled lines."""
     size = max(_MIN_SIZE, int(size))
     if _has_hangul(text):
         korean = _load_korean_font(size)
@@ -128,6 +176,9 @@ def load_font(
     if _has_cjk(text) or _has_hangul(text):
         cjk = _cjk_font_path()
         return _first_loadable((cjk, *_FONT_NAMES) if cjk else _FONT_NAMES, size)
+    script = _load_script_font(text, size)
+    if script is not None:
+        return script
     mapped = _load_mapped_font(family, weight, size)
     if mapped is not None:
         return mapped
