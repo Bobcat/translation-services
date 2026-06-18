@@ -4,7 +4,7 @@ Per-image findings from running the pipeline on `testset/` screenshots: what goe
 the diagnosed cause, and whether it is fixed or parked. Each entry names the test image so a
 fix can be re-checked against it.
 
-Last updated: 2026-06-16.
+Last updated: 2026-06-18.
 
 ---
 
@@ -173,14 +173,44 @@ footer, and parse the trailing `l/c/r` alignment field (`c` → center, recognis
 
 ## `cartoon.jpg` (meme with speech bubbles, Dutch, nl→en)
 
-Speech-bubble translation. An inline non-translatable token ("1, 2, 3, 4?") was doubled (kept
-original + reproduced by the translation). A first render-side fix (erase a reproduced token's
-full footprint; size the line from the translatable members) was **reverted** — it made the
-cartoon worse overall — so this is **parked to revisit**; cartoon currently shows the doubled
-token again.
+### Fixed
 
-Open / parked — **rounded-bubble erase clips the border.** The erase is an axis-aligned rectangle
+- **Inline non-translatable token doubled ("1, 2, 3, 4?").** When OCR splits the bold "1, 2, 3, 4?"
+  off the question into its own cell, it becomes a `translate:false` member the renderer keeps in
+  place — while the structured translation (of the whole hint line) re-emits "1, 2, 3, 4?", so the
+  token shows twice (the bold "|, 2, 3, 4?" beside the translated question). Fix:
+  `render._reproduced_in` pulls a non-translatable member into the unit's erase when its text is
+  reproduced in the translation AND the translation carries more than just that token, so the
+  translation covers it once; a standalone token translating to itself (a lone price) stays put.
+  An earlier fix (erase a reproduced token's full footprint + size the line from the translatable
+  members) was reverted for making the cartoon worse — this is the narrow erase-only variant,
+  outside that reverted line-geometry. Only manifests when OCR splits the token; when OCR keeps it
+  in the question cell there is no duplicate either way (so it is intermittent, OCR-split-driven).
+
+### Open / parked
+
+- **rounded-bubble erase clips the border.** The erase is an axis-aligned rectangle
 covering the original text extent (+pad). A speech bubble is rounded with an outline just outside
 the text; when the translation is much shorter (e.g. "Hoedje van papier?" -> "Paper hat?"), the
 wide erase wipes the bubble's right rounded border and spills a little onto the photo. A clean fix
 needs the bubble shape (erase within the rounded outline / inpaint), so it is parked.
+
+
+## Parked: VLM serving non-determinism (after the `*…:*` prompt lock-in)
+
+The grouping prompt is locked (`*<t|h|b|m>|<font>|<size>pt|<weight>|<l|c|r>:*` single-star label
++ "bullet = a NON-alphanumeric marker"); the parser absorbs the wrapper/code/marker drift. What
+remains is the model still varying its *structural* choices run to run on the same image + greedy
+decode — not a wrapper the parser can normalise. By agreement these are parked (prompt/model is the
+cause, not our code):
+
+- **kassabon — `JOUW VOORDEEL. 2,44` field split is intermittent.** Some runs emit it as a table
+  row (`JOUW VOORDEEL | 2,44`, the amount lands in the BEDRAG column); others as one text line
+  (`JOUW VOORDEEL. 2,44`, the amount kept in place as a `translate:false` member, not column-
+  aligned). Same image, same model — the `|` between label and amount comes and goes.
+
+- **unit-count wobble (no leaks).** `bol-philips` occasionally collapses to a couple of units, and
+  `weather-2` / `book-cover` swing ±1–2 units between runs. The dense `weather-1` multi-day table
+  is the recurring case: the model merges/splits its rows unpredictably. No leak — the text that
+  survives is clean — but the element count is not stable. A real fix is structural (constrain row
+  merging), separate from the prompt/parser work.
