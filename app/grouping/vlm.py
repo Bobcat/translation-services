@@ -43,8 +43,9 @@ _MAX_OUTPUT_TOKENS = 4096
 #     boundary — each labeled line becomes its own block, and the renderer reflows the
 #     translation over the element's physical lines (recovered by geometry).
 #   - the label carries the visual typography OCR cannot give, as a strict pipe-delimited
-#     field list: "[<importance t/h/b/m> | <font-family> | <font-size>pt | <font-weight> |
-#     <alignment l/c/r>]: text". parse_grouping_output strips it into a per-line level,
+#     field list, wrapped in single stars with the ':' inside: "*<importance t/h/b/m> |
+#     <font-family> | <font-size>pt | <font-weight> | <alignment l/c/r>:* text".
+#     parse_grouping_output strips it into a per-line level,
 #     font_family, font_weight and alignment. Size is requested but currently unused (OCR
 #     true-height drives the rendered size). font_family/weight are PER ELEMENT — a title and
 #     a body line can differ (e.g. an ad with a sans headline and a serif paragraph) — so the
@@ -56,7 +57,7 @@ _MAX_OUTPUT_TOKENS = 4096
 #     the renderer moves the in-plane anchor.
 #   - "table row -> '|' between its fields" marks tabular layout; at element level it
 #     also splits a menu dish from its price column. (This is the field '|' in the text,
-#     distinct from the '|' separating the label's fields inside the brackets.)
+#     distinct from the '|' separating the label's own fields inside the stars.)
 # Price/number cells are flagged non-translatable in align (_is_nontranslatable); the
 # '|' itself is not yet parsed into field structure.
 _SYSTEM_PROMPT = " "
@@ -79,17 +80,17 @@ _USER_INSTRUCTION = (
     "3. **Table rows :** If an element is a **table row**, put '|' between its fields.\n\n"
     "4. **Field values:** If an element has the format <Field-label> <Field-value>, put "
     "'|' between the label and the value.\n\n"
-    "4.1 **Bullet-list items:** If an element has the format <bullet> <item>, output as "
-    "|@bullet|<item>.\n\n"
+    "4.1 **Bullet-list items:** If an element has the format <not alphanumeric bullet> "
+    "<item> and <bullet>, output as |@bullet|<item>.\n\n"
     "5. For **font-family**, provide your best best guess for a **specific font name** do "
     "NOT just mention serif or sans-serif.\n\n"
     "6. **Alignment:** Determine the text elements alignment on the document. Put an l for "
     "left, c for centered or an r for right inside the label. Table rows and header rows "
     "are never centered.\n\n"
     "# OUTPUT FORMAT (EXACT)\n"
-    "**Image classification: <classification in a few words>**\n"
-    "**<Importance t, h, b or m>|<font-family>|<font-size>pt| font-weight (100-900)>|"
-    "<alignment l, c or r>**: <text element>"
+    "'*Image classification:*' <classification in a few words>\n"
+    "'*<Importance t, h, b or m>|<font-family>|<font-size>pt|<font-weight (100-900)>|"
+    "<alignment l, c or r>:*' <text element>"
 )
 
 _MIME_BY_SUFFIX = {
