@@ -28,6 +28,10 @@ class RequestPayload(BaseModel):
     translation_prompt: str | None = None
     translation_prompt_id: str | None = None
     source_request_id: str | None = None
+    # Render the OCR + grouping debug overlays (each a full-image PNG, ~0.5-1s). Off by default so
+    # a non-debug caller (e.g. the asr camera app, which only fetches the rendered translation)
+    # skips that work; the workbench sets it true to populate its overlay artifact dropdown.
+    debug_overlays: bool = False
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 

@@ -127,7 +127,7 @@ def render_translated_image(input_path: Path, translation_units: list[dict[str, 
             _composite(canvas, job)
 
     out = BytesIO()
-    Image.fromarray(canvas).save(out, format="PNG")
+    Image.fromarray(canvas).save(out, format="PNG", compress_level=1)
     return out.getvalue()
 
 

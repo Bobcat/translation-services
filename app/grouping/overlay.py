@@ -93,7 +93,7 @@ def render_grouping_overlay_debug(
         draw.line([(box[0][0], box[1][1]), (box[1][0], box[0][1])], fill=_GREY + (220,), width=line_width)
 
     out = BytesIO()
-    Image.alpha_composite(base, overlay).convert("RGB").save(out, format="PNG")
+    Image.alpha_composite(base, overlay).convert("RGB").save(out, format="PNG", compress_level=1)
     return GroupingOverlayDebug(
         image=out.getvalue(),
         metadata={

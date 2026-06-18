@@ -94,22 +94,39 @@ def run_translate_image_pipeline(
     )
     ocr_wall_ms = _elapsed_ms(ocr_started_at)
 
-    projected_overlay_debug = render_original_ocr_overlay_debug(
-        input_path=input_path,
-        ocr_segments=ocr_segments,
-    )
     cells = _ocr_cells(ocr_segments)
 
+    align_started_at = time.perf_counter()
     grouping = group_cells_into_units(
         cells=cells,
         hint=hint,
         model=grouping_model,
     )
-    grouping_overlay_debug = render_grouping_overlay_debug(
-        input_path=input_path,
-        result=grouping,
-        cells=cells,
-    )
+    align_wall_ms = _elapsed_ms(align_started_at)
+
+    # Debug overlays (OCR + grouping drawn on the image) are opt-in. Each renders and PNG-encodes
+    # the full-size image (~1s+ each) — pure overhead for a non-debug caller such as the asr camera
+    # app, which only fetches the rendered translation. The workbench asks for them via the request
+    # flag ``debug_overlays``; everyone else gets the fast path.
+    make_overlays = bool(request.get("debug_overlays"))
+    projected_overlay_debug = None
+    grouping_overlay_debug = None
+    ocr_overlay_wall_ms = 0.0
+    grouping_overlay_wall_ms = 0.0
+    if make_overlays:
+        overlay_started_at = time.perf_counter()
+        projected_overlay_debug = render_original_ocr_overlay_debug(
+            input_path=input_path,
+            ocr_segments=ocr_segments,
+        )
+        ocr_overlay_wall_ms = _elapsed_ms(overlay_started_at)
+        overlay_started_at = time.perf_counter()
+        grouping_overlay_debug = render_grouping_overlay_debug(
+            input_path=input_path,
+            result=grouping,
+            cells=cells,
+        )
+        grouping_overlay_wall_ms = _elapsed_ms(overlay_started_at)
 
     image_category = str(grouping.metadata.get("category") or "")
     translator_model = str(request.get("translator_model") or "").strip() or settings.llm_pool.translator_model
@@ -178,8 +195,11 @@ def run_translate_image_pipeline(
             "timings_ms": {
                 "ocr": ocr_wall_ms,
                 "grouping": grouping_wall_ms,
+                "align": align_wall_ms,
                 "translation": translation_wall_ms,
                 "replacement": replacement_wall_ms,
+                "ocr_overlay": ocr_overlay_wall_ms,
+                "grouping_overlay": grouping_overlay_wall_ms,
             },
         },
         "grouping": {
@@ -203,7 +223,7 @@ def run_translate_image_pipeline(
         "llm_calls": llm_calls,
     }
 
-    image = projected_overlay_debug.image or _input_png_bytes(input_path)
+    image = (projected_overlay_debug.image if projected_overlay_debug else None) or _input_png_bytes(input_path)
     metadata = {
         "ocr_backend": settings.ocr.backend,
         "ocr_language": ocr_language,
@@ -220,10 +240,12 @@ def run_translate_image_pipeline(
         "translation_instructions": sent_instructions,
         "note": "Returns OCR cells, VLM grouping, per-unit translations, and a Tier-1 re-placement rendering (model-free simple replace).",
     }
-    metadata.update(projected_overlay_debug.metadata)
+    if projected_overlay_debug is not None:
+        metadata.update(projected_overlay_debug.metadata)
     metadata["grouping_model"] = grouping.model
     metadata["image_category"] = image_category
-    metadata.update(grouping_overlay_debug.metadata)
+    if grouping_overlay_debug is not None:
+        metadata.update(grouping_overlay_debug.metadata)
     metadata.update(
         {
             "rectified_ocr_applied": False,
@@ -235,10 +257,10 @@ def run_translate_image_pipeline(
     return TranslateImageResult(
         image=image,
         mime_type="image/png",
-        projected_overlay_debug_image=projected_overlay_debug.image,
-        projected_overlay_debug_mime_type=projected_overlay_debug.mime_type,
-        grouping_overlay_debug_image=grouping_overlay_debug.image,
-        grouping_overlay_debug_mime_type=grouping_overlay_debug.mime_type,
+        projected_overlay_debug_image=projected_overlay_debug.image if projected_overlay_debug else None,
+        projected_overlay_debug_mime_type=projected_overlay_debug.mime_type if projected_overlay_debug else "image/png",
+        grouping_overlay_debug_image=grouping_overlay_debug.image if grouping_overlay_debug else None,
+        grouping_overlay_debug_mime_type=grouping_overlay_debug.mime_type if grouping_overlay_debug else "image/png",
         rendered_image=rendered_image,
         rendered_mime_type="image/png",
         segments=cells,
@@ -246,8 +268,11 @@ def run_translate_image_pipeline(
         metrics={
             "ocr_wall_ms": ocr_wall_ms,
             "grouping_wall_ms": grouping_wall_ms,
+            "align_wall_ms": align_wall_ms,
             "translation_wall_ms": translation_wall_ms,
             "replacement_wall_ms": replacement_wall_ms,
+            "ocr_overlay_wall_ms": ocr_overlay_wall_ms,
+            "grouping_overlay_wall_ms": grouping_overlay_wall_ms,
             "llm_pool_wall_ms": 0.0,
             "translate_image_total_wall_ms": _elapsed_ms(started_at),
             "ocr_segment_count": len(ocr_segments),
@@ -299,7 +324,7 @@ def _input_png_bytes(input_path: Path) -> bytes:
     from PIL import Image
 
     out = BytesIO()
-    Image.open(input_path).convert("RGB").save(out, format="PNG")
+    Image.open(input_path).convert("RGB").save(out, format="PNG", compress_level=1)
     return out.getvalue()
 
 

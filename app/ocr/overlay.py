@@ -48,7 +48,7 @@ def render_original_ocr_overlay_debug(
         draw.polygon(polygon, fill=(255, 255, 255, 150), outline=(255, 255, 255, 230))
 
     out = BytesIO()
-    Image.alpha_composite(image, overlay).convert("RGB").save(out, format="PNG")
+    Image.alpha_composite(image, overlay).convert("RGB").save(out, format="PNG", compress_level=1)
     return _overlay_result(
         image=out.getvalue(),
         reason="original_ocr_overlay_debug_applied",
