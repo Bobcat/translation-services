@@ -8,7 +8,27 @@ from PIL import ImageDraw
 
 from app.replacement.color import sample_region_colors
 from app.replacement.fit import fit_text
+from app.replacement.render import _reproduced_in
 from app.replacement.render import render_translated_image
+
+
+def test_reproduced_in_erases_inline_token_the_translation_repeats() -> None:
+    # OCR split the inline "1, 2, 3, 4?" off the question into its own non-translatable member;
+    # the structured translation re-emits it ("...after 1, 2, 3, 4?"), so the original must be
+    # erased (pulled into the unit's erase) — not kept on top, which doubles it.
+    assert _reproduced_in({"text": "1,2,3,4?"}, "Ruben, what comes after 1, 2, 3, 4?") is True
+
+
+def test_reproduced_in_keeps_a_token_that_is_the_whole_translation() -> None:
+    # A standalone non-translatable token translating to itself carries no other content, so it
+    # stays preserved in place (nothing to double it against).
+    assert _reproduced_in({"text": "58,41"}, "58,41") is False
+    assert _reproduced_in({"text": "€ 58,41"}, "€ 58,41") is False
+
+
+def test_reproduced_in_keeps_a_token_absent_from_the_translation() -> None:
+    # A price the translation does not contain (most receipt/menu prices) stays preserved.
+    assert _reproduced_in({"text": "8,50"}, "French fish soup with fennel") is False
 
 
 def test_sample_region_colors_dark_bg_gets_white_fg() -> None:

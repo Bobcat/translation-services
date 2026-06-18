@@ -221,6 +221,22 @@ def _text_similarity(a: str, b: str) -> float:
     return difflib.SequenceMatcher(None, na, nb).ratio()
 
 
+def _reproduced_in(member: dict[str, Any], translated: str) -> bool:
+    """Whether a NON-translatable member's text is re-emitted by the unit's translation, which
+    contains more than just that member. OCR sometimes splits an inline non-translatable token
+    (a "1, 2, 3, 4?", a code) into its own member; the structured translation still translates the
+    whole hint line, so it reproduces that token inline. Keeping the original on top then doubles
+    it. We erase such a member like a translatable one — but only when the translation carries OTHER
+    tokens too, so a standalone token translating to itself (a lone price) is left untouched."""
+    member_tokens = re.findall(r"\w+", str(member.get("text") or "").lower())
+    if not member_tokens:
+        return False
+    translation_tokens = set(re.findall(r"\w+", str(translated or "").lower()))
+    if not all(token in translation_tokens for token in member_tokens):
+        return False
+    return bool(translation_tokens - set(member_tokens))
+
+
 def _plan_group(base: Image.Image, units: list[dict[str, Any]], *, snap_horizontal: bool = False) -> list[_Job]:
     if len(units) == 1:
         cells = _split_table_row(units[0])
@@ -233,7 +249,10 @@ def _plan_group(base: Image.Image, units: list[dict[str, Any]], *, snap_horizont
         translated = str(unit.get("translated_text") or "").strip()
         if len(translated) <= 1:  # empty / OCR-noise single char -> leave the original alone
             continue
-        members = [m for m in (unit.get("members") or []) if m.get("translate") and m.get("bbox")]
+        members = [
+            m for m in (unit.get("members") or [])
+            if m.get("bbox") and (m.get("translate") or _reproduced_in(m, translated))
+        ]
         quads = [quad for quad in (geo.quad_of(m) for m in members) if quad is not None]
         if not quads:
             continue
