@@ -142,3 +142,68 @@ def test_generic_mode_uses_target_only_instructions(monkeypatch) -> None:
     assert "English" not in payload["instructions"]  # source must NOT be in the prompt
     assert "source_lang_code" not in payload
     assert payload["input"] == "The shoe works if you do."
+
+
+def test_generic_mode_names_client_target_languages_in_instructions(monkeypatch) -> None:
+    target_names = {
+        "af": "Afrikaans",
+        "ar": "Arabic",
+        "bg": "Bulgarian",
+        "bn": "Bengali",
+        "cs": "Czech",
+        "da": "Danish",
+        "de": "German",
+        "el": "Greek",
+        "en": "English",
+        "es": "Spanish",
+        "fa": "Persian",
+        "fi": "Finnish",
+        "fr": "French",
+        "he": "Hebrew",
+        "hi": "Hindi",
+        "hr": "Croatian",
+        "hu": "Hungarian",
+        "id": "Indonesian",
+        "it": "Italian",
+        "ja": "Japanese",
+        "ko": "Korean",
+        "ms": "Malay",
+        "nl": "Dutch",
+        "no": "Norwegian",
+        "pl": "Polish",
+        "pt": "Portuguese",
+        "ro": "Romanian",
+        "ru": "Russian",
+        "sk": "Slovak",
+        "sv": "Swedish",
+        "sw": "Swahili",
+        "ta": "Tamil",
+        "th": "Thai",
+        "tl": "Tagalog",
+        "tr": "Turkish",
+        "uk": "Ukrainian",
+        "ur": "Urdu",
+        "vi": "Vietnamese",
+        "zh": "Chinese",
+    }
+
+    for target_code, target_name in target_names.items():
+        payloads: list[dict] = []
+
+        def fake_post_capture(url, json, timeout):  # noqa: A002
+            payloads.append(json)
+            return _FakeResponse({"output_text": "x"})
+
+        monkeypatch.setattr(translate_module.httpx, "post", fake_post_capture)
+
+        translate_units(
+            settings=AppSettings(),
+            units=[_unit(1, "The shoe works if you do.")],
+            source_lang_code="en",
+            target_lang_code=target_code,
+            translator_model="gemma",
+            translator_mode="generic",
+        )
+
+        assert f"into {target_name}" in payloads[0]["instructions"]
+        assert f"into {target_code}" not in payloads[0]["instructions"]

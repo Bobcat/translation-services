@@ -43,11 +43,17 @@ _RESPONSES_PATH = "/v1/responses"
 # Language names read better than codes in the translation prompt; the engine
 # uses names too. Fall back to the raw code for anything not listed.
 _LANG_NAMES = {
-    "en": "English", "nl": "Dutch", "de": "German", "fr": "French", "es": "Spanish",
-    "it": "Italian", "pt": "Portuguese", "is": "Icelandic", "da": "Danish",
-    "sv": "Swedish", "no": "Norwegian", "fi": "Finnish", "pl": "Polish",
-    "cs": "Czech", "tr": "Turkish", "ru": "Russian", "zh": "Chinese",
-    "ja": "Japanese", "ko": "Korean", "ar": "Arabic",
+    "af": "Afrikaans", "ar": "Arabic", "bg": "Bulgarian", "bn": "Bengali",
+    "cs": "Czech", "da": "Danish", "de": "German", "el": "Greek",
+    "en": "English", "es": "Spanish", "fa": "Persian", "fi": "Finnish",
+    "fr": "French", "he": "Hebrew", "hi": "Hindi", "hr": "Croatian",
+    "hu": "Hungarian", "id": "Indonesian", "is": "Icelandic",
+    "it": "Italian", "ja": "Japanese", "ko": "Korean", "ms": "Malay",
+    "nl": "Dutch", "no": "Norwegian", "pl": "Polish", "pt": "Portuguese",
+    "ro": "Romanian", "ru": "Russian", "sk": "Slovak", "sv": "Swedish",
+    "sw": "Swahili", "ta": "Tamil", "th": "Thai", "tl": "Tagalog",
+    "tr": "Turkish", "uk": "Ukrainian", "ur": "Urdu", "vi": "Vietnamese",
+    "zh": "Chinese",
 }
 
 
