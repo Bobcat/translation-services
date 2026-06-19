@@ -246,3 +246,18 @@ Caveats: OCR *geometry* is reliable, but the rendered text itself can mis-read �
 position/size, not the exact string. Needs an explicit adjustment policy + a convergence stop or it
 oscillates. Note this targets the same root as the faint bottom-edge streaks (the rendered cell not
 sitting exactly on the source cell), without erase-margin tuning.
+
+
+## Idea: cover OCR-clipped descenders by source-text letters, not colour
+
+The OCR box ends ~3–5px above a descender's tip (g/j/p/q/y), so the original's tails bleed as faint
+bottom-edge streaks under a translated body line. Extending the erase down covers them, but that
+grows/notches a tight coloured band (the red WAARSCHUWING bar on circus). The two ends — a tight
+erase (clean band, streaks bleed) vs a wide erase (streaks gone, band grown) — are a genuine trade
+(swapping one regression for the other; observed flipping back and forth on circus vs adv-budgets).
+
+Clean discriminator, no colours / no pixel reading: extend the bottom ONLY for a line whose SOURCE
+text contains a descender letter (g/j/p/q/y), by one font ``descent``. All-caps / digit lines (a
+WARNING title, "2025") have none → stay tight → tight bands stay safe. A descender line that does
+sit in a band stays within it (a band is built on the line height, which already includes the
+descent). Parked for the eventual erase rebuild — text-based, self-discriminating, no margin tuning.
