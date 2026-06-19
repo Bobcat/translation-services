@@ -10,6 +10,7 @@ from app.replacement.color import sample_region_colors
 from app.replacement.fit import _dominant_script
 from app.replacement.fit import fit_text
 from app.replacement.render import _reproduced_in
+from app.replacement.render import _split_table_row
 from app.replacement.render import render_translated_image
 
 
@@ -36,6 +37,71 @@ def test_reproduced_in_keeps_a_token_that_is_the_whole_translation() -> None:
     # stays preserved in place (nothing to double it against).
     assert _reproduced_in({"text": "58,41"}, "58,41") is False
     assert _reproduced_in({"text": "€ 58,41"}, "€ 58,41") is False
+
+
+def test_split_table_row_groups_a_wrapped_column_into_one_cell() -> None:
+    # The spend column wrapped across 3 OCR lines (one field -> several members at the same x);
+    # the row must still split into 2 column-cells (company | spend), not bail because members
+    # outnumber fields. Each fragment binds to the spend field by containment, not full-line ratio.
+    unit = {
+        "field_translations": [
+            ("Amazon", "Amazon"),
+            ("$23,5 miljard aan advertising & promotional costs in 2025",
+             "$23.5 billion in advertising & promotional costs in 2025"),
+        ],
+        "members": [
+            {"text": "Amazon", "translate": True, "bbox": {"left": 50, "top": 388, "width": 160, "height": 58}},
+            {"text": "$23,5 miljard a", "translate": True, "bbox": {"left": 656, "top": 385, "width": 300, "height": 58}},
+            {"text": "advertising &", "translate": True, "bbox": {"left": 655, "top": 470, "width": 300, "height": 56}},
+            {"text": "promotional co", "translate": True, "bbox": {"left": 656, "top": 554, "width": 300, "height": 51}},
+        ],
+    }
+    cells = _split_table_row(unit)
+    assert cells is not None and len(cells) == 2
+    by_left = {c["members"][0]["bbox"]["left"]: c for c in cells}
+    assert set(by_left) == {50, 656}  # a company column and a spend column, at distinct x
+    assert by_left[50]["translated_text"] == "Amazon"
+    assert by_left[50]["members"] == [unit["members"][0]]  # company cell = its one member
+    assert len(by_left[656]["members"]) == 3  # spend cell = all three wrapped fragments
+    assert "advertising" in by_left[656]["translated_text"]
+
+
+def test_split_table_row_pulls_a_reproduced_number_line_into_its_column() -> None:
+    # The spend column's last line "2025" is a pure number -> non-translatable, but the spend
+    # translation re-emits it. It must join the spend cell so the column erase covers it, instead
+    # of the original "2025" showing through under the smaller re-rendered text.
+    unit = {
+        "field_translations": [
+            ("Amazon", "Amazon"),
+            ("$23,5 miljard aan advertising in 2025", "$23.5 billion in advertising in 2025"),
+        ],
+        "members": [
+            {"text": "Amazon", "translate": True, "bbox": {"left": 50, "top": 388, "width": 160, "height": 58}},
+            {"text": "$23,5 miljard aan advertising", "translate": True,
+             "bbox": {"left": 656, "top": 385, "width": 300, "height": 58}},
+            {"text": "2025", "translate": False, "bbox": {"left": 656, "top": 470, "width": 90, "height": 50}},
+        ],
+    }
+    cells = _split_table_row(unit)
+    assert cells is not None and len(cells) == 2
+    spend = next(c for c in cells if c["members"][0]["bbox"]["left"] == 656)
+    assert "2025" in [m["text"] for m in spend["members"]]  # reproduced number pulled in to be erased
+
+
+def test_split_table_row_shares_one_box_between_two_fields() -> None:
+    # The VLM split 'PRIJS | BEDRAG' but OCR read it as a single box, alongside a second column.
+    # The lone box carries both field translations in field order; the row still yields 2 cells.
+    unit = {
+        "field_translations": [("PRIJS", "PRICE"), ("BEDRAG", "AMOUNT"), ("TOTAAL", "TOTAL")],
+        "members": [
+            {"text": "PRIJS BEDRAG", "translate": True, "bbox": {"left": 40, "top": 10, "width": 200, "height": 30}},
+            {"text": "TOTAAL", "translate": True, "bbox": {"left": 400, "top": 10, "width": 120, "height": 30}},
+        ],
+    }
+    cells = _split_table_row(unit)
+    assert cells is not None and len(cells) == 2
+    shared = next(c for c in cells if c["members"][0]["bbox"]["left"] == 40)
+    assert shared["translated_text"] == "PRICE AMOUNT"  # both fields, kept in field order
 
 
 def test_reproduced_in_keeps_a_token_absent_from_the_translation() -> None:

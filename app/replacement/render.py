@@ -172,53 +172,84 @@ def _image_is_flat(units: list[dict[str, Any]]) -> bool:
 
 
 def _split_table_row(unit: dict[str, Any]) -> list[dict[str, Any]] | None:
-    """A table row (the VLM hint carried '|' fields) with >= 2 translatable fields becomes
-    one pseudo-unit per CELL, so the renderer places each in its own column instead of
-    reflowing the joined line over the row's union — which would collapse the column gaps and
-    shift the text leftward.
+    """A table row (the VLM hint carried '|' fields) with >= 2 translatable fields becomes one
+    pseudo-unit per COLUMN, so the renderer places each at its own x instead of reflowing the
+    joined line over the row's union — which would collapse the column gaps and shift the spend
+    text left, right behind the company name.
 
-    Each field is bound to the cell whose SOURCE text it best matches (not by order — the VLM
-    does not always list fields left-to-right). Several fields can share one cell: the hint may
-    split 'PRIJS | BEDRAG' where OCR read a single 'PRIJS BEDRAG' box, and that cell then
-    renders both translations in field order. Returns None when the unit is not such a row,
-    there are more cells than fields, a field has no confident match, or a cell ends up with no
-    field at all (then the normal reflow path runs)."""
+    Members are grouped by the field whose SOURCE text they best match (not by order — the VLM
+    does not always list fields left-to-right). A field may own SEVERAL members: a column OCR
+    split into wrapped lines (a long spend description) then renders its one translation reflowed
+    over those lines. Conversely several fields may share one column: a 'PRIJS | BEDRAG' hint that
+    OCR read as a single box renders both translations in field order. Returns None when the unit
+    is not such a row, a member has no confident field, or every member lands in one column (then
+    the normal reflow path runs)."""
     pairs = unit.get("field_translations")
     if not pairs or len(pairs) < 2:
         return None
-    members = [m for m in (unit.get("members") or []) if m.get("translate") and m.get("bbox")]
-    if not 2 <= len(members) <= len(pairs):
-        return None
-    assigned: dict[int, list[str]] = {}
-    for source, translated in pairs:
-        best_index, best_score = None, 0.0
-        for index, member in enumerate(members):
-            score = _text_similarity(source, str(member.get("text") or ""))
+    # Bind each member (OCR cell) to the field whose SOURCE text it best matches and group members
+    # by field — a field may own several members when OCR split a column into wrapped lines. Keep a
+    # translatable member always (one we cannot place makes the split unreliable -> reflow); keep a
+    # NON-translatable member only when the field's translation reproduces it (a pure-number line
+    # like '2025' the translation re-emits), so the column erase covers it instead of leaving the
+    # original showing under the re-rendered text. Other non-translatable members (an icon, a
+    # self-standing price) are left untouched.
+    columns: dict[int, list[dict[str, Any]]] = {}
+    translatable = 0
+    for member in unit.get("members") or []:
+        if not member.get("bbox"):
+            continue
+        best_field, best_score = None, 0.0
+        for index, (source, _translated) in enumerate(pairs):
+            score = _field_overlap(source, str(member.get("text") or ""))
             if score > best_score:
-                best_index, best_score = index, score
-        if best_index is None or best_score < _FIELD_MATCH_MIN:
-            return None
-        assigned.setdefault(best_index, []).append(translated)
-    if len(assigned) != len(members):  # a cell with no field -> fall back to reflow
+                best_field, best_score = index, score
+        placed = best_field is not None and best_score >= _FIELD_MATCH_MIN
+        if member.get("translate"):
+            if not placed:
+                return None
+            translatable += 1
+        elif not (placed and _reproduced_in(member, pairs[best_field][1])):
+            continue
+        columns.setdefault(best_field, []).append(member)
+    if translatable < 2 or len(columns) < 2:
         return None
+    # A field with no member of its own shares a column (a 'PRIJS | BEDRAG' hint OCR read as one
+    # box): attach its translation to the column whose members it best matches, kept in field
+    # order so the cell renders the fields as written.
+    column_texts: dict[int, list[tuple[int, str]]] = {field: [(field, pairs[field][1])] for field in columns}
+    for index, (source, translated) in enumerate(pairs):
+        if index in columns:
+            continue
+        best_field, best_score = None, 0.0
+        for field, cell_members in columns.items():
+            score = max(_field_overlap(source, str(m.get("text") or "")) for m in cell_members)
+            if score > best_score:
+                best_field, best_score = field, score
+        if best_field is None or best_score < _FIELD_MATCH_MIN:
+            return None
+        column_texts[best_field].append((index, translated))
     cells: list[dict[str, Any]] = []
-    for index, member in enumerate(members):
+    for field, cell_members in columns.items():
         cell = dict(unit)
-        cell["translated_text"] = " ".join(assigned[index])
-        cell["members"] = [member]
+        cell["translated_text"] = " ".join(text for _, text in sorted(column_texts[field]))
+        cell["members"] = cell_members
         cell["field_translations"] = None  # already split — don't re-enter
         cells.append(cell)
     return cells
 
 
-def _text_similarity(a: str, b: str) -> float:
-    """Alphanumeric-only character-ratio similarity (tolerant to OCR garble like
-    AHNEDAARBEI vs AHNEDAARDBEI), used to bind a source field to its cell."""
+def _field_overlap(a: str, b: str) -> float:
+    """Overlap of a row member against a field source: matched run length over the SHORTER of the
+    two (alphanumeric-only, tolerant to OCR garble like AHNEDAARBEI vs AHNEDAARDBEI). 1.0 when one
+    contains the other, so a column OCR split into wrapped fragments ('advertising &') still binds
+    to its full field source — which a symmetric ratio scores too low to clear _FIELD_MATCH_MIN."""
     na = re.sub(r"[^a-z0-9]", "", str(a or "").lower())
     nb = re.sub(r"[^a-z0-9]", "", str(b or "").lower())
     if not na or not nb:
         return 0.0
-    return difflib.SequenceMatcher(None, na, nb).ratio()
+    matched = sum(block.size for block in difflib.SequenceMatcher(None, na, nb).get_matching_blocks())
+    return matched / min(len(na), len(nb))
 
 
 def _reproduced_in(member: dict[str, Any], translated: str) -> bool:
