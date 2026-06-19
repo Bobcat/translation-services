@@ -109,4 +109,12 @@ def _is_icon_fragment(
     if not allow_detached:
         return False
     box = _cell_box(cells[index])
-    return not any(_near(box, _cell_box(cells[j])) for j in others)
+    others_boxes = [_cell_box(cells[j]) for j in others]
+    # A redundant cell sitting entirely ABOVE the others' top is a stray from the element above,
+    # not a wrapped line of this one — text never wraps above its first line (the last line, by
+    # contrast, legitimately sits below the rest, so we do NOT mirror this downward). ``_near`` can
+    # still clip one edge of such a cell (a banner caption ~60px under the banner above it, sharing
+    # its x-range), so this band test catches what adjacency misses.
+    if box[3] <= min(b[1] for b in others_boxes):
+        return True
+    return not any(_near(box, b) for b in others_boxes)
