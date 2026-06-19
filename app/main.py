@@ -282,9 +282,23 @@ def _canonical_image_bytes(image_bytes: bytes, mime_type: str) -> bytes:
 
     try:
         with Image.open(BytesIO(image_bytes)) as original:
+            image_format = _image_format_for_mime(mime_type)
+            # Pass the upload through untouched when it is already in canonical form: the stored
+            # format matches the target, there is no EXIF orientation to bake in, and the mode is
+            # one OCR / the renderer read directly. Re-encoding an already-fine JPEG only stacks a
+            # lossy compression generation that perturbs OCR (and inflates the file) for no gain —
+            # the normalize path below runs only when something actually needs fixing (a rotated
+            # phone photo, an odd mode, a wrong container).
+            orientation = original.getexif().get(0x0112)  # 274; values 2..8 need a transpose
+            ok_modes = {"RGB", "L"} if image_format == "JPEG" else {"RGB", "RGBA", "L", "LA", "P"}
+            if (
+                (original.format or "").upper() == image_format
+                and orientation in (None, 0, 1)
+                and original.mode in ok_modes
+            ):
+                return image_bytes
             image = ImageOps.exif_transpose(original)
             out = BytesIO()
-            image_format = _image_format_for_mime(mime_type)
             save_kwargs: dict[str, object] = {}
             if image_format == "JPEG":
                 if image.mode not in {"RGB", "L"}:
