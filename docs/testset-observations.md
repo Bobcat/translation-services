@@ -64,6 +64,13 @@ Last updated: 2026-06-18.
   the clean lines around it — lower, but a line-level aggregate (can't localise the garbled
   value half) and well above the `ocr.min_confidence` floor, so usable only as a soft
   "trust the VLM here" hint, not a clean discriminator.
+  A stronger instance on `evil-clown-doll.jpg` (en→nl): OCR misread "out" (the red banner's
+  "out of bed!") as **"tQut"** at **confidence 0.667** — a clear outlier against the 0.89–1.00
+  of every other banner cell — and gave it an anomalous box (**h=120** vs ~64–85 for the real
+  text). Unlike the sandals line-aggregate, here `confidence < ~0.7` **and** a height far above
+  the line's median are two sharp, localised signals at once, so the worst garbles are flaggable
+  → fall back to the VLM text for that cell. (The cell still binds to its caption, so the original
+  "out" re-renders as the stray "tQut".)
 
 - **Minor.** White erase boxes don't match the green card background; the phone status bar
   (12:13 / kik / 99) is treated as footer text; the top "Bestelnummer" line is slightly
@@ -214,3 +221,28 @@ cause, not our code):
   is the recurring case: the model merges/splits its rows unpredictably. No leak — the text that
   survives is clean — but the element count is not stable. A real fix is structural (constrain row
   merging), separate from the prompt/parser work.
+
+
+## Idea: re-OCR the rendered image as a render-fidelity check (and refine loop)
+
+Re-running OCR on the *rendered* (translated) image and comparing its cell boxes to the source
+cells — box for box — is a clean, concrete fidelity signal: it measures whether the renderer put
+the translation where (and at the size) the original sat, which pixel-diffing muddles. It pinned
+the `circus.jpeg` title cleanly: the rendered "WAARSCHUWING" cell is `h32 @ top9` against the
+original "WARNING" `h45 @ top3` (the longer Dutch word pt-shrinks to fit the width, so it no longer
+fills the red bar), where a pixel diff drowned in the legitimate white glyph pixels.
+
+Because OCR (~1–2s) + render (<1s) are cheap next to the grouping VLM + LLM translation that
+dominate latency, a **render → re-OCR → compare to source boxes → adjust → re-render** loop is
+affordable for a few iterations:
+
+- per unit, compare the rendered cell box (top / height / position / width-ratio) to its source box;
+- flag a mismatch (e.g. a title >20% smaller, or shifted out of its band);
+- adjust (relax the condense floor so a heading fills the band height instead of pt-shrinking,
+  re-centre vertically, allow some overrun) and re-render;
+- stop at a tolerance or a max iteration count.
+
+Caveats: OCR *geometry* is reliable, but the rendered text itself can mis-read — match on box
+position/size, not the exact string. Needs an explicit adjustment policy + a convergence stop or it
+oscillates. Note this targets the same root as the faint bottom-edge streaks (the rendered cell not
+sitting exactly on the source cell), without erase-margin tuning.
