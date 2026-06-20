@@ -104,6 +104,71 @@ def test_split_table_row_shares_one_box_between_two_fields() -> None:
     assert shared["translated_text"] == "PRICE AMOUNT"  # both fields, kept in field order
 
 
+def test_split_table_row_merges_touching_date_and_weekday_fields() -> None:
+    # Weather forecast rows may be hinted as "13 jun | Za"; the translated date ("Jun 13")
+    # needs to render together with the weekday, not as two touching pseudo-columns ("Jun 13Sat").
+    unit = {
+        "field_translations": [("13 jun", "Jun 13"), ("Za", "Sat")],
+        "members": [
+            {"text": "13", "translate": False, "bbox": {"left": 90, "top": 1598, "width": 65, "height": 62}},
+            {"text": "jun", "translate": True, "bbox": {"left": 150, "top": 1598, "width": 89, "height": 67}},
+            {"text": "Za", "translate": True, "bbox": {"left": 249, "top": 1596, "width": 75, "height": 56}},
+        ],
+    }
+    cells = _split_table_row(unit)
+    assert cells is not None and len(cells) == 1
+    assert cells[0]["translated_text"] == "Jun 13 Sat"
+    assert [member["text"] for member in cells[0]["members"]] == ["13", "jun", "Za"]
+
+
+def test_split_table_row_keeps_explicit_quantity_and_price_columns() -> None:
+    # In "translate everything" mode, field_translations contains fields that the aligner marked
+    # non-translatable (quantity/price). They still need their own cells; otherwise the renderer
+    # falls back to reflowing the whole receipt row and collapses the table columns.
+    unit = {
+        "field_translations": [
+            ("1", "1"),
+            ("KARNEMELK", "SKIMMED MILK"),
+            ("1,69 B", "1.69 B"),
+        ],
+        "members": [
+            {"text": "1", "translate": False, "bbox": {"left": 10, "top": 20, "width": 20, "height": 20}},
+            {"text": "KARNEMELK", "translate": True, "bbox": {"left": 80, "top": 20, "width": 140, "height": 20}},
+            {"text": "1,69 B", "translate": False, "bbox": {"left": 300, "top": 20, "width": 80, "height": 20}},
+        ],
+    }
+    cells = _split_table_row(unit)
+    assert cells is not None and len(cells) == 3
+    assert [cell["translated_text"] for cell in cells] == ["1", "SKIMMED MILK", "1.69 B"]
+
+
+def test_split_table_row_single_changed_field_leaves_preserved_neighbor_outside_cell() -> None:
+    # With preserve_unchanged_text enabled, field_translations only contains changed fields.
+    # The renderer must still split the row so the erase for "Contactless payment" cannot wipe
+    # the unchanged MAESTRO field beside it.
+    unit = {
+        "field_translations": [("Contactloze betaling", "Contactless payment")],
+        "members": [
+            {
+                "text": "Contactloze betaling",
+                "translate": True,
+                "bbox": {"left": 611, "top": 3377, "width": 560, "height": 90},
+            },
+            {
+                "text": "MAESTRO <A0000000043060>",
+                "translate": True,
+                "bbox": {"left": 1400, "top": 3398, "width": 676, "height": 122},
+            },
+        ],
+    }
+
+    cells = _split_table_row(unit)
+
+    assert cells is not None and len(cells) == 1
+    assert cells[0]["translated_text"] == "Contactless payment"
+    assert [member["text"] for member in cells[0]["members"]] == ["Contactloze betaling"]
+
+
 def test_reproduced_in_keeps_a_token_absent_from_the_translation() -> None:
     # A price the translation does not contain (most receipt/menu prices) stays preserved.
     assert _reproduced_in({"text": "8,50"}, "French fish soup with fennel") is False

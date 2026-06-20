@@ -40,6 +40,7 @@ import numpy as np
 from PIL import Image
 from PIL import ImageDraw
 
+from app.grouping.heuristics import _is_nontranslatable
 from app.replacement import geometry as geo
 from app.replacement.color import contrasting_fg
 from app.replacement.color import sample_region_colors
@@ -172,47 +173,53 @@ def _image_is_flat(units: list[dict[str, Any]]) -> bool:
 
 
 def _split_table_row(unit: dict[str, Any]) -> list[dict[str, Any]] | None:
-    """A table row (the VLM hint carried '|' fields) with >= 2 translatable fields becomes one
-    pseudo-unit per COLUMN, so the renderer places each at its own x instead of reflowing the
-    joined line over the row's union — which would collapse the column gaps and shift the spend
-    text left, right behind the company name.
+    """A table row (the VLM hint carried '|' fields) becomes one pseudo-unit per rendered
+    COLUMN, so the renderer places each at its own x instead of reflowing the joined line over
+    the row's union — which would collapse the column gaps and shift the spend text left, right
+    behind the company name. This also matters when only one field remains after unchanged fields
+    were filtered: render that field in its own cell and leave the preserved neighbour untouched.
 
     Members are grouped by the field whose SOURCE text they best match (not by order — the VLM
     does not always list fields left-to-right). A field may own SEVERAL members: a column OCR
     split into wrapped lines (a long spend description) then renders its one translation reflowed
     over those lines. Conversely several fields may share one column: a 'PRIJS | BEDRAG' hint that
     OCR read as a single box renders both translations in field order. Returns None when the unit
-    is not such a row, a member has no confident field, or every member lands in one column (then
-    the normal reflow path runs)."""
+    is not such a row, or no requested field can be placed."""
     pairs = unit.get("field_translations")
-    if not pairs or len(pairs) < 2:
+    if not pairs:
         return None
     # Bind each member (OCR cell) to the field whose SOURCE text it best matches and group members
     # by field — a field may own several members when OCR split a column into wrapped lines. Keep a
-    # translatable member always (one we cannot place makes the split unreliable -> reflow); keep a
-    # NON-translatable member only when the field's translation reproduces it (a pure-number line
-    # like '2025' the translation re-emits), so the column erase covers it instead of leaving the
-    # original showing under the re-rendered text. Other non-translatable members (an icon, a
-    # self-standing price) are left untouched.
+    # translatable member always (one we cannot place makes the split unreliable -> reflow). A
+    # NON-translatable member joins when it is explicitly present as a field pair (mode "translate
+    # everything", e.g. a quantity/price column), or when the field's translation reproduces it (a
+    # pure-number line like '2025' the translation re-emits). Other non-translatable members (an
+    # icon, a self-standing price not requested for render) are left untouched.
     columns: dict[int, list[dict[str, Any]]] = {}
-    translatable = 0
     for member in unit.get("members") or []:
         if not member.get("bbox"):
             continue
         best_field, best_score = None, 0.0
+        best_rank: tuple[float, int, int] = (0.0, 0, -10**9)
+        member_text = str(member.get("text") or "")
         for index, (source, _translated) in enumerate(pairs):
-            score = _field_overlap(source, str(member.get("text") or ""))
-            if score > best_score:
-                best_field, best_score = index, score
+            rank = _field_match_rank(source, member_text)
+            if rank > best_rank:
+                best_field, best_score, best_rank = index, rank[0], rank
         placed = best_field is not None and best_score >= _FIELD_MATCH_MIN
         if member.get("translate"):
             if not placed:
-                return None
-            translatable += 1
-        elif not (placed and _reproduced_in(member, pairs[best_field][1])):
+                continue
+        elif not (
+            placed
+            and (
+                _is_nontranslatable(str(pairs[best_field][0]))
+                or _reproduced_in(member, pairs[best_field][1])
+            )
+        ):
             continue
         columns.setdefault(best_field, []).append(member)
-    if translatable < 2 or len(columns) < 2:
+    if not columns:
         return None
     # A field with no member of its own shares a column (a 'PRIJS | BEDRAG' hint OCR read as one
     # box): attach its translation to the column whose members it best matches, kept in field
@@ -236,7 +243,51 @@ def _split_table_row(unit: dict[str, Any]) -> list[dict[str, Any]] | None:
         cell["members"] = cell_members
         cell["field_translations"] = None  # already split — don't re-enter
         cells.append(cell)
-    return cells
+    return _merge_close_table_cells(cells)
+
+
+def _merge_close_table_cells(cells: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Merge adjacent table fields that are really one visual column.
+
+    Weather forecast rows often split a date and weekday as ``13 jun | Za`` even though the
+    columns touch. Rendering them separately makes the translated date overrun into the weekday
+    ("Jun 13Sat"). Distant fields such as menu prices stay separate.
+    """
+    ordered = sorted(cells, key=lambda cell: (_cell_axis_box(cell)[0], _cell_axis_box(cell)[1]))
+    merged: list[dict[str, Any]] = []
+    for cell in ordered:
+        if not merged or not _should_merge_table_cells(merged[-1], cell):
+            merged.append(cell)
+            continue
+        previous = dict(merged[-1])
+        previous["translated_text"] = " ".join(
+            part for part in (previous.get("translated_text"), cell.get("translated_text")) if part
+        )
+        previous["members"] = list(previous.get("members") or []) + list(cell.get("members") or [])
+        merged[-1] = previous
+    return merged
+
+
+def _should_merge_table_cells(left_cell: dict[str, Any], right_cell: dict[str, Any]) -> bool:
+    left = _cell_axis_box(left_cell)
+    right = _cell_axis_box(right_cell)
+    height = max(left[3] - left[1], right[3] - right[1], 1.0)
+    y_overlap = min(left[3], right[3]) - max(left[1], right[1])
+    if y_overlap < 0.5 * height:
+        return False
+    gap = right[0] - left[2]
+    return gap <= 0.75 * height
+
+
+def _cell_axis_box(cell: dict[str, Any]) -> tuple[float, float, float, float]:
+    boxes = [(member.get("bbox") or {}) for member in (cell.get("members") or []) if member.get("bbox")]
+    if not boxes:
+        return 0.0, 0.0, 0.0, 0.0
+    left = min(float(box.get("left") or 0.0) for box in boxes)
+    top = min(float(box.get("top") or 0.0) for box in boxes)
+    right = max(float(box.get("left") or 0.0) + float(box.get("width") or 0.0) for box in boxes)
+    bottom = max(float(box.get("top") or 0.0) + float(box.get("height") or 0.0) for box in boxes)
+    return left, top, right, bottom
 
 
 def _field_overlap(a: str, b: str) -> float:
@@ -250,6 +301,17 @@ def _field_overlap(a: str, b: str) -> float:
         return 0.0
     matched = sum(block.size for block in difflib.SequenceMatcher(None, na, nb).get_matching_blocks())
     return matched / min(len(na), len(nb))
+
+
+def _field_match_rank(source: str, member_text: str) -> tuple[float, int, int]:
+    source_key = re.sub(r"[^a-z0-9]", "", str(source or "").lower())
+    member_key = re.sub(r"[^a-z0-9]", "", str(member_text or "").lower())
+    if not source_key or not member_key:
+        return 0.0, 0, -10**9
+    score = _field_overlap(source, member_text)
+    exact = int(source_key == member_key)
+    length_closeness = -abs(len(source_key) - len(member_key))
+    return score, exact, length_closeness
 
 
 def _reproduced_in(member: dict[str, Any], translated: str) -> bool:
@@ -343,13 +405,16 @@ def _plan_group(base: Image.Image, units: list[dict[str, Any]], *, snap_horizont
     max_line_w = max(plane["width"] for plane in planes)
     # Render at the source size, but spend pt only as a last resort: if even at the condense
     # floor a line would still exceed its plane by more than _WIDTH_SLACK, step the size down
-    # (which re-wraps) until the floor suffices or the size floor is hit — below that the line
-    # is allowed to overrun. Above it, condense + slack absorb the width at the source size.
+    # (which re-wraps) until the floor suffices or the size floor is hit. If the minimum size
+    # still cannot fit, leave the original pixels; this catches chatty model replies on tiny
+    # OCR-noise cells instead of erasing far beyond the source footprint.
     size = min(plane["target"] for plane in planes)
     font, lines = _fit_group(joined, size=size, n_lines=n_lines, max_line_w=max_line_w, family=family, weight=weight)
     while size > _MIN_RENDER_SIZE and _raw_condense(font, lines, planes) < _CONDENSE_FLOOR:
         size -= 1
         font, lines = _fit_group(joined, size=size, n_lines=n_lines, max_line_w=max_line_w, family=family, weight=weight)
+    if _raw_condense(font, lines, planes) < _CONDENSE_FLOOR:
+        return []
     ascent, descent = font.getmetrics()
     centered = any(str(unit.get("alignment") or "") == "center" for unit in units)
 
