@@ -9,6 +9,7 @@ from PIL import ImageDraw
 from app.replacement.color import sample_region_colors
 from app.replacement.fit import _dominant_script
 from app.replacement.fit import fit_text
+from app.replacement.render import _plan_group
 from app.replacement.render import _reproduced_in
 from app.replacement.render import _split_table_row
 from app.replacement.render import render_translated_image
@@ -167,6 +168,30 @@ def test_split_table_row_single_changed_field_leaves_preserved_neighbor_outside_
     assert cells is not None and len(cells) == 1
     assert cells[0]["translated_text"] == "Contactless payment"
     assert [member["text"] for member in cells[0]["members"]] == ["Contactloze betaling"]
+
+
+def test_top_stray_redundant_word_does_not_starve_the_body_render() -> None:
+    # A neighbouring element's word (a heading's "dieren", shared with the body below) was aligned
+    # into the body and OCR placed it on its own tiny line ABOVE the real text. That sliver plane
+    # starved the unit's width fit so the whole long translation fell under the condense floor and
+    # rendered NOTHING, leaving the original Dutch showing. The top stray line must be dropped so
+    # the body renders on its two real lines.
+    base = Image.new("RGB", (360, 200), (40, 60, 160))
+    line1 = {"text": "Ze worden hier opdringerig", "translate": True,
+             "bbox": {"left": 20, "top": 80, "width": 300, "height": 18}}
+    line2 = {"text": "de betreffende dieren te slachten", "translate": True,
+             "bbox": {"left": 20, "top": 106, "width": 300, "height": 18}}
+    stray = {"text": "dieren", "translate": True,  # redundant (carried by line2) + tiny line above
+             "bbox": {"left": 150, "top": 58, "width": 34, "height": 16}}
+    translated = "This makes them pushy and they will bite, which forces us to slaughter the animals"
+    clean = {"translated_text": translated, "members": [line1, line2]}
+    strayed = {"translated_text": translated, "members": [stray, line1, line2]}
+
+    clean_jobs = _plan_group(base.copy(), [clean])
+    strayed_jobs = _plan_group(base.copy(), [strayed])
+
+    assert len(clean_jobs) == 2  # two real text lines
+    assert len(strayed_jobs) == 2  # stray dropped -> body still renders, not starved to nothing
 
 
 def test_reproduced_in_keeps_a_token_absent_from_the_translation() -> None:

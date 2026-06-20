@@ -74,6 +74,10 @@ _CONDENSE_FLOOR = 0.75
 _WIDTH_SLACK = 1.04
 # Floor on the pt-shrink search (matches the plane target floor in _plan_group).
 _MIN_RENDER_SIZE = 8
+# A line plane narrower than this fraction of the unit's other lines, AND carrying only words
+# already present on those lines, is an OCR stray (a neighbouring element's word pulled in) — not
+# a real wrapped line. Kept, it forms a sliver plane that starves the whole unit's width fit.
+_STRAY_LINE_WIDTH_RATIO = 0.5
 
 # Below this group angle (degrees) the text is treated as horizontal and placed axis-aligned,
 # so OCR detection noise on a flat image isn't warped into a visible slant. A genuine page
@@ -338,6 +342,7 @@ def _plan_group(base: Image.Image, units: list[dict[str, Any]], *, snap_horizont
 
     texts: list[str] = []
     group_quads: list = []
+    quad_tokens: list[set[str]] = []  # source words of each quad's member, parallel to group_quads
     for unit in units:
         translated = str(unit.get("translated_text") or "").strip()
         if len(translated) <= 1:  # empty / OCR-noise single char -> leave the original alone
@@ -346,11 +351,13 @@ def _plan_group(base: Image.Image, units: list[dict[str, Any]], *, snap_horizont
             m for m in (unit.get("members") or [])
             if m.get("bbox") and (m.get("translate") or _reproduced_in(m, translated))
         ]
-        quads = [quad for quad in (geo.quad_of(m) for m in members) if quad is not None]
-        if not quads:
+        placed = [(m, quad) for m in members if (quad := geo.quad_of(m)) is not None]
+        if not placed:
             continue
         texts.append(translated)
-        group_quads.extend(quads)
+        for member, quad in placed:
+            group_quads.append(quad)
+            quad_tokens.append(set(re.findall(r"[^\W\d_]+", str(member.get("text") or "").lower())))
     if not texts:
         return []
 
@@ -374,11 +381,13 @@ def _plan_group(base: Image.Image, units: list[dict[str, Any]], *, snap_horizont
         x_axis, y_axis, xmin, xmax, ymin, ymax = geo.oriented_frame(quads, angle)
         planes.append({
             "quads": quads,
+            "tokens": _plane_source_tokens(quads, group_quads, quad_tokens),
             "target": max(8, int(true_height * size_ratio)),
             "pad": max(2.0, true_height / 6.0),
             "frame": (x_axis, y_axis, xmin, xmax, ymin, ymax),
             "width": xmax - xmin,
         })
+    planes = _drop_redundant_stray_planes(planes)
 
     # Bullet items: keep the original bullet glyph by starting the erase/anchor at the text on
     # the first (topmost) plane — the line that carries the bullet — and centre the re-rendered
@@ -567,6 +576,35 @@ def _line_clusters(quads: list, angle: float) -> list[list]:
             clusters.append([quad])
             extent_max = oymax
     return clusters
+
+
+def _plane_source_tokens(quads: list, group_quads: list, quad_tokens: list[set[str]]) -> set[str]:
+    """The source words carried by a line cluster's member quads (matched by identity)."""
+    tokens: set[str] = set()
+    for quad in quads:
+        for other, member_tokens in zip(group_quads, quad_tokens):
+            if other is quad:
+                tokens |= member_tokens
+                break
+    return tokens
+
+
+def _drop_redundant_stray_planes(planes: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Drop the TOP line plane when it is an OCR stray rather than a real first line: every source
+    word it carries already appears on a line below it AND it is far narrower than those. OCR
+    sometimes pulls a neighbouring element's word — a heading word shared with the body below it —
+    onto its own tiny line above the real text; kept, that sliver plane starves the unit's width fit
+    so the translation no longer meets the condense floor and the whole unit renders nothing,
+    leaving the original showing. Only the topmost line is tested: text never wraps ABOVE its first
+    line, so a fully-redundant narrow line there is a stray from the element above — whereas the same
+    shape at the BOTTOM is a legitimate last wrapped line (a sentence ending on a repeated word)."""
+    if len(planes) < 2:
+        return planes
+    top, below = planes[0], planes[1:]
+    below_tokens = set().union(*(plane["tokens"] for plane in below))
+    redundant = bool(top["tokens"]) and top["tokens"] <= below_tokens
+    narrow = top["width"] < _STRAY_LINE_WIDTH_RATIO * median(plane["width"] for plane in below)
+    return below if (redundant and narrow) else planes
 
 
 def _fit_group(
