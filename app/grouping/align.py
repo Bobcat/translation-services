@@ -247,6 +247,7 @@ class _Match:
     candidates: list[int]  # hint indices sharing the best token-overlap score
     score: float           # best matched-token mass / cell token count
     full: tuple[int, ...] = ()  # of those, the lines the cell fully accounts for (every token)
+    full_alpha: tuple[int, ...] = ()  # full matches for cells carrying alphabetic text
 
 
 def _build_hint_index(hint_token_sets: list[set[str]]) -> dict[str, set[int]]:
@@ -299,10 +300,13 @@ def _match_scores(
     if not best_matched:
         return _Match(candidates=[], score=0.0)
     candidates = [index for index, matched in matched_by_index if matched == best_matched]
+    full = tuple(index for index in candidates if best_matched + 1e-9 >= len(hint_token_sets[index]))
+    has_alpha = any(any(ch.isalpha() for ch in token) for token in cell_tokens)
     return _Match(
         candidates=candidates,
         score=best_matched / len(cell_tokens),
-        full=tuple(index for index in candidates if best_matched + 1e-9 >= len(hint_token_sets[index])),
+        full=full,
+        full_alpha=full if has_alpha else (),
     )
 
 
@@ -315,27 +319,30 @@ def _pick_hint(
 ) -> int | None:
     if not match.candidates or match.score < _MATCH_THRESHOLD:
         return None
+    candidates = list(match.candidates)
+    if position_reliable:
+        guarded = [
+            index for index in candidates
+            if abs(index - preferred_index) <= _POSITION_GUARD
+        ]
+        if len(match.full_alpha) == 1 and guarded:
+            guarded.append(match.full_alpha[0])
+        candidates = list(dict.fromkeys(guarded))
+        if not candidates:
+            return None
     # Several hint lines can match a short cell equally (two dishes ending "en frites").
     # A continuation cell stays with its element (axis-aligned tops are tilt-distorted,
     # so position alone is a coin flip near an element boundary); otherwise bind the
     # cell to the hint nearest its place on the page.
-    if sticky is not None and sticky in match.candidates:
+    if sticky is not None and sticky in candidates:
         return sticky
     # Among equally-scored candidates, prefer a hint line the cell FULLY accounts for (it carries
     # every token of that line): a short brand/eyebrow that is a prefix of the title, a label above
     # its value. Without this, such a cell is a fragment of the longer neighbour too and gets pulled
     # into it on position alone. Position still breaks any remaining tie.
-    pool = list(match.full) or match.candidates
+    full = [index for index in match.full if index in candidates]
+    pool = full or candidates
     best = min(pool, key=lambda index: abs(index - preferred_index))
-    # A cell whose only matches lie far from its anchored reading position is almost
-    # certainly noise that stole a token — e.g. a price sliver bleeding in from an
-    # adjacent page ("50") matching a dish line's price digits. Binding it would
-    # interrupt that element's continuation run and render its text twice
-    # (_group_consecutive breaks runs on real labels, not on leftovers), so make it
-    # a leftover instead. Only when positions come from anchors: the linear fallback
-    # mis-points on pages with varying line density, which this must not punish.
-    if position_reliable and abs(best - preferred_index) > _POSITION_GUARD:
-        return None
     return best
 
 

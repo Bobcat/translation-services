@@ -29,7 +29,12 @@ def test_match_scores_indexed_equals_full_scan() -> None:
         cell = {"text": text}
         full = _match_scores(cell, hint_sets, None)
         indexed = _match_scores(cell, hint_sets, _candidate_hints(cell, index))
-        assert (full.candidates, full.score, full.full) == (indexed.candidates, indexed.score, indexed.full), text
+        assert (full.candidates, full.score, full.full, full.full_alpha) == (
+            indexed.candidates,
+            indexed.score,
+            indexed.full,
+            indexed.full_alpha,
+        ), text
 
 
 def _cells() -> list[dict]:
@@ -162,6 +167,68 @@ def test_anchored_tie_break_binds_each_duplicate_line_to_its_own_hint() -> None:
     result = build_units_from_hint(cells=cells, hint_units=hints, model="qwen")
     ambiguous = next(u for u in result.units if any(m.cell_id == 5 for m in u.members))
     assert ambiguous.hint_index == 4
+
+
+def test_position_guard_filters_far_full_numeric_hint_before_tie_break() -> None:
+    # A forecast row's day number ("13") also fully accounts for an earlier standalone
+    # temperature hint ("13°"). The far full match must not beat the nearby row hint, or
+    # the number becomes a leftover and the renderer draws "Jun 13" beside the original "13".
+    def cell(cid: int, text: str, top: int, left: int = 0) -> dict:
+        return {"id": cid, "text": text, "bbox": {"left": left, "top": top, "width": 40, "height": 20}}
+
+    hints = [
+        "13°",
+        "anchor one",
+        "anchor two",
+        "anchor three",
+        "12 jun | Vr | 13° / 18°",
+        "13 jun | Za | 11° / 19°",
+    ]
+    cells = [
+        cell(1, "anchor one", 0),
+        cell(2, "12", 100, 0),
+        cell(3, "jun", 100, 50),
+        cell(4, "Vr", 100, 100),
+        cell(5, "13", 200, 0),
+        cell(6, "jun", 200, 50),
+        cell(7, "Za", 200, 100),
+    ]
+    result = build_units_from_hint(cells=cells, hint_units=hints, model="qwen")
+    day_number = next(u for u in result.units if any(m.cell_id == 5 for m in u.members))
+    assert day_number.hint_index == 5
+
+
+def test_position_guard_keeps_unique_alpha_full_match_over_near_partial_match() -> None:
+    # Receipt payment metadata can be visually interleaved in two columns: the standalone
+    # "BETALING" OCR cell sits near "Contactloze betaling" by y-position, but it fully matches
+    # its own later hint line. Do not drop it as a duplicate of the earlier longer line.
+    def cell(cid: int, text: str, top: int, left: int = 0) -> dict:
+        return {"id": cid, "text": text, "bbox": {"left": left, "top": top, "width": 120, "height": 20}}
+
+    hints = [
+        "Token |1234567890123456789",
+        "Contactloze betaling |MAESTRO <A0000000043060>",
+        "Kaart |123456xxxxxxxxxxx000",
+        "Kaartnr |00",
+        "Datum |01/01/2020 00:00",
+        "BETALING",
+        "Auth. code |X00000",
+    ]
+    cells = [
+        cell(1, "Token", 0),
+        cell(2, "Contactloze betaling", 100, 0),
+        cell(3, "BETALING", 110, 300),
+        cell(4, "Kaart", 200),
+        cell(5, "Kaartnr", 300),
+        cell(6, "Datum", 400),
+        cell(7, "Auth. code", 500, 300),
+    ]
+
+    result = build_units_from_hint(cells=cells, hint_units=hints, model="qwen")
+    payment = next(u for u in result.units if any(m.cell_id == 3 for m in u.members))
+    assert payment.hint_index == 5
+    assert payment.source_text == "BETALING"
+    assert result.ignored_cell_ids == []
 
 
 def test_continuation_cell_sticks_to_its_element_on_a_tie() -> None:
