@@ -126,6 +126,8 @@ def test_translate_image_pipeline_response(tmp_path: Path, monkeypatch) -> None:
                 "task": "translate_image",
                 "source_lang_code": "en",
                 "target_lang_code": "nl",
+                "preserve_heuristic_text": False,
+                "preserve_unchanged_text": True,
             },
         )
         completed = _wait_completed(client, "req_translate")
@@ -136,6 +138,8 @@ def test_translate_image_pipeline_response(tmp_path: Path, monkeypatch) -> None:
         assert completed["response"]["artifacts"]["projected_overlay_debug"]["mime_type"] == "image/png"
         assert completed["response"]["artifacts"]["segments"]["mime_type"] == "application/json"
         assert captured["translator_model"] == "translategemma-4b-it-q5-k-m-gguf"
+        assert captured["request"]["preserve_heuristic_text"] is False
+        assert captured["request"]["preserve_unchanged_text"] is True
 
         output_artifact = client.get("/v1/requests/req_translate/artifacts/output")
         assert output_artifact.status_code == 200

@@ -15,6 +15,7 @@ translated text back into the image). The output image is still the debug overla
 from __future__ import annotations
 
 from dataclasses import dataclass
+from dataclasses import replace
 from io import BytesIO
 from pathlib import Path
 import time
@@ -24,6 +25,7 @@ from app.core.config import AppSettings
 from app.grouping import group_cells_into_units
 from app.grouping import request_grouping_hint
 from app.grouping.overlay import render_grouping_overlay_debug
+from app.grouping.units import TranslationUnit
 from app.ocr import resolve_ocr_language
 from app.ocr import run_raw_ocr
 from app.ocr.overlay import render_original_ocr_overlay_debug
@@ -131,6 +133,12 @@ def run_translate_image_pipeline(
     image_category = str(grouping.metadata.get("category") or "")
     translator_model = str(request.get("translator_model") or "").strip() or settings.llm_pool.translator_model
     translator_mode = str(request.get("translator_mode") or "").strip() or settings.llm_pool.translator_mode
+    preserve_heuristic_text = _bool_request_flag(request, "preserve_heuristic_text", default=True)
+    preserve_unchanged_text = _bool_request_flag(request, "preserve_unchanged_text", default=False)
+    units_for_translation = _units_for_preserve_heuristic_text(
+        grouping.units,
+        preserve_heuristic_text=preserve_heuristic_text,
+    )
     translation_started = time.perf_counter()
     prompt = resolve_structured_prompt(
         store_for(settings.service.prompts_root),
@@ -140,7 +148,7 @@ def run_translate_image_pipeline(
     )
     translations = translate_units(
         settings=settings,
-        units=grouping.units,
+        units=units_for_translation,
         source_lang_code=source_lang,
         target_lang_code=target_lang,
         translator_model=translator_model,
@@ -150,11 +158,13 @@ def run_translate_image_pipeline(
         hint_block_ids=grouping.hint_block_ids,
         prompt=prompt,
         call_log=llm_calls,
+        preserve_heuristic_text=preserve_heuristic_text,
+        preserve_unchanged_text=preserve_unchanged_text,
     )
     translation_wall_ms = _elapsed_ms(translation_started)
     translation_by_id = {item.unit_id: item for item in translations}
     translation_units: list[dict[str, Any]] = []
-    for unit in grouping.units:
+    for unit in units_for_translation:
         unit_dict = unit.to_dict()
         translated = translation_by_id.get(unit.id)
         if translated is not None:
@@ -173,7 +183,7 @@ def run_translate_image_pipeline(
         + sum(
             1
             for route in routes
-            if route and route != "skipped_empty"
+            if route and not route.startswith("skipped_")
             and not route.endswith("_batch")
             and not route.endswith("_batch_fallback")
         )
@@ -192,6 +202,8 @@ def run_translate_image_pipeline(
             "grouping_model": grouping_model,
             "translator_model": translator_model,
             "translator_mode": translator_mode,
+            "preserve_heuristic_text": preserve_heuristic_text,
+            "preserve_unchanged_text": preserve_unchanged_text,
             "timings_ms": {
                 "ocr": ocr_wall_ms,
                 "grouping": grouping_wall_ms,
@@ -217,6 +229,7 @@ def run_translate_image_pipeline(
                 "source_text": item.source_text,
                 "translated_text": item.translated_text,
                 "route": item.translation_route,
+                "field_translations": item.field_translations,
             }
             for item in translations
         ],
@@ -235,6 +248,8 @@ def run_translate_image_pipeline(
         "target_lang_code": target_lang,
         "translator_model": translator_model,
         "translator_mode": translator_mode,
+        "preserve_heuristic_text": preserve_heuristic_text,
+        "preserve_unchanged_text": preserve_unchanged_text,
         "translation_source": "llm_pool",
         "translation_input": sent_input,
         "translation_instructions": sent_instructions,
@@ -326,6 +341,30 @@ def _input_png_bytes(input_path: Path) -> bytes:
     out = BytesIO()
     Image.open(input_path).convert("RGB").save(out, format="PNG", compress_level=1)
     return out.getvalue()
+
+
+def _bool_request_flag(request: dict[str, Any], key: str, *, default: bool) -> bool:
+    value = request.get(key)
+    if value is None:
+        return default
+    if isinstance(value, str):
+        return value.strip().lower() not in {"0", "false", "no", "off"}
+    return bool(value)
+
+
+def _units_for_preserve_heuristic_text(
+    units: list[TranslationUnit],
+    *,
+    preserve_heuristic_text: bool,
+) -> list[TranslationUnit]:
+    if preserve_heuristic_text:
+        return units
+    out: list[TranslationUnit] = []
+    for unit in units:
+        members = [replace(member, translate=True) for member in unit.members]
+        source_text = " ".join(member.text for member in members if member.text).strip()
+        out.append(replace(unit, members=members, source_text=source_text))
+    return out
 
 
 def _elapsed_ms(started_at: float) -> float:

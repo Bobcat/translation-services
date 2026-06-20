@@ -14,8 +14,9 @@ call, ``|`` fields kept) and map each translated line back onto its unit by
 ``hint_index`` — this keeps a multi-line unit's full-sentence context (e.g. "THE SHOE
 WORKS IF YOU DO." is not split into "THE SHOE"). When no hint is available or the model
 does not preserve the structure, it falls back to a **numbered list** (a numbered list
-in/out, mapped back by number); any unit still missing falls back to a single per-unit
-call. ``translategemma`` (single-text template) stays one-call-per-unit. Leftover units
+in/out, mapped back by number); hinted units still missing after a batch are skipped
+rather than translated from OCR garble. ``translategemma`` (single-text template)
+stays one-call-per-unit. Leftover units
 (no hint line) ride along as a final extra block, so they are translated with document
 context instead of in isolation. Units with no translatable text (a bare price/number)
 or OCR noise (a pictogram read as "i") are skipped.
@@ -39,6 +40,9 @@ from app.translation.routing import resolve_translation_route
 
 
 _RESPONSES_PATH = "/v1/responses"
+_URL_TOKEN = re.compile(
+    r"(?i)\b(?:https?://|www\.)\S+|\b\S+\.(?:com|nl|org|net|io|de|fr|co|eu)\b"
+)
 
 # Language names read better than codes in the translation prompt; the engine
 # uses names too. Fall back to the raw code for anything not listed.
@@ -97,6 +101,8 @@ def translate_units(
     hint_block_ids: list[int] | None = None,
     prompt: PromptEntry | None = None,
     call_log: list[dict[str, Any]] | None = None,
+    preserve_heuristic_text: bool = True,
+    preserve_unchanged_text: bool = False,
 ) -> list[TranslatedUnit]:
     decision = resolve_translation_route(
         settings=settings,
@@ -119,7 +125,7 @@ def translate_units(
     # back to the numbered-list batch when no hint is available or the structure is not preserved.
     batched = decision.translator_mode != "translategemma" and len(translatable) > 1
     batch: dict[int, str] = {}
-    batch_fields: dict[int, list[str]] = {}
+    batch_fields: dict[int, list[tuple[str, str]]] = {}
     if batched:
         if hint_units:
             batch, batch_fields = _translate_structured(
@@ -133,6 +139,8 @@ def translate_units(
                 category=category,
                 prompt=prompt or BUILTIN_PROMPTS[IMAGE_DEFAULT_ID],
                 call_log=call_log,
+                preserve_heuristic_text=preserve_heuristic_text,
+                preserve_unchanged_text=preserve_unchanged_text,
             )
         if not batch:
             batch = _translate_batch(
@@ -161,6 +169,17 @@ def translate_units(
         translated = batch.get(unit.id)
         route = f"{decision.translation_route}_batch"
         if translated is None:
+            if batched and unit.hint_index is not None:
+                results.append(
+                    TranslatedUnit(
+                        unit_id=unit.id,
+                        source_text=unit.source_text,
+                        translated_text="",
+                        translator_model="",
+                        translation_route="skipped_hinted_missing",
+                    )
+                )
+                continue
             translated = _translate_one(
                 settings=settings,
                 model=decision.translator_model,
@@ -172,6 +191,16 @@ def translate_units(
                 call_log=call_log,
             )
             route = f"{decision.translation_route}_batch_fallback" if batched else decision.translation_route
+        if (
+            translated
+            and preserve_unchanged_text
+            and _is_effectively_unchanged(
+                source_text,
+                translated,
+                preserve_heuristic_text=preserve_heuristic_text,
+            )
+        ):
+            translated = ""
         results.append(
             TranslatedUnit(
                 unit_id=unit.id,
@@ -338,6 +367,8 @@ def _translate_structured(
     category: str,
     prompt: PromptEntry,
     call_log: list[dict[str, Any]] | None = None,
+    preserve_heuristic_text: bool = True,
+    preserve_unchanged_text: bool = False,
 ) -> tuple[dict[int, str], dict[int, list[tuple[str, str]]]]:
     """Translate all clean hint lines in ONE call — blocks joined by ``###`` separator
     lines, newlines and ``|`` fields preserved — then map each translated line back onto
@@ -407,16 +438,47 @@ def _translate_structured(
         line = aligned[index]
         if line is None:
             continue
-        text = _translatable_segment(line)
+        pairs = _field_pairs(
+            hint_units[index],
+            line,
+            preserve_heuristic_text=preserve_heuristic_text,
+            preserve_unchanged_text=preserve_unchanged_text,
+        )
+        if pairs is not None:
+            text = " ".join(translated for _source, translated in pairs).strip()
+            out[unit.id] = text
+            if pairs:
+                fields[unit.id] = pairs
+            continue
+        text = _translatable_segment(line, preserve_heuristic_text=preserve_heuristic_text)
+        if (
+            text
+            and preserve_unchanged_text
+            and _is_effectively_unchanged(
+                hint_units[index],
+                line,
+                preserve_heuristic_text=preserve_heuristic_text,
+            )
+        ):
+            out[unit.id] = ""
+            continue
         if text:
             out[unit.id] = text
-            pairs = _field_pairs(hint_units[index], line)
-            if pairs is not None:
-                fields[unit.id] = pairs
     for (unit_id, _source), line in zip(leftovers, leftover_aligned):
         if line is None:
             continue
-        text = _translatable_segment(line)
+        text = _translatable_segment(line, preserve_heuristic_text=preserve_heuristic_text)
+        if (
+            text
+            and preserve_unchanged_text
+            and _is_effectively_unchanged(
+                _source,
+                line,
+                preserve_heuristic_text=preserve_heuristic_text,
+            )
+        ):
+            out[unit_id] = ""
+            continue
         if text:
             out[unit_id] = text
     return out, fields
@@ -474,18 +536,42 @@ def _is_noise(text: str) -> bool:
     return len(stripped) <= 2 and stripped.isascii()
 
 
-def _translatable_segment(line: str) -> str:
+def _translatable_segment(line: str, *, preserve_heuristic_text: bool = True) -> str:
     """The translatable part of a translated hint line: drop the ``|`` price/number fields
     (kept as the original pixels in the render) and join the rest."""
     segments = [seg.strip() for seg in str(line or "").split("|")]
-    return " ".join(seg for seg in segments if seg and not _is_nontranslatable(seg)).strip()
+    if not preserve_heuristic_text:
+        return " ".join(seg for seg in segments if seg).strip()
+    return " ".join(seg for seg in segments if _segment_has_translatable_text(seg)).strip()
 
 
-def _field_pairs(source_line: str, translated_line: str) -> list[tuple[str, str]] | None:
+def _segment_has_translatable_text(segment: str) -> bool:
+    """True for ordinary text, including text that also contains a URL/number.
+
+    A whole URL/code/price field stays non-translatable, but a sentence like
+    "Visit www.example.nl" must keep its structured translation instead of falling
+    through to OCR-source fallback.
+    """
+    text = str(segment or "").strip()
+    if not text:
+        return False
+    without_urls = _URL_TOKEN.sub(" ", text).strip()
+    return bool(without_urls) and not _is_nontranslatable(without_urls)
+
+
+def _field_pairs(
+    source_line: str,
+    translated_line: str,
+    *,
+    preserve_heuristic_text: bool = True,
+    preserve_unchanged_text: bool = False,
+) -> list[tuple[str, str]] | None:
     """(source, translated) for each translatable ``|`` field of a table row, in order.
 
     Splits both the source hint line and its translation on ``|`` and pairs them field by
-    field, keeping only the translatable fields (prices/numbers stay as original pixels).
+    field, keeping source-side translatable fields. Numeric/code fields stay out of the
+    joined text flow; textual fields still render even when the model left them unchanged
+    (brand/product names on dense receipts).
     The source half lets the renderer match a field to its OWN cell by text — the VLM does
     not always list the fields in the cells' reading order. Returns ``None`` when the line
     carried no ``|`` fields or the source/translation field counts disagree (then the unit
@@ -494,8 +580,34 @@ def _field_pairs(source_line: str, translated_line: str) -> list[tuple[str, str]
     dst = [seg.strip() for seg in str(translated_line or "").split("|")]
     if len(src) <= 1 or len(src) != len(dst):
         return None
-    pairs = [(s, t) for s, t in zip(src, dst) if t and not _is_nontranslatable(t)]
-    return pairs or None
+    return [
+        (s, t)
+        for s, t in zip(src, dst)
+        if t
+        and (not preserve_heuristic_text or not _is_nontranslatable(s))
+        and (not preserve_unchanged_text or _field_text_key(s) != _field_text_key(t))
+    ]
+
+
+def _is_effectively_unchanged(
+    source: str,
+    translated: str,
+    *,
+    preserve_heuristic_text: bool = True,
+) -> bool:
+    source_text = _translatable_segment(
+        source,
+        preserve_heuristic_text=preserve_heuristic_text,
+    ) or str(source or "").strip()
+    translated_text = _translatable_segment(
+        translated,
+        preserve_heuristic_text=preserve_heuristic_text,
+    ) or str(translated or "").strip()
+    return bool(source_text) and _field_text_key(source_text) == _field_text_key(translated_text)
+
+
+def _field_text_key(value: str) -> str:
+    return re.sub(r"\s+", " ", str(value or "").strip().lower())
 
 
 def _lang_name(code: str) -> str:

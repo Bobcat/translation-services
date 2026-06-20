@@ -32,6 +32,10 @@ class RequestPayload(BaseModel):
     # a non-debug caller (e.g. the asr camera app, which only fetches the rendered translation)
     # skips that work; the workbench sets it true to populate its overlay artifact dropdown.
     debug_overlays: bool = False
+    # Preserve text selected by local heuristics (prices, URL-only fields, codes) as original pixels.
+    preserve_heuristic_text: bool = True
+    # Preserve text whose translated output is effectively identical to the source.
+    preserve_unchanged_text: bool = False
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 

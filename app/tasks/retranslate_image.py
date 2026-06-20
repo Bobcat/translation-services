@@ -22,7 +22,9 @@ from app.core.config import AppSettings
 from app.grouping.units import TranslationUnit
 from app.replacement import render_translated_image
 from app.tasks.translate_image import TranslateImageResult
+from app.tasks.translate_image import _bool_request_flag
 from app.tasks.translate_image import _translation_call_io
+from app.tasks.translate_image import _units_for_preserve_heuristic_text
 from app.translation.prompts import resolve_structured_prompt
 from app.translation.prompts import store_for
 from app.translation.prompts.templates import IMAGE_DEFAULT_ID
@@ -51,6 +53,12 @@ def run_retranslate_image_pipeline(
 
     translator_model = str(request.get("translator_model") or "").strip() or settings.llm_pool.translator_model
     translator_mode = str(request.get("translator_mode") or "").strip() or settings.llm_pool.translator_mode
+    preserve_heuristic_text = _bool_request_flag(request, "preserve_heuristic_text", default=True)
+    preserve_unchanged_text = _bool_request_flag(request, "preserve_unchanged_text", default=False)
+    units_for_translation = _units_for_preserve_heuristic_text(
+        units,
+        preserve_heuristic_text=preserve_heuristic_text,
+    )
     prompt = resolve_structured_prompt(
         store_for(settings.service.prompts_root),
         raw_prompt=request.get("translation_prompt"),
@@ -62,7 +70,7 @@ def run_retranslate_image_pipeline(
     translation_started = time.perf_counter()
     translations = translate_units(
         settings=settings,
-        units=units,
+        units=units_for_translation,
         source_lang_code=source_lang,
         target_lang_code=target_lang,
         translator_model=translator_model,
@@ -72,12 +80,14 @@ def run_retranslate_image_pipeline(
         hint_block_ids=hint_block_ids,
         prompt=prompt,
         call_log=llm_calls,
+        preserve_heuristic_text=preserve_heuristic_text,
+        preserve_unchanged_text=preserve_unchanged_text,
     )
     translation_wall_ms = _elapsed_ms(translation_started)
 
     translation_by_id = {item.unit_id: item for item in translations}
     translation_units: list[dict[str, Any]] = []
-    for unit in units:
+    for unit in units_for_translation:
         unit_dict = unit.to_dict()
         translated = translation_by_id.get(unit.id)
         if translated is not None:
@@ -104,6 +114,8 @@ def run_retranslate_image_pipeline(
             "translation_prompt": prompt.system,
             "translator_model": translator_model,
             "translator_mode": translator_mode,
+            "preserve_heuristic_text": preserve_heuristic_text,
+            "preserve_unchanged_text": preserve_unchanged_text,
             "timings_ms": {
                 "translation": translation_wall_ms,
                 "replacement": replacement_wall_ms,
@@ -121,6 +133,7 @@ def run_retranslate_image_pipeline(
                 "source_text": item.source_text,
                 "translated_text": item.translated_text,
                 "route": item.translation_route,
+                "field_translations": item.field_translations,
             }
             for item in translations
         ],
@@ -134,6 +147,8 @@ def run_retranslate_image_pipeline(
         "target_lang_code": target_lang,
         "translator_model": translator_model,
         "translator_mode": translator_mode,
+        "preserve_heuristic_text": preserve_heuristic_text,
+        "preserve_unchanged_text": preserve_unchanged_text,
         "translation_source": "llm_pool_retranslate",
         "source_request_id": str(request.get("source_request_id") or ""),
         "image_category": image_category,
