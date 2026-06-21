@@ -4,7 +4,7 @@ Per-image findings from running the pipeline on `testset/` screenshots: what goe
 the diagnosed cause, and whether it is fixed or parked. Each entry names the test image so a
 fix can be re-checked against it.
 
-Last updated: 2026-06-18.
+Last updated: 2026-06-20.
 
 ---
 
@@ -221,6 +221,106 @@ cause, not our code):
   is the recurring case: the model merges/splits its rows unpredictably. No leak — the text that
   survives is clean — but the element count is not stable. A real fix is structural (constrain row
   merging), separate from the prompt/parser work.
+
+
+## Idea: a category-conditioned grouping prompt (instruction load destabilises the secondary labels), 2026-06-20
+
+A focused measurement of the secondary label fields (font_family, alignment, `|` field
+structure) — the ones the parser cannot normalise away — calling the 26B-A4B grouping VLM N
+times per image on the same input at greedy decode (`temp=0, top_k=1`), comparing the live
+("full") prompt against trimmed variants. The harness is throwaway (lived in `/tmp`); the
+findings are the point.
+
+**The secondary labels are unstable under the full prompt, stable under a lean prompt.**
+
+- `nike-ad` body paragraph — **font**: full prompt → Helvetica ~19–20/20 (consistent but the
+  sans guess, not the serif the page uses); a **lean** prompt (rules 2.1 icons / 3 tables / 4
+  field-values / 4.1 bullets removed, typography rules kept) → **Georgia 20/20**. So overfeeding
+  does not make the font noisy here, it shifts the commitment to a (wrong) sans.
+- `nike-ad` body paragraph — **alignment** (regardless of font): under the full prompt the
+  centre-fraction *wanders between batches* — 100% (n=10), then 25% / 30% / 60% (n=20 each) on
+  reruns; under lean it was 20/20 centre. A swing that large under identical input is not
+  in-batch sampling (greedy), it is serving-level non-determinism (vLLM continuous batching +
+  NVFP4 narrow margins) whose magnitude is load/time dependent — so isolated runs *understate*
+  what production (grouping batched with translation traffic) sees.
+- `kassabon` product rows — **`|` field count** per row: full prompt `{2:6, 3:2, 4:1, 5:1}`
+  (KARNEMELK/GORGONZOLA/… all flap together); dropping one clause tightens it to `{2:9, 3:1}`.
+  This is the wobble that feeds `_field_pairs` / `_split_table_row` and changes how the row is
+  column-split run to run.
+
+**Mechanism — the numbered-step-badge example is the receipt destabiliser.** The d7ce649 icon
+example ("a numbered step badge — a digit inside a circle/disc") was added for ONE image
+(`return-shipment`, an instructional/app screenshot), where it reliably strips the circled step
+numbers (0/6 leak with it, 4/6 without). But it is the only icons example about **digits**: it
+injects a "digits can be ignorable non-text" concept into a global prompt run on digit-heavy
+images, and on a receipt that collides with the quantity/price columns → the `|` structure
+wobbles. Removing just that clause tightens the kassabon pipes (above). The rest of the icons
+rule (calendar/gear/magnifier/logo — unambiguously non-text) is free; this one is not. Note the
+`nike-ad` instability is **not** cleanly this clause — removing only the badge example did not
+steady nike alignment (still ~50/50); only the full lean did — so nike's wobble is broader
+instruction load, not this example. (Caveat: single-batch evidence on a wandering distribution.)
+
+**Direction — condition the prompt on image category, don't fatten one global prompt.** Keep the
+general icons rule everywhere (it is load-bearing); ship the digit-sensitive badge example only
+in the bucket where it applies (instructional / app-UI like `return-shipment`), not in the
+receipt or ad buckets. Smallest first step: make just that one example conditional, not a full
+prompt split. Putting both lean variants in one prompt with an "exit" at the top does **not**
+recover the lean benefit — self-attention is global, all tokens stay in context and the model
+must actively suppress the wrong branch (a fresh near-boundary decision). The benefit only comes
+from not sending the irrelevant tokens, i.e. routing **outside** the model.
+
+**Router cost (for the routing step).** Dominated by image *prefill* (vision tokens ∝ pixel
+area), not decode — so MTP / output throughput is irrelevant for a one-token classification, and
+because the 26B is an A4B MoE (~4B active/token incl. prefill) a separate dense 2B buys only
+~2× active-FLOPs while costing a second resident model + VRAM contention on the 16 GB card. Best
+effort/reward: route through the **already-warm 26B on an aggressively downscaled thumbnail**
+(coarse bucket reads on gestalt, not glyphs; the model already emits `*Image classification:*`),
+one classification token out — a few % of the real grouping call. A discriminative CLIP-head /
+small CNN is the sub-ms floor if even that matters, at the cost of a new component.
+
+**Separate track — tune the grouping image-token cap.** The full-res grouping call is the
+heaviest stage, because dynamic high-res tiling on big images explodes the vision-token count. A
+cap cuts that AND reduces cross-image variance (images arrive at wildly different resolutions →
+different tiling → different behaviour). This is already capped server-side for our model: the
+pool sets `vllm_mm_processor_kwargs.max_soft_tokens: 560` on the gemma-4-26b-a4b NVFP4 serve
+entry (the Gemma equivalent of the `max_pixels` / `max_tiles` knob the Qwen-style models in the
+same config use). So the grouping image is mapped to ≤560 image tokens before prefill regardless
+of input resolution — prefill is already bounded, and the font/alignment/`|` wobble above already
+happens *at* 560. This "track" is therefore not a pre-resize in `_data_uri` but **tuning that
+560** (a clamp from above; lowering it cheapens prefill but, since 560 is already the ceiling the
+model sees, almost certainly costs the resolution-sensitive axes). A separate router path would
+instead want its own entry with a much smaller cap (~64–128). Risk lands precisely on the resolution-sensitive
+outputs — font guess, `|` column discrimination, and the hint→OCR token matching the aligner
+relies on (a worse VLM reading → more cells fall to leftover). OCR stays full-res (authoritative
+for text/boxes); only the VLM image is the variable. Test with a resolution sweep, prompt fixed,
+measuring prefill latency vs the font/alignment/`|` stability metrics above plus hint→OCR
+alignment success, to find the sweet spot (which may sit close to full-res).
+
+**Routing — the worked-out shape (parked, nothing built).**
+
+- **Hard dependency: the grouping VLM runs before OCR and routes it** (`translate_image.py`:
+  hint → `resolve_ocr_language(hint.units)` → OCR). So there is no free pre-grouping signal
+  (OCR text isn't available yet) — category-conditioning the grouping prompt needs a dedicated
+  **pre-classify call**. Reordering OCR-first to route on its text would break the hint-routes-OCR
+  design, so that is not a small change.
+- **Phase 1 (minimal vertical slice):** add a `_USER_INSTRUCTION_LEAN` (rules 1 importance /
+  2 reading-order / 5 font / 6 alignment + the OUTPUT-FORMAT block + the *bare* icon line; drop
+  3 tables / 4 field-values / 4.1 bullets). Same strict label format → **parser unchanged** (no
+  `|`/`@blt` on prose images is fine, the parser simply sees none). Route **conservatively**:
+  lean only on a confident prose/display category, everything else (table / UI / unknown / low
+  confidence) → the full prompt, so current behaviour is the default/fallback (bounded downside).
+  Record the category + chosen prompt in the debug record.
+- **Router options (undecided):** (a) **thumbnail through the warm 26B** — one classify token on
+  a downscaled image, reuses infra, ~few % latency, generative but the coarse bucket is a
+  high-margin decision so serving-noise won't flip it; (b) **discriminative CLIP-head / small CNN**
+  — sub-ms, deterministic (argmax over logits), at the cost of a new component to train/host.
+- **Bucket options (undecided):** minimal **2-way** (lean prose/display vs full default) first —
+  smallest validation surface, captures the measured nike win; richer **3-way** (prose / table /
+  ui, with the numbered-badge example moved into the ui-only prompt) only later.
+- **Why not rush the 3-way:** the badge/step-marker handling is fragile at the edges — **sub-
+  numbered steps (3a / 3b)**, lettered steps, or nested markers don't fit a single "circled
+  digit" rule and can reintroduce the same leak/instability the badge clause caused. Keep buckets
+  minimal until that is worked through. Parked by agreement; larger fixes take priority.
 
 
 ## Idea: re-OCR the rendered image as a render-fidelity check (and refine loop)
