@@ -26,6 +26,28 @@ wired into the task in `tasks/`.
   "image-pool"/"pool"/"job" synonyms.
 - Do not run `git commit`/`git push` unless explicitly requested.
 
+### Generalize, don't curve-fit (OCR / grouping / replacement)
+
+A fix prompted by one test image must hold for unseen images, not fit that one.
+For every such change, state in the response whether it generalizes and why:
+
+- **Principle, not pixels.** The fix must rest on a geometric/structural fact
+  true of the image class (a tilted line's axis bbox spills past the ink; a
+  photographed line fans by perspective), not on values read off one image.
+- **No-op where it shouldn't apply.** Prefer changes that reduce to the old
+  behaviour on the cases they don't target (oriented sampling == axis sampling
+  at angle ≈ 0; a baseline fit == 0° on flat text). A strict no-op can't regress.
+- **Safe fallback** when inputs are too thin to support the new path (one-word
+  line → fall back to the quad angle), never a guess.
+- **Nothing image-specific** hard-coded: no literal colour, no constant tuned to
+  make one fixture look right.
+- **Validate on another image** before claiming generality: re-render a second
+  tilted/photographed fixture (e.g. `afstand-houden`, `menukaart`) and confirm no
+  regression — argument alone is not enough.
+- **Name the honest limit.** Say what the change does NOT fix (flat fill still
+  scars on textured backgrounds — the LaMa/Tier-2 case; a straight tile can't
+  follow a curved surface), so the boundary is explicit.
+
 ## Verification
 
 - `.venv/bin/python -m pytest tests/test_api.py` after changes.
