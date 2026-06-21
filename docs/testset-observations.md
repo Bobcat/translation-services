@@ -332,9 +332,10 @@ the `circus.jpeg` title cleanly: the rendered "WAARSCHUWING" cell is `h32 @ top9
 original "WARNING" `h45 @ top3` (the longer Dutch word pt-shrinks to fit the width, so it no longer
 fills the red bar), where a pixel diff drowned in the legitimate white glyph pixels.
 
-Because OCR (~1–2s) + render (<1s) are cheap next to the grouping VLM + LLM translation that
-dominate latency, a **render → re-OCR → compare to source boxes → adjust → re-render** loop is
-affordable for a few iterations:
+Because OCR (warm: ~140ms median, ~440ms on the 120-cell kassabon) + render (~100ms median, ~550ms
+on kassabon) are cheap next to the grouping VLM (~1.1s median, 4s on kassabon) + LLM translation
+that dominate latency — all measured on the dc1 dev box, less on the dc2 target — a **render →
+re-OCR → compare to source boxes → adjust → re-render** loop is affordable for a few iterations:
 
 - per unit, compare the rendered cell box (top / height / position / width-ratio) to its source box;
 - flag a mismatch (e.g. a title >20% smaller, or shifted out of its band);
