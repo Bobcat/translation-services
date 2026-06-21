@@ -58,6 +58,7 @@ def group_cells_into_units(
         hint_families=hint.font_families,
         hint_weights=hint.font_weights,
         hint_bullets=hint.bullets,
+        hint_bullet_markers=hint.bullet_markers,
     )
     return replace(
         result,

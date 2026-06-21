@@ -191,6 +191,26 @@ def test_line_neighbour_binds_shared_word_to_its_printed_line() -> None:
     assert shared.hint_index == 0  # without the line-neighbour rule the position tie-break picks 1
 
 
+def test_sibling_list_items_do_not_collapse_onto_one_hint() -> None:
+    # Two itemize items differ by a single word ("first"/"second") and stack directly under each
+    # other, so the second reads as a continuation of the first. But it FULLY matches its OWN hint
+    # line, so it must bind there — not stick to the first item's hint, which would lose the second
+    # item entirely and reflow the first over both lines.
+    def cell(cid: int, text: str, top: int) -> dict:
+        return {"id": cid, "text": text, "bbox": {"left": 100, "top": top, "width": 200, "height": 14}}
+
+    hints = ["Second level itemize first item", "Second level itemize second item"]
+    cells = [
+        cell(1, "Second level itemize first item", 0),
+        cell(2, "Second level itemize second item", 18),
+    ]
+    result = build_units_from_hint(cells=cells, hint_units=hints, model="qwen")
+    first = next(u for u in result.units if any(m.cell_id == 1 for m in u.members))
+    second = next(u for u in result.units if any(m.cell_id == 2 for m in u.members))
+    assert first.hint_index == 0
+    assert second.hint_index == 1  # its own line, not stuck to item 1
+
+
 def test_line_anchor_ignores_far_column_neighbour() -> None:
     # The rule only links words a WORD-gap apart, so a receipt's far-left label and far-right value
     # never pull each other — a column-gap neighbour yields no anchor (the cell keeps its own logic).
@@ -327,6 +347,27 @@ def test_short_noise_cell_stays_leftover() -> None:
     cells = [{"id": 1, "text": "T", "bbox": {"left": 0, "top": 0, "width": 10, "height": 10}}]
     result = build_units_from_hint(cells=cells, hint_units=["1 | KARNEMELK | | 1,69"], model="qwen")
     assert result.units[0].hint_index is None
+
+
+def test_parse_grouping_output_strips_bullet_sentinel_and_captures_marker() -> None:
+    # New format "|@blt|@<bullet>|<item>": the VLM substitutes the glyph it SAW into @<bullet>; we
+    # strip the sentinel, flag the unit, capture the marker, and keep clean item text. Numbered and
+    # lettered markers ride the same channel. Older forms (a fixed "@bullet", a bare glyph, a missing
+    # glyph field) parse with the default marker; a plain line is no bullet.
+    cases = [
+        ("*b|CM|12pt|400|l:*|@blt|@•|First item", "First item", True, "•"),
+        ("*b|CM|12pt|400|l:*|@blt|@-|Dash item", "Dash item", True, "-"),
+        ("*b|CM|12pt|400|l:*|@blt|*|Asterisk", "Asterisk", True, "*"),
+        # no separate marker field -> the marker stays in the text, none is invented
+        ("*b|CM|12pt|400|l:*|@blt|1. First item", "1. First item", True, None),
+        ("*b|CM|12pt|400|l:*|@blt|(a) Second item", "(a) Second item", True, None),
+        ("*b|CM|12pt|400|l:*Plain paragraph", "Plain paragraph", False, None),
+    ]
+    for line, expected_text, expected_bullet, expected_marker in cases:
+        hint = parse_grouping_output(line)
+        assert hint.units[0] == expected_text, line
+        assert hint.bullets[0] is expected_bullet, line
+        assert hint.bullet_markers[0] == expected_marker, line
 
 
 def test_parse_grouping_output_extracts_category_and_units() -> None:

@@ -35,10 +35,12 @@ class GroupingHint:
     alignments: list[str | None] = field(default_factory=list)
     font_families: list[str | None] = field(default_factory=list)
     font_weights: list[int | None] = field(default_factory=list)
-    # Parallel to ``units``: True when the line was a bullet-list item (the VLM prefixed it
-    # with the "@blt|" sentinel, stripped here). The original bullet glyph is left in the image;
-    # the renderer only insets the text past it so the translation does not overwrite it.
+    # Parallel to ``units``: True when the line was a bullet-list item (the VLM prefixed it with the
+    # "@blt|@<bullet>|" sentinel, stripped here), and the glyph/marker the VLM saw (substituted into
+    # "@<bullet>": "•", "-", "1.", "(a)", ...). The renderer redraws the marker before the text (or,
+    # in legacy mode, insets past the original glyph left in the image).
     bullets: list[bool] = field(default_factory=list)
+    bullet_markers: list[str | None] = field(default_factory=list)
 
 
 # The prompt asks for a wrapped label, but serving non-determinism makes the model vary the wrapper
@@ -67,14 +69,34 @@ _LABELED_LINE = re.compile(
 _ALIGN_CENTER = re.compile(r"\bcent(?:ered|er|red|re)\b")
 _ALIGN_WORD = re.compile(r"cent(?:ered|er|red|re)|left|right|[lcr]")
 
-# A bullet-list item: the prompt has the VLM emit the text element as "|@bullet|<item>". We strip
-# the sentinel (tolerating leading/trailing pipes) and flag the unit; the original bullet glyph
-# stays in the image (the renderer insets the text past it). The marker after "@" is what the model
-# picks for "bullet" and it drifts — the word "bullet"/"blt" or the glyph it actually saw (•·●-…) —
-# so accept either; the "|" framing + line-start "@" keep it from matching ordinary text.
+# A bullet-list item: the prompt has the VLM emit the element as "|@blt|@<bullet>|<item>" — a stable
+# "@blt" sentinel, then the actual glyph it SAW substituted into "@<bullet>". Asking for substitution
+# (rather than a fixed "@bullet") stops the model rewriting the sentinel itself, e.g. "@bullet"->"@-".
+# We strip the sentinel AND the optional substituted glyph field and flag the unit; the glyph stays in
+# the image (the renderer insets the text past it). Tolerant of the older "|@bullet|"/"|@<glyph>|"
+# forms and of a missing glyph field; the "|" framing + line-start "@" keep it off ordinary text.
 _BULLET_SENTINEL = re.compile(
-    r"^\s*\|?\s*@(?:bullet|blt|[•·∙●○◦‣⁃*–—-])\s*\|?\s*", re.IGNORECASE
+    r"^\s*\|?\s*@(?P<sentinel>blt|bullet|[•·∙●○◦‣⁃*–—-])(?:\s*\|\s*@?(?P<marker>[^|]*)\|)?\s*\|?\s*",
+    re.IGNORECASE,
 )
+def _bullet_of(text: str) -> tuple[bool, str | None, str]:
+    """``(is_bullet, marker, remaining_text)`` for a possible bullet line. The marker is the glyph the
+    VLM substituted into a SEPARATE ``@<bullet>`` field (``@blt|@•|item``), stripped from the text so
+    the renderer redraws it. When there is no separate field (``@blt|1. item``) the marker is already
+    in the content — we return ``None`` and leave it; we never invent a default bullet (the original
+    may have none, e.g. a plain numbered list)."""
+    match = _BULLET_SENTINEL.match(text)
+    if not match:
+        return False, None, text
+    captured = (match.group("marker") or "").strip()
+    sentinel = match.group("sentinel")
+    if captured:
+        marker = captured
+    elif sentinel and sentinel.lower() not in ("blt", "bullet"):
+        marker = sentinel  # old format: the glyph was the sentinel itself
+    else:
+        marker = None  # only the "@blt" word -> the marker (if any) stays in the text
+    return True, marker, text[match.end():].strip()
 
 # The label's first '|'-field is a single-letter importance code (the v3 prompt: t/h/b/m).
 _LEVEL_BY_CODE = {"t": "title", "h": "header", "b": "body", "m": "footer"}
@@ -101,6 +123,7 @@ def parse_grouping_output(output_text: str) -> GroupingHint:
     font_families: list[str | None] = []
     font_weights: list[int | None] = []
     bullets: list[bool] = []
+    bullet_markers: list[str | None] = []
     block = 0
     block_open = False
     block_level: str | None = None
@@ -154,9 +177,7 @@ def parse_grouping_output(output_text: str) -> GroupingHint:
             category = line.split(":", 1)[1].strip()
             continue
         cleaned = line.lstrip("-*#").strip().strip("*").strip()
-        bullet = bool(_BULLET_SENTINEL.match(cleaned))
-        if bullet:  # strip the "@blt|" sentinel; the glyph itself stays in the image
-            cleaned = _BULLET_SENTINEL.sub("", cleaned).strip()
+        bullet, marker, cleaned = _bullet_of(cleaned)
         if not cleaned or _is_separator(cleaned):
             continue
         units.append(cleaned)
@@ -166,6 +187,7 @@ def parse_grouping_output(output_text: str) -> GroupingHint:
         font_families.append(block_family)
         font_weights.append(block_weight)
         bullets.append(bullet)
+        bullet_markers.append(marker)
         block_open = True
     return GroupingHint(
         category=category,
@@ -177,6 +199,7 @@ def parse_grouping_output(output_text: str) -> GroupingHint:
         font_families=font_families,
         font_weights=font_weights,
         bullets=bullets,
+        bullet_markers=bullet_markers,
     )
 
 

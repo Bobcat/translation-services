@@ -72,9 +72,11 @@ class TranslationUnit:
     # cut when the weight is high. None for leftovers and unlabeled lines.
     font_family: str | None = None
     font_weight: int | None = None
-    # True when the hint line was a bullet-list item. The renderer insets the text past the
-    # original bullet glyph (left in the image) so the translation does not overwrite it.
+    # True when the hint line was a bullet-list item, plus the glyph/marker the VLM saw ("•", "-",
+    # "1.", "(a)", ...). The renderer redraws "<marker> <text>" (or, in legacy mode, insets the text
+    # past the original glyph left in the image so the translation does not overwrite it).
     bullet: bool = False
+    bullet_marker: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -89,6 +91,7 @@ class TranslationUnit:
             "font_family": self.font_family,
             "font_weight": self.font_weight,
             "bullet": self.bullet,
+            "bullet_marker": self.bullet_marker,
             "members": [member.to_dict() for member in self.members],
         }
 
@@ -110,6 +113,7 @@ class TranslationUnit:
             font_family=data.get("font_family"),
             font_weight=int(font_weight) if font_weight is not None else None,
             bullet=bool(data.get("bullet", False)),
+            bullet_marker=data.get("bullet_marker"),
         )
 
 

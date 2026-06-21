@@ -51,6 +51,7 @@ def build_units_from_hint(
     hint_families: list[str | None] | None = None,
     hint_weights: list[int | None] | None = None,
     hint_bullets: list[bool] | None = None,
+    hint_bullet_markers: list[str | None] | None = None,
 ) -> GroupingResult:
     hint_token_sets = [set(_tokens(text)) for text in hint_units]
     token_to_hints = _build_hint_index(hint_token_sets)
@@ -101,6 +102,7 @@ def build_units_from_hint(
             font_family=_hint_meta(label, hint_families),
             font_weight=_hint_meta(label, hint_weights),
             bullet=bool(_hint_meta(label, hint_bullets)),
+            bullet_marker=_hint_meta(label, hint_bullet_markers),
         )
         for order, (label, indices) in enumerate(groups, start=1)
     ]
@@ -354,20 +356,22 @@ def _pick_hint(
     # both read line 7) from flipping to a neighbouring line on a 0.04-index position tie.
     if line_anchor is not None and line_anchor in candidates:
         return line_anchor
-    # Several hint lines can match a short cell equally (two dishes ending "en frites").
-    # A continuation cell stays with its element (axis-aligned tops are tilt-distorted,
-    # so position alone is a coin flip near an element boundary); otherwise bind the
-    # cell to the hint nearest its place on the page.
+    # A cell that FULLY accounts for a candidate line (carries every one of its tokens) is that
+    # line's own: a list item identical to its siblings but for one word ("...first item" vs
+    # "...second item"), a short brand/eyebrow that is a prefix of the title, a label above its
+    # value. Bind it to the nearest such line by position BEFORE sticking to the previous line —
+    # sticky is for a wrapped continuation, which is a fragment and fully matches nothing, so this
+    # never steals a true continuation. Without it two identical sibling items collapse onto one
+    # hint (the second item is lost and the first reflows over both lines).
+    full = [index for index in match.full if index in candidates]
+    if full:
+        return min(full, key=lambda index: abs(index - preferred_index))
+    # Several hint lines can match a short cell equally (two dishes ending "en frites"). A
+    # continuation fragment stays with its element (axis-aligned tops are tilt-distorted, so
+    # position alone is a coin flip near an element boundary); otherwise bind to the nearest hint.
     if sticky is not None and sticky in candidates:
         return sticky
-    # Among equally-scored candidates, prefer a hint line the cell FULLY accounts for (it carries
-    # every token of that line): a short brand/eyebrow that is a prefix of the title, a label above
-    # its value. Without this, such a cell is a fragment of the longer neighbour too and gets pulled
-    # into it on position alone. Position still breaks any remaining tie.
-    full = [index for index in match.full if index in candidates]
-    pool = full or candidates
-    best = min(pool, key=lambda index: abs(index - preferred_index))
-    return best
+    return min(candidates, key=lambda index: abs(index - preferred_index))
 
 
 def _confident_label(match: _Match) -> int | None:
@@ -532,6 +536,7 @@ def _build_unit(
     font_family: str | None = None,
     font_weight: int | None = None,
     bullet: bool = False,
+    bullet_marker: str | None = None,
 ) -> TranslationUnit:
     members: list[UnitMember] = []
     for order, cell_index in enumerate(indices, start=1):
@@ -563,4 +568,5 @@ def _build_unit(
         font_family=font_family,
         font_weight=font_weight,
         bullet=bullet,
+        bullet_marker=bullet_marker,
     )

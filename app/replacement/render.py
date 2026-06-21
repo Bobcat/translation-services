@@ -350,11 +350,85 @@ def _reproduced_in(member: dict[str, Any], translated: str) -> bool:
     return bool(translation_tokens - set(member_tokens))
 
 
+# An ALPHANUMERIC enumerate marker at the START of a cell: "1."/"2)"/"(a)"/"A."/"ii.". OCR reads the
+# digit/letter reliably, so we redraw it as text on the cell. A GLYPH bullet ("•"/"*"/"-"/"◊") is
+# deliberately NOT matched here: glyphs route to the ink-scan path that keeps the original glyph in
+# place, which renders the SAME glyph uniformly whether or not OCR happened to read it on a given line
+# (mixed OCR recognition across a bullet list otherwise splits identical bullets over two paths). The
+# trailing ``(?=\s)`` keeps a price ("1.69") or a word from matching.
+_ENUMERATE_MARKER = re.compile(
+    r"^\s*(\([A-Za-z0-9]{1,3}\)|[A-Za-z0-9]{1,3}[.)])(?=\s)"
+)
+
+
+def _cell_marker(unit: dict[str, Any]) -> str | None:
+    """The alphanumeric enumerate marker at the start of the cell, else ``None`` (no marker, or a glyph
+    bullet that the ink-scan path handles). The VLM's captured marker counts only when it both leads the
+    source AND is itself an enumerate form — otherwise we fall back to the pattern OCR put there."""
+    source = str(unit.get("source_text") or "")
+    bullet_marker = str(unit.get("bullet_marker") or "")
+    if bullet_marker and source.lstrip().startswith(bullet_marker) and _ENUMERATE_MARKER.match(f"{bullet_marker} "):
+        return bullet_marker
+    match = _ENUMERATE_MARKER.match(source)
+    return match.group(1) if match else None
+
+
+def _prepend_marker(units: list[dict[str, Any]], marker: str) -> list[dict[str, Any]]:
+    """A shallow copy of ``units`` with ``marker`` prepended to the first translatable line when the
+    translation dropped it (idempotent), so the redrawn line keeps its "1."/"(a)" at the cell's place."""
+    out = list(units)
+    for index, unit in enumerate(out):
+        text = str(unit.get("translated_text") or "").strip()
+        if len(text) <= 1:
+            continue
+        if not text.lstrip().startswith(marker):
+            copy = dict(unit)
+            copy["translated_text"] = f"{marker} {text}"
+            out[index] = copy
+        break
+    return out
+
+
+# A glyph marker ("•"/"*"/"-"/"◊"...) that may lead the translated text. The ink-scan path keeps the
+# ORIGINAL glyph in the image, so a glyph still in the text would render twice — strip one leading glyph
+# (plus its space) before the inset. Alphanumeric markers take the redraw path (_prepend_marker) instead.
+_LEADING_GLYPH = re.compile(r"^\s*[•·∙●○◦‣⁃*–—-]\s+")
+
+
+def _strip_leading_glyph(units: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """A shallow copy of ``units`` with a single leading glyph marker removed from the first translatable
+    line, so the ink-scan path (which keeps the original glyph in place) does not render it twice."""
+    out = list(units)
+    for index, unit in enumerate(out):
+        text = str(unit.get("translated_text") or "").strip()
+        if len(text) <= 1:
+            continue
+        stripped = _LEADING_GLYPH.sub("", text, count=1)
+        if stripped != text:
+            copy = dict(unit)
+            copy["translated_text"] = stripped
+            out[index] = copy
+        break
+    return out
+
+
 def _plan_group(base: Image.Image, units: list[dict[str, Any]], *, snap_horizontal: bool = False) -> list[_Job]:
     if len(units) == 1:
         cells = _split_table_row(units[0])
         if cells is not None:
             return [job for cell in cells for job in _plan_group(base, [cell], snap_horizontal=snap_horizontal)]
+
+    # Marker routing by TYPE, not by whether OCR read it. An alphanumeric enumerate marker ("1."/"(a)")
+    # is redrawn as text on the cell (the per-cell erase wipes the original, we redraw -> aligned); re-add
+    # it if the translation dropped it. A glyph bullet ("•"/"*"/"◊") routes to the ink-scan path below
+    # (``loose_glyph``), which keeps the original glyph in place (erase clipped off it) and insets the
+    # text — so we strip a leftover glyph from the text first to avoid drawing it twice.
+    cell_marker = next((marker for unit in units if (marker := _cell_marker(unit))), None)
+    loose_glyph = cell_marker is None and any(unit.get("bullet") for unit in units)
+    if cell_marker:
+        units = _prepend_marker(units, cell_marker)
+    elif loose_glyph:
+        units = _strip_leading_glyph(units)
 
     texts: list[str] = []
     group_quads: list = []
@@ -413,10 +487,10 @@ def _plan_group(base: Image.Image, units: list[dict[str, Any]], *, snap_horizont
         })
     planes = _drop_redundant_stray_planes(planes)
 
-    # Bullet items: keep the original bullet glyph by starting the erase/anchor at the text on
-    # the first (topmost) plane — the line that carries the bullet — and centre the re-rendered
-    # text on the bullet so they line up. The VLM flag makes this safe.
-    if planes and any(u.get("bullet") for u in units):
+    # Loose-glyph bullet (OCR never read it, e.g. "•"): keep the original glyph by starting the
+    # erase/anchor at the text on the first plane — the line that carries the bullet — and centre the
+    # re-rendered text on the bullet so they line up. (A marker OCR DID read is redrawn as text above.)
+    if planes and loose_glyph:
         x_axis, y_axis, xmin, xmax, ymin, ymax = planes[0]["frame"]
         geometry = _bullet_geometry(base, planes[0]["frame"], angle)
         if geometry is not None and xmin < geometry[0] < xmax:
@@ -508,11 +582,17 @@ def _plan_group(base: Image.Image, units: list[dict[str, Any]], *, snap_horizont
         # Erase each original word with its OWN tight quad (at the word's own tilt), grown by
         # ``pad`` on the sides and only an AA margin top/bottom. One line-spanning rectangle would
         # float above the lower words of a fanning line and, with a flat fill, paint background
-        # colour past the text's band; per-word quads hug the ink and stay inside it. A preserved
-        # bullet glyph is not a member, so it is never erased.
+        # colour past the text's band; per-word quads hug the ink and stay inside it.
         erase_quads = [
             _member_erase_quad(quad, pad, min(pad, _ERASE_MARGIN)) for quad in plane["quads"]
         ]
+        # A detected bullet glyph sits LEFT of the inset text start (``xmin`` here). OCR often pulls
+        # it into the first cell's box, so the per-word erase — grown by ``pad`` — would wipe it. Clip
+        # the erase to start AT the text so the glyph survives. (The old single-rectangle erase started
+        # at the inset frame and skipped it for free; per-word quads need this clip back.)
+        if plane.get("bullet_y") is not None:
+            clip_x = int(round(xmin))
+            erase_quads = [[(max(x, clip_x), y) for x, y in quad] for quad in erase_quads]
         jobs.append(_Job(erase_quads=erase_quads, bg_color=bg, tile=tile, dst_quad=dst_quad))
     return jobs
 
@@ -567,7 +647,6 @@ def _ink_runs(mask) -> list[tuple[int, int]]:
     if start is not None:
         runs.append((start, len(mask) - 1))
     return runs
-
 
 def _baseline_angle(clusters: list[list], fallback: float) -> float:
     """The block's text-line direction, fit through the word CENTRES rather than read off the
