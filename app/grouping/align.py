@@ -31,6 +31,13 @@ from app.grouping.units import union_bbox
 
 _MATCH_THRESHOLD = 0.4
 _POSITION_GUARD = 3.0
+# A tied cell (its token sits in several hint lines, e.g. a "dieren" shared by four sentences) is
+# resolved by its line-neighbours: the nearest CONFIDENT cell touching it on the left/right of the
+# same printed line. A neighbour counts when it overlaps vertically by this fraction of the shorter
+# height (same line, tilt-tolerant) and sits within this gap (a word space, not a column gap — so a
+# receipt's far label/amount never link).
+_LINE_VOVERLAP_RATIO = 0.4
+_LINE_GAP_RATIO = 1.2
 
 
 def build_units_from_hint(
@@ -52,16 +59,26 @@ def build_units_from_hint(
         for cell in cells
     ]
     positions, positions_anchored = _anchored_positions(cells, matches, len(hint_units))
+    # A cell whose best token-match is a single hint line is CONFIDENT; the rest are ambiguous (a
+    # word shared by several lines). An ambiguous cell takes the line of its confident line-neighbours
+    # — reading-flow contiguity — instead of a hair's-breadth position tie-break that flips it to the
+    # wrong neighbouring line (see _line_anchor).
+    confident = [_confident_label(match) for match in matches]
+    line_anchors = [
+        _line_anchor(index, cells, confident) if len(match.candidates) > 1 else None
+        for index, match in enumerate(matches)
+    ]
     labels: list[int | None] = []
     previous_label: int | None = None
     previous_cell: dict[str, Any] | None = None
-    for cell, match, position in zip(cells, matches, positions):
+    for index, (cell, match, position) in enumerate(zip(cells, matches, positions)):
         sticky = previous_label if _is_continuation(previous_cell, cell) else None
         label = _pick_hint(
             match,
             preferred_index=position,
             sticky=sticky,
             position_reliable=positions_anchored,
+            line_anchor=line_anchors[index],
         )
         labels.append(label)
         if label is not None:
@@ -316,6 +333,7 @@ def _pick_hint(
     preferred_index: float = 0.0,
     sticky: int | None = None,
     position_reliable: bool = False,
+    line_anchor: int | None = None,
 ) -> int | None:
     if not match.candidates or match.score < _MATCH_THRESHOLD:
         return None
@@ -330,6 +348,12 @@ def _pick_hint(
         candidates = list(dict.fromkeys(guarded))
         if not candidates:
             return None
+    # Reading-flow contiguity wins first: a cell flanked on its printed line by confident cells of
+    # one hint line belongs to that line, however its axis-aligned top (tilt-distorted) interpolates.
+    # This is what keeps a shared word ("dieren", sitting between "Voer en aai de" and "nooit." which
+    # both read line 7) from flipping to a neighbouring line on a 0.04-index position tie.
+    if line_anchor is not None and line_anchor in candidates:
+        return line_anchor
     # Several hint lines can match a short cell equally (two dishes ending "en frites").
     # A continuation cell stays with its element (axis-aligned tops are tilt-distorted,
     # so position alone is a coin flip near an element boundary); otherwise bind the
@@ -344,6 +368,58 @@ def _pick_hint(
     pool = full or candidates
     best = min(pool, key=lambda index: abs(index - preferred_index))
     return best
+
+
+def _confident_label(match: _Match) -> int | None:
+    """The hint line a cell unambiguously belongs to: a single best-scoring candidate above the
+    match threshold. ``None`` when the cell is ambiguous (its token sits in several lines) or weak —
+    such a cell does not anchor a neighbour, it gets resolved BY its confident neighbours."""
+    if len(match.candidates) == 1 and match.score >= _MATCH_THRESHOLD:
+        return match.candidates[0]
+    return None
+
+
+def _line_anchor(index: int, cells: list[dict[str, Any]], confident: list[int | None]) -> int | None:
+    """The hint line an ambiguous cell takes from its printed-line neighbours: the nearest CONFIDENT
+    cell touching it on the left and on the right of the same line. A neighbour qualifies when it
+    overlaps the cell vertically (same line, tilt-tolerant) and sits within a word-gap of it — a
+    column gap is too wide, so a receipt's far-apart label/amount never link and 2-D rows are left
+    to the position logic. Returns the shared label when the present sides agree, else ``None`` (the
+    caller falls back to sticky/position). This encodes reading-flow contiguity: a word between two
+    cells of one line is part of that line, not of a vertically-nearer neighbour line."""
+    box = cells[index].get("bbox") or {}
+    left = float(box.get("left", 0.0))
+    right = left + float(box.get("width", 0.0))
+    top = float(box.get("top", 0.0))
+    bottom = top + float(box.get("height", 0.0))
+    height = float(box.get("height", 0.0)) or 1.0
+    gap_cap = _LINE_GAP_RATIO * height
+    slack = 0.3 * height  # tolerate a touch of horizontal overlap at the boundary
+    left_label, left_gap = None, gap_cap + 1.0
+    right_label, right_gap = None, gap_cap + 1.0
+    for other_index, label in enumerate(confident):
+        if other_index == index or label is None:
+            continue
+        other = cells[other_index].get("bbox") or {}
+        other_left = float(other.get("left", 0.0))
+        other_right = other_left + float(other.get("width", 0.0))
+        other_top = float(other.get("top", 0.0))
+        other_height = float(other.get("height", 0.0)) or 1.0
+        other_bottom = other_top + other_height
+        if (min(bottom, other_bottom) - max(top, other_top)) <= _LINE_VOVERLAP_RATIO * min(height, other_height):
+            continue  # not on this cell's line
+        if other_right <= left + slack:  # neighbour to the LEFT
+            gap = left - other_right
+            if gap <= gap_cap and gap < left_gap:
+                left_label, left_gap = label, gap
+        elif other_left >= right - slack:  # neighbour to the RIGHT
+            gap = other_left - right
+            if gap <= gap_cap and gap < right_gap:
+                right_label, right_gap = label, gap
+    sides = [label for label in (left_label, right_label) if label is not None]
+    if not sides:
+        return None
+    return sides[0] if all(label == sides[0] for label in sides) else None
 
 
 def _anchored_positions(

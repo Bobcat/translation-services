@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from app.grouping.align import _build_hint_index
 from app.grouping.align import _candidate_hints
+from app.grouping.align import _line_anchor
 from app.grouping.align import _match_scores
 from app.grouping.align import build_units_from_hint
 from app.grouping.hint_parser import parse_grouping_output
@@ -167,6 +168,53 @@ def test_anchored_tie_break_binds_each_duplicate_line_to_its_own_hint() -> None:
     result = build_units_from_hint(cells=cells, hint_units=hints, model="qwen")
     ambiguous = next(u for u in result.units if any(m.cell_id == 5 for m in u.members))
     assert ambiguous.hint_index == 4
+
+
+def test_line_neighbour_binds_shared_word_to_its_printed_line() -> None:
+    # A word shared by two lines ("core") sits on the FIRST line, flanked by that line's words, but
+    # its axis-aligned top dips low enough that the position estimate (~0.62) alone binds it to the
+    # vertically-nearer second line. Its confident left/right line-neighbours win: it stays on its
+    # own line. Mirrors a "dieren" shared by several sign sentences flipping to the wrong one.
+    def cell(cid: int, text: str, top: int, left: int, width: int, height: int = 20) -> dict:
+        return {"id": cid, "text": text, "bbox": {"left": left, "top": top, "width": width, "height": height}}
+
+    hints = ["left core right", "down here core extra"]
+    cells = [
+        cell(1, "left", 0, 0, 50),
+        cell(2, "core", 10, 58, 44),     # ambiguous, dips toward the line below
+        cell(3, "right", 0, 110, 50),
+        cell(4, "down here", 16, 0, 90),
+        cell(5, "extra", 16, 110, 50),
+    ]
+    result = build_units_from_hint(cells=cells, hint_units=hints, model="qwen")
+    shared = next(u for u in result.units if any(m.cell_id == 2 for m in u.members))
+    assert shared.hint_index == 0  # without the line-neighbour rule the position tie-break picks 1
+
+
+def test_line_anchor_ignores_far_column_neighbour() -> None:
+    # The rule only links words a WORD-gap apart, so a receipt's far-left label and far-right value
+    # never pull each other — a column-gap neighbour yields no anchor (the cell keeps its own logic).
+    def cell(text: str, top: int, left: int, width: int, height: int = 40) -> dict:
+        return {"id": 0, "text": text, "bbox": {"left": left, "top": top, "width": width, "height": height}}
+
+    cells = [
+        cell("Kaartnr", 100, 600, 160),    # confident, but a column away
+        cell("BETALING", 100, 1400, 120),  # the ambiguous cell
+    ]
+    assert _line_anchor(1, cells, [39, None]) is None
+
+
+def test_line_anchor_needs_agreeing_sides() -> None:
+    def cell(text: str, top: int, left: int, width: int, height: int = 40) -> dict:
+        return {"id": 0, "text": text, "bbox": {"left": left, "top": top, "width": width, "height": height}}
+
+    cells = [
+        cell("a", 100, 0, 100),     # left line-neighbour
+        cell("x", 100, 108, 60),    # the ambiguous cell
+        cell("b", 100, 176, 100),   # right line-neighbour
+    ]
+    assert _line_anchor(1, cells, [7, None, 8]) is None  # sides disagree -> no anchor
+    assert _line_anchor(1, cells, [7, None, 7]) == 7     # sides agree -> bind that line
 
 
 def test_position_guard_filters_far_full_numeric_hint_before_tie_break() -> None:
