@@ -43,10 +43,9 @@ from PIL import ImageDraw
 from app.grouping.heuristics import _is_nontranslatable
 from app.replacement import geometry as geo
 from app.replacement.color import contrasting_fg
-from app.replacement.color import sample_region_colors
+from app.replacement.color import sample_oriented_colors
 from app.replacement.fit import is_cjk_text
 from app.replacement.fit import load_font
-from app.replacement.fit import wrap_lines
 
 
 # Font size from the true (de-skewed) line height. The polygon height spans the full
@@ -104,7 +103,11 @@ _ERASE_MARGIN = 2.0
 
 @dataclass(frozen=True)
 class _Job:
-    erase_quad: list[tuple[int, int]]
+    # One tight quad per original member (word), each at its OWN tilt — not a single
+    # line-spanning rectangle. A photographed line fans (perspective steepens along it),
+    # so one straight rectangle pinned to the highest word floats above the lower ones;
+    # with a flat fill that overshoot paints background colour past the text's band.
+    erase_quads: list[list[tuple[int, int]]]
     bg_color: tuple[int, int, int]
     # None for an erase-only plane (the translation needed fewer lines than the original).
     tile: Image.Image | None
@@ -123,7 +126,8 @@ def render_translated_image(input_path: Path, translation_units: list[dict[str, 
     # Pass 1: cover every original (along the slant) so no source text peeks through.
     erase = ImageDraw.Draw(base)
     for job in jobs:
-        erase.polygon(job.erase_quad, fill=job.bg_color)
+        for quad in job.erase_quads:
+            erase.polygon(quad, fill=job.bg_color)
 
     # Pass 2: warp each text tile onto its oriented region.
     canvas = np.asarray(base).copy()
@@ -321,15 +325,27 @@ def _field_match_rank(source: str, member_text: str) -> tuple[float, int, int]:
 def _reproduced_in(member: dict[str, Any], translated: str) -> bool:
     """Whether a NON-translatable member's text is re-emitted by the unit's translation, which
     contains more than just that member. OCR sometimes splits an inline non-translatable token
-    (a "1, 2, 3, 4?", a code) into its own member; the structured translation still translates the
-    whole hint line, so it reproduces that token inline. Keeping the original on top then doubles
-    it. We erase such a member like a translatable one — but only when the translation carries OTHER
-    tokens too, so a standalone token translating to itself (a lone price) is left untouched."""
+    (a "1, 2, 3, 4?", a code, a URL) into its own member; the structured translation still
+    translates the whole hint line, so it reproduces that token inline. Keeping the original on top
+    then doubles it AND drops it from the erase/plane set (the original peeks through). We erase
+    such a member like a translatable one — but only when the translation carries OTHER tokens too,
+    so a standalone token translating to itself (a lone price) is left untouched.
+
+    OCR also merges a short neighbouring word into the box (``op www.ikstopnu.nl`` — the "op" of
+    "Kijk op" pulled into the URL cell), and the translation rephrases that word ("Visit") rather
+    than echoing it. A token of 1-2 chars may therefore be missing; the DISTINCTIVE (>2-char)
+    tokens carry the identity, so reproduction is judged on those — every long token must be
+    reproduced, and the match must rest on a long token (or on the whole short member, the
+    "1,2,3,4" case), never on a stray short token alone."""
     member_tokens = re.findall(r"\w+", str(member.get("text") or "").lower())
     if not member_tokens:
         return False
     translation_tokens = set(re.findall(r"\w+", str(translated or "").lower()))
-    if not all(token in translation_tokens for token in member_tokens):
+    missing = [token for token in member_tokens if token not in translation_tokens]
+    if any(len(token) > 2 for token in missing):  # a distinctive token is absent -> not reproduced
+        return False
+    long_reproduced = any(len(token) > 2 for token in member_tokens if token in translation_tokens)
+    if missing and not long_reproduced:  # only short tokens matched -> too weak to call reproduced
         return False
     return bool(translation_tokens - set(member_tokens))
 
@@ -372,11 +388,19 @@ def _plan_group(base: Image.Image, units: list[dict[str, Any]], *, snap_horizont
     # perspective gradient — afstand-houden runs ~1° at the top to ~8° at the bottom), so its
     # small top-line angles are kept; snapping only those would break the gradient.
     angle = median(geo.angle_deg(quad) for quad in group_quads)
+    clusters = _line_clusters(group_quads, angle)
+    # The rendered text is warped to this angle, so it must match the band the words actually sit
+    # on. Per-quad edge angles are noisy (a short word's OCR quad reads several degrees off), and
+    # their median comes out biased shallow — the rendered line then drifts off a tilted band. The
+    # baseline FIT through the word centres recovers the true line direction; the parallel lines of
+    # a block share it, so it keeps them parallel. Falls back to the quad-median when too few words
+    # carry a baseline (a one-word line, a vertical stack of single words).
+    angle = _baseline_angle(clusters, angle)
     if snap_horizontal and abs(angle) < _ANGLE_DEADZONE_DEG:
         angle = 0.0
     size_ratio = _CJK_SIZE_RATIO if any(is_cjk_text(text) for text in texts) else _SIZE_RATIO
     planes: list[dict[str, Any]] = []
-    for quads in _line_clusters(group_quads, angle):
+    for quads in clusters:
         true_height = median(geo.line_height(quad) for quad in quads)
         x_axis, y_axis, xmin, xmax, ymin, ymax = geo.oriented_frame(quads, angle)
         planes.append({
@@ -410,18 +434,17 @@ def _plan_group(base: Image.Image, units: list[dict[str, Any]], *, snap_horizont
     family = next((u.get("font_family") for u in units if u.get("font_family")), None)
     weight = next((u.get("font_weight") for u in units if u.get("font_weight")), None)
     joined = " ".join(texts)
-    n_lines = len(planes)
-    max_line_w = max(plane["width"] for plane in planes)
+    plane_widths = [plane["width"] for plane in planes]
     # Render at the source size, but spend pt only as a last resort: if even at the condense
     # floor a line would still exceed its plane by more than _WIDTH_SLACK, step the size down
     # (which re-wraps) until the floor suffices or the size floor is hit. If the minimum size
     # still cannot fit, leave the original pixels; this catches chatty model replies on tiny
     # OCR-noise cells instead of erasing far beyond the source footprint.
     size = min(plane["target"] for plane in planes)
-    font, lines = _fit_group(joined, size=size, n_lines=n_lines, max_line_w=max_line_w, family=family, weight=weight)
+    font, lines = _fit_group(joined, size=size, plane_widths=plane_widths, family=family, weight=weight)
     while size > _MIN_RENDER_SIZE and _raw_condense(font, lines, planes) < _CONDENSE_FLOOR:
         size -= 1
-        font, lines = _fit_group(joined, size=size, n_lines=n_lines, max_line_w=max_line_w, family=family, weight=weight)
+        font, lines = _fit_group(joined, size=size, plane_widths=plane_widths, family=family, weight=weight)
     if _raw_condense(font, lines, planes) < _CONDENSE_FLOOR:
         return []
     ascent, descent = font.getmetrics()
@@ -437,7 +460,7 @@ def _plan_group(base: Image.Image, units: list[dict[str, Any]], *, snap_horizont
     # One element usually sits on one surface: when the per-plane background samples
     # are near-equal (texture noise), snap them to their median so the erase planes
     # don't show slightly different shades per line.
-    colors = [sample_region_colors(base, geo.axis_bbox(plane["quads"])) for plane in planes]
+    colors = [sample_oriented_colors(base, _plane_corners(plane)) for plane in planes]
     if len(colors) > 1:
         median_bg = tuple(int(median(bg[channel] for bg, _ in colors)) for channel in range(3))
         if all(max(abs(bg[c] - median_bg[c]) for c in range(3)) <= _BG_SNAP_DELTA for bg, _ in colors):
@@ -453,12 +476,6 @@ def _plan_group(base: Image.Image, units: list[dict[str, Any]], *, snap_horizont
         # A centered element anchors each line on its plane's CENTRE instead (the VLM
         # alignment hint); a wrong hint only moves text within the plane, nothing else.
         oy = ymin - pad
-        # Erase hugs the glyph extent vertically: only an AA margin beyond the text top/bottom,
-        # not the full ``pad``, so the fill doesn't bite into a neighbour (a coloured band) just
-        # above or below the line. Sides keep ``pad`` and grow with the tile (below).
-        margin = min(pad, _ERASE_MARGIN)
-        ey0 = ymin - margin
-        ex0, ex1, ey1 = xmin - pad, xmax + pad, ymax + margin
         tile: Image.Image | None = None
         dst_quad: list[tuple[float, float]] | None = None
         line = lines[index] if index < len(lines) else None  # extra planes: erase only
@@ -488,19 +505,15 @@ def _plan_group(base: Image.Image, units: list[dict[str, Any]], *, snap_horizont
                 geo.to_image(ox + tile_w, oy + tile_h, x_axis, y_axis),
                 geo.to_image(ox, oy + tile_h, x_axis, y_axis),
             ]
-            # Erase the original extent, grown to cover the (possibly wider) rendered line:
-            # full tile width on the sides, but only the rendered INK depth below (text bottom
-            # = ymin + text_h), not the tile's padded bottom, so it stays off the line below.
-            ex0 = min(ex0, ox)
-            ex1 = max(ex1, ox + tile_w)
-            ey1 = max(ey1, ymin + text_h + margin)
-        erase_quad = [
-            _ipoint(geo.to_image(ex0, ey0, x_axis, y_axis)),
-            _ipoint(geo.to_image(ex1, ey0, x_axis, y_axis)),
-            _ipoint(geo.to_image(ex1, ey1, x_axis, y_axis)),
-            _ipoint(geo.to_image(ex0, ey1, x_axis, y_axis)),
+        # Erase each original word with its OWN tight quad (at the word's own tilt), grown by
+        # ``pad`` on the sides and only an AA margin top/bottom. One line-spanning rectangle would
+        # float above the lower words of a fanning line and, with a flat fill, paint background
+        # colour past the text's band; per-word quads hug the ink and stay inside it. A preserved
+        # bullet glyph is not a member, so it is never erased.
+        erase_quads = [
+            _member_erase_quad(quad, pad, min(pad, _ERASE_MARGIN)) for quad in plane["quads"]
         ]
-        jobs.append(_Job(erase_quad=erase_quad, bg_color=bg, tile=tile, dst_quad=dst_quad))
+        jobs.append(_Job(erase_quads=erase_quads, bg_color=bg, tile=tile, dst_quad=dst_quad))
     return jobs
 
 
@@ -556,6 +569,29 @@ def _ink_runs(mask) -> list[tuple[int, int]]:
     return runs
 
 
+def _baseline_angle(clusters: list[list], fallback: float) -> float:
+    """The block's text-line direction, fit through the word CENTRES rather than read off the
+    OCR quad edges (which jitter several degrees per word and bias the median shallow). Each line's
+    words are de-meaned vertically so the parallel lines of a block all contribute to ONE shared
+    slope — keeping the lines parallel while using every word for a robust fit. Falls back to
+    ``fallback`` when too few words span an x-range to define a slope (a one-word line, or a
+    vertical stack of single words at the same x)."""
+    xs: list[float] = []
+    ys: list[float] = []
+    for cluster in clusters:
+        centres = [(sum(p[0] for p in q) / 4.0, sum(p[1] for p in q) / 4.0) for q in cluster]
+        if len(centres) < 2:
+            continue
+        mean_y = sum(c[1] for c in centres) / len(centres)
+        for cx, cy in centres:
+            xs.append(cx)
+            ys.append(cy - mean_y)
+    if len(xs) < 2 or (max(xs) - min(xs)) < 1.0:
+        return fallback
+    slope = float(np.polyfit(xs, ys, 1)[0])
+    return math.degrees(math.atan(slope))
+
+
 def _line_clusters(quads: list, angle: float) -> list[list]:
     """Cluster member quads into physical text lines (top to bottom in the oriented
     frame): a quad whose vertical centre falls inside the running cluster's extent is
@@ -576,6 +612,36 @@ def _line_clusters(quads: list, angle: float) -> list[list]:
             clusters.append([quad])
             extent_max = oymax
     return clusters
+
+
+def _member_erase_quad(quad: list, dx: float, dy: float) -> list[tuple[int, int]]:
+    """A member's tight erase quad: its oriented bounding box in the member's OWN frame, grown
+    ``dx`` horizontally (to swallow the glyph anti-alias halo) and only ``dy`` vertically (an AA
+    margin, so the fill stays off a coloured band a few px above/below). Per-word — at the word's
+    own tilt — so a fanning line's words each get hugged instead of one rectangle overshooting."""
+    angle = geo.angle_deg(quad)
+    x_axis, y_axis, xmin, xmax, ymin, ymax = geo.oriented_frame([quad], angle)
+    xmin, xmax, ymin, ymax = xmin - dx, xmax + dx, ymin - dy, ymax + dy
+    return [
+        _ipoint(geo.to_image(xmin, ymin, x_axis, y_axis)),
+        _ipoint(geo.to_image(xmax, ymin, x_axis, y_axis)),
+        _ipoint(geo.to_image(xmax, ymax, x_axis, y_axis)),
+        _ipoint(geo.to_image(xmin, ymax, x_axis, y_axis)),
+    ]
+
+
+def _plane_corners(plane: dict[str, Any]) -> list[tuple[float, float]]:
+    """The plane's oriented bounding box as four image-space corners [TL, TR, BR, BL].
+    Sampling background from this (deskewed) region instead of the axis-aligned bbox keeps
+    the border ring inside a tilted coloured band — on a slanted line the axis box's corners
+    reach into the surroundings (a sign's panel behind a diagonal bar) and muddy the sample."""
+    x_axis, y_axis, xmin, xmax, ymin, ymax = plane["frame"]
+    return [
+        geo.to_image(xmin, ymin, x_axis, y_axis),
+        geo.to_image(xmax, ymin, x_axis, y_axis),
+        geo.to_image(xmax, ymax, x_axis, y_axis),
+        geo.to_image(xmin, ymax, x_axis, y_axis),
+    ]
 
 
 def _plane_source_tokens(quads: list, group_quads: list, quad_tokens: list[set[str]]) -> set[str]:
@@ -611,18 +677,16 @@ def _fit_group(
     text: str,
     *,
     size: int,
-    n_lines: int,
-    max_line_w: float,
+    plane_widths: list[float],
     family: str | None = None,
     weight: int | None = None,
 ) -> tuple[Any, list[str]]:
     """Render at the source ``size`` (true line height) in the unit's VLM font ``family`` /
-    ``weight``, wrapped into as few lines as fit the column width (``max_line_w``), capped at
-    ``n_lines``. The font is NOT reduced to fit width — the source size, and thus the
-    header/body hierarchy, is preserved; width is matched by horizontal condensation in the
-    caller."""
+    ``weight``, wrapped so each line fits the width of the plane it lands on (``plane_widths``).
+    The font is NOT reduced to fit width — the source size, and thus the header/body hierarchy,
+    is preserved; width is matched by horizontal condensation in the caller."""
     font = load_font(max(6, min(int(size), 160)), text, family=family, weight=weight)
-    return font, _wrap_balanced(font, text, n_lines, max_line_w)
+    return font, _wrap_to_planes(font, text, plane_widths)
 
 
 def _raw_condense(font: Any, lines: list[str], planes: list[dict[str, Any]]) -> float:
@@ -649,31 +713,79 @@ def _condense_scale(font: Any, lines: list[str], planes: list[dict[str, Any]]) -
     return max(_CONDENSE_FLOOR, min(1.0, _raw_condense(font, lines, planes)))
 
 
-def _wrap_balanced(font: Any, text: str, n_lines: int, max_width: float) -> list[str]:
-    """Wrap ``text`` into as FEW lines as fit the column width, capped at ``n_lines``.
+def _wrap_to_planes(font: Any, text: str, plane_widths: list[float]) -> list[str]:
+    """Wrap so each rendered line fits the width of the PLANE it lands on, in order, and the words
+    are BALANCED across those lines — not greedily dumped.
 
-    First a plain greedy wrap at the original column width (``max_width``): a more compact
-    translation that fits in fewer lines than the original uses fewer — no empty spreading
-    over the original line count. Only when the text still needs more than ``n_lines`` lines
-    at that width do we pack it into exactly ``n_lines`` by the smallest balancing width (the
-    caller then condenses horizontally to fit)."""
+    Two failures this avoids:
+    - Wrapping every line to the widest plane overflows a narrow top plane (a short heading line
+      above a wide one), and the caller's width-fit then shrinks the whole block toward one tiny
+      line. So each line is bounded by its OWN plane width.
+    - A plain greedy fill breaks an early line at its natural plane width, leaving it half-empty
+      while the remainder (often a long token like a URL) piles onto the last line. So instead the
+      block's natural line COUNT is taken first (greedy at the plane widths, capped at the plane
+      count), then the words are spread over exactly that many lines by the smallest uniform scale
+      on the plane widths that still fits — a minimax fill that keeps every line about equally full.
+
+    A compact translation that needs fewer lines than there are planes uses fewer (the rest stay
+    erase-only). On equal-width planes a balanced fill matches the original column layout."""
     content = str(text or "").strip()
-    if n_lines <= 1 or not content:
+    if len(plane_widths) <= 1 or not content:
         return [content]
-    natural = wrap_lines(font, content, int(max_width))
-    if len(natural) <= n_lines:
-        return natural
-    lo, hi = 1, int(font.getlength(content)) + 1
-    best = wrap_lines(font, content, hi)
-    while lo <= hi:
-        mid = (lo + hi) // 2
-        lines = wrap_lines(font, content, mid)
-        if len(lines) <= n_lines:
-            best = lines
-            hi = mid - 1
+    words = content.split()
+    line_count = len(_greedy_wrap(font, words, plane_widths))  # fewest lines at natural plane width
+    caps = plane_widths[:line_count]
+    # Smallest scale on the plane widths that still packs the words into ``line_count`` lines: this
+    # is the most-relaxed (least condensed) balanced fill. Binary search — monotone in the scale.
+    lo, hi = 0.0, 10.0
+    for _ in range(40):
+        mid = (lo + hi) / 2.0
+        if _fits_in_lines(font, words, caps, mid):
+            hi = mid
         else:
-            lo = mid + 1
-    return best
+            lo = mid
+    return _greedy_wrap(font, words, [cap * hi for cap in caps])
+
+
+def _greedy_wrap(font: Any, words: list[str], line_caps: list[float]) -> list[str]:
+    """Greedy fill: line ``i`` takes words while they fit ``line_caps[i]``; the LAST cap carries
+    every remaining word (so the result never exceeds ``len(line_caps)`` lines). A word that alone
+    exceeds its cap still starts the line (never an empty line) — the caller condenses/shrinks it."""
+    lines: list[str] = []
+    current = ""
+    index = 0
+    last = len(line_caps) - 1
+    for word in words:
+        if index >= last:
+            current = f"{current} {word}".strip()
+            continue
+        trial = f"{current} {word}".strip()
+        if current and font.getlength(trial) > line_caps[index]:
+            lines.append(current)
+            current = word
+            index += 1
+        else:
+            current = trial
+    lines.append(current)
+    return lines
+
+
+def _fits_in_lines(font: Any, words: list[str], caps: list[float], scale: float) -> bool:
+    """Whether ``words`` pack into ``len(caps)`` lines with each line within ``caps[i] * scale``
+    (a word wider than its cap alone still starts a line). Used to find the smallest balancing
+    scale by binary search."""
+    index = 0
+    current = ""
+    for word in words:
+        trial = f"{current} {word}".strip()
+        if current and font.getlength(trial) > caps[index] * scale:
+            index += 1
+            if index >= len(caps):
+                return False
+            current = word
+        else:
+            current = trial
+    return True
 
 
 def _composite(canvas: np.ndarray, job: _Job) -> None:

@@ -34,14 +34,6 @@ def line_height(quad: list[Point]) -> float:
     return 0.5 * (_dist(quad[0], quad[3]) + _dist(quad[1], quad[2]))
 
 
-def axis_bbox(quads: list[list[Point]]) -> dict[str, int]:
-    pts = [p for quad in quads for p in quad]
-    xs = [p[0] for p in pts]
-    ys = [p[1] for p in pts]
-    left, top = int(min(xs)), int(min(ys))
-    return {"left": left, "top": top, "width": max(1, int(max(xs)) - left), "height": max(1, int(max(ys)) - top)}
-
-
 def oriented_frame(quads: list[list[Point]], angle: float) -> tuple[Point, Point, float, float, float, float]:
     """Project all quad points onto axes rotated by ``angle``.
 
