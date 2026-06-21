@@ -24,6 +24,7 @@ from typing import Any
 from app.core.config import AppSettings
 from app.grouping import group_cells_into_units
 from app.grouping import request_grouping_hint
+from app.grouping.field_geometry import geometry_adjusted_hints
 from app.grouping.overlay import render_grouping_overlay_debug
 from app.grouping.units import TranslationUnit
 from app.ocr import resolve_ocr_language
@@ -106,6 +107,12 @@ def run_translate_image_pipeline(
     )
     align_wall_ms = _elapsed_ms(align_started_at)
 
+    # Observe-only: geometry spots rule-3/4 column `|`s the VLM missed (a separated label/amount).
+    # Computed and surfaced for inspection; NOT yet fed to translation.
+    hint_units_adjusted, field_geometry_changes = geometry_adjusted_hints(
+        grouping.units, grouping.hint_units
+    )
+
     # Debug overlays (OCR + grouping drawn on the image) are opt-in. Each renders and PNG-encodes
     # the full-size image (~1s+ each) — pure overhead for a non-debug caller such as the asr camera
     # app, which only fetches the rendered translation. The workbench asks for them via the request
@@ -135,6 +142,10 @@ def run_translate_image_pipeline(
     translator_mode = str(request.get("translator_mode") or "").strip() or settings.llm_pool.translator_mode
     preserve_heuristic_text = _bool_request_flag(request, "preserve_heuristic_text", default=True)
     preserve_unchanged_text = _bool_request_flag(request, "preserve_unchanged_text", default=False)
+    use_geometry_columns = _bool_request_flag(request, "use_geometry_columns", default=True)
+    # Opt-in: feed the geometry-adjusted hints (a `|` injected where a column gap shows the VLM
+    # missed a rule-3/4 boundary) instead of the raw VLM hints. Same translation path, different input.
+    hint_units_for_translation = hint_units_adjusted if use_geometry_columns else grouping.hint_units
     units_for_translation = _units_for_preserve_heuristic_text(
         grouping.units,
         preserve_heuristic_text=preserve_heuristic_text,
@@ -154,7 +165,7 @@ def run_translate_image_pipeline(
         translator_model=translator_model,
         translator_mode=translator_mode,
         category=image_category,
-        hint_units=grouping.hint_units,
+        hint_units=hint_units_for_translation,
         hint_block_ids=grouping.hint_block_ids,
         prompt=prompt,
         call_log=llm_calls,
@@ -204,6 +215,7 @@ def run_translate_image_pipeline(
             "translator_mode": translator_mode,
             "preserve_heuristic_text": preserve_heuristic_text,
             "preserve_unchanged_text": preserve_unchanged_text,
+            "use_geometry_columns": use_geometry_columns,
             "timings_ms": {
                 "ocr": ocr_wall_ms,
                 "grouping": grouping_wall_ms,
@@ -221,6 +233,8 @@ def run_translate_image_pipeline(
             "hint_levels": list(grouping.hint_levels),
             "hint_block_ids": list(grouping.hint_block_ids),
             "hint_alignments": list(grouping.hint_alignments),
+            "hint_units_adjusted": hint_units_adjusted,  # geometry-injected column `|`s (fed only when use_geometry_columns)
+            "field_geometry_changes": field_geometry_changes,
             "units": [unit.to_dict() for unit in grouping.units],
         },
         "translation": [
@@ -250,6 +264,7 @@ def run_translate_image_pipeline(
         "translator_mode": translator_mode,
         "preserve_heuristic_text": preserve_heuristic_text,
         "preserve_unchanged_text": preserve_unchanged_text,
+        "use_geometry_columns": use_geometry_columns,
         "translation_source": "llm_pool",
         "translation_input": sent_input,
         "translation_instructions": sent_instructions,
@@ -301,6 +316,7 @@ def run_translate_image_pipeline(
             "cells": cells,
             "translation_units": translation_units,
             "ignored_cell_ids": list(grouping.ignored_cell_ids),
+            "field_geometry_changes": field_geometry_changes,  # rows where geometry injected a column `|`
         },
         debug=debug,
     )

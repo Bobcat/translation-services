@@ -36,6 +36,9 @@ class RequestPayload(BaseModel):
     preserve_heuristic_text: bool = True
     # Preserve text whose translated output is effectively identical to the source.
     preserve_unchanged_text: bool = False
+    # Feed translation the geometry-adjusted hints (a `|` injected where OCR cell gaps show a column
+    # the VLM missed) instead of the raw VLM hints, so a `label  value` row renders per column.
+    use_geometry_columns: bool = True
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 

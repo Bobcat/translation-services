@@ -474,3 +474,69 @@ def test_units_carry_hint_level_and_block_id() -> None:
     leftover = next(u for u in result.units if u.hint_index is None)
     assert matched.level == "body" and matched.block_id == 0
     assert leftover.level is None and leftover.block_id is None
+
+
+def _member(cid: int, text: str, left: int, width: int, top: int = 100, height: int = 40, translate: bool = True):
+    from app.grouping.units import UnitMember
+    return UnitMember(cell_id=cid, text=text, translate=translate, order=cid,
+                      bbox={"left": left, "top": top, "width": width, "height": height})
+
+
+def _col_unit(uid: int, members, hint_index: int = 0):
+    from app.grouping.units import TranslationUnit
+    return TranslationUnit(id=uid, order=uid, members=members, bbox={}, source_text="", hint_index=hint_index)
+
+
+def test_geometry_injects_missed_column_pipe_but_not_a_wide_font_word_space() -> None:
+    # JOUW VOORDEEL 2,44 in a wide header font: the VLM dropped the rule-4 `|`. Geometry adds it
+    # before the far-right amount — and must NOT split JOUW|VOORDEEL (a word space in a wide font,
+    # ~0.9 char-widths, while the amount gap is ~2x the measured word space).
+    from app.grouping.field_geometry import geometry_adjusted_hints
+    unit = _col_unit(1, [
+        _member(1, "JOUW", 663, 282, height=85),
+        _member(2, "VOORDEEL", 1009, 550, height=85),
+        _member(3, "2.44", 1697, 298, height=85, translate=False),
+    ])
+    adjusted, changes = geometry_adjusted_hints([unit], ["JOUW VOORDEEL. 2,44"])
+    assert adjusted == ["JOUW VOORDEEL. | 2,44"]
+    assert changes[0]["mapped_into_vlm_line"] is True
+
+
+def test_geometry_injects_pipe_for_two_translatable_columns() -> None:
+    # Two translatable columns OCR read with a clear gap (no measured word space, 2 cells -> the
+    # char-width reference). The VLM omitted the `|`; geometry restores it.
+    from app.grouping.field_geometry import geometry_adjusted_hints
+    unit = _col_unit(1, [
+        _member(1, "Met consumentenapparaat", 592, 646, height=40),
+        _member(2, "gevalideerd", 1386, 326, height=40),
+    ])
+    adjusted, _ = geometry_adjusted_hints([unit], ["Met consumentenapparaat gevalideerd"])
+    assert adjusted == ["Met consumentenapparaat | gevalideerd"]
+
+
+def test_geometry_leaves_normal_word_spacing_and_existing_pipes_alone() -> None:
+    from app.grouping.field_geometry import geometry_adjusted_hints
+    # A normal prose line (uniform word spacing) is not a column -> untouched.
+    prose = _col_unit(1, [
+        _member(1, "They", 0, 120), _member(2, "can", 130, 90),
+        _member(3, "cause", 230, 140), _member(4, "harm", 380, 120),
+    ])
+    # A line the VLM already marked with `|` is left as-is.
+    marked = _col_unit(2, [_member(1, "TOTAAL", 0, 200), _member(2, "58,51", 900, 200, translate=False)], hint_index=1)
+    adjusted, changes = geometry_adjusted_hints([prose, marked], ["They can cause harm", "TOTAAL | 58,51"])
+    assert adjusted == ["They can cause harm", "TOTAAL | 58,51"]
+    assert changes == []
+
+
+def test_geometry_skips_an_all_numeric_row_with_no_translatable_field() -> None:
+    # Two side-by-side temperatures ("15°" and "15") OCR read as separate cells both bound to one
+    # hint line. They are non-translatable, so a column `|` changes nothing — do not flag a
+    # meaningless "15° | 15".
+    from app.grouping.field_geometry import geometry_adjusted_hints
+    unit = _col_unit(1, [
+        _member(1, "15°", 410, 83, top=734, height=56, translate=False),
+        _member(2, "15", 573, 71, top=736, height=54, translate=False),
+    ])
+    adjusted, changes = geometry_adjusted_hints([unit], ["15°"])
+    assert adjusted == ["15°"]
+    assert changes == []
