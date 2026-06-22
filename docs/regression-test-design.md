@@ -236,13 +236,14 @@ completed request, so capture re-runs nothing:
 
 ### Backend endpoints (translation-services)
 
-1. A **regression block** added to the request lifecycle response:
-   `{ image_sha256, in_testset, name, fixture_count, variants:[…] }` — drives the UI badges
-   with no extra call.
+1. `GET /v1/regression/status?name=<name>` — `{ name, in_testset, fixture_count, variants:[…] }`,
+   drives the UI badges. A dedicated endpoint rather than a field on every lifecycle response, so
+   the hot poll path is untouched.
 2. `POST /v1/regression/testset {request_id, name}` — copies the canonical input into
    `testset/<name>.<ext>`.
-3. `POST /v1/regression/fixtures {request_id, name, variant?, note?}` — writes `fixture.json`
-   and computes `snapshot.json` (re-OCR of the `rendered` artifact + the align structure).
+3. `POST /v1/regression/fixtures {request_id, name, variant?}` — writes `fixture.json` and
+   computes `snapshot.json` (re-OCR of the `rendered` artifact + the align structure). The
+   re-OCR runs in a worker thread so the event loop is not blocked.
 
 ### Workbench UX
 

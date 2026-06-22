@@ -21,6 +21,8 @@ from pathlib import Path
 from typing import Any
 import uuid
 
+import anyio
+
 from fastapi import Body
 from fastapi import FastAPI
 from fastapi import File
@@ -34,6 +36,7 @@ from pydantic import BaseModel
 from pydantic import Field
 
 from app.core.config import load_settings
+from app.regression import capture as regression_capture
 from app.runtime.service import RequestRuntime
 from app.core.schemas import CompletionsEnvelope
 from app.core.schemas import RequestLifecycle
@@ -224,6 +227,56 @@ def create_app(settings_path: str | Path | None = None) -> FastAPI:
             return JSONResponse(status_code=int(status_code), content=body)
         path = Path(str(body["path"]))
         return FileResponse(path=str(path), media_type=str(body["mime_type"]), filename=path.name)
+
+    @app.get("/v1/regression/status")
+    async def regression_status(name: str = Query(...)) -> JSONResponse:
+        return JSONResponse(status_code=200, content=regression_capture.status(name))
+
+    @app.post("/v1/regression/testset")
+    async def regression_add_testset(body: dict[str, Any] = Body(default_factory=dict)) -> JSONResponse:
+        request_id = str(body.get("request_id") or "").strip()
+        name = str(body.get("name") or "").strip()
+        if not request_id or not name:
+            return _error(400, code="REGRESSION_BAD_REQUEST", message="request_id and name are required", retryable=False)
+        status_code, lifecycle = await runtime.get_request(request_id)
+        if int(status_code) != 200:
+            return JSONResponse(status_code=int(status_code), content=lifecycle)
+        response = dict(lifecycle.get("response") or {})
+        input_path = Path(str((dict((response.get("artifacts") or {}).get("input") or {})).get("path") or ""))
+        if not input_path.exists():
+            return _error(404, code="REGRESSION_INPUT_MISSING", message="input artifact not available", retryable=False)
+        dest = regression_capture.TESTSET_ROOT / f"{name}{input_path.suffix or '.png'}"
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(input_path.read_bytes())
+        return JSONResponse(status_code=200, content={"path": str(dest), **regression_capture.status(name)})
+
+    @app.post("/v1/regression/fixtures")
+    async def regression_add_fixture(body: dict[str, Any] = Body(default_factory=dict)) -> JSONResponse:
+        request_id = str(body.get("request_id") or "").strip()
+        name = str(body.get("name") or "").strip()
+        variant = str(body.get("variant") or "v1").strip() or "v1"
+        if not request_id or not name:
+            return _error(400, code="REGRESSION_BAD_REQUEST", message="request_id and name are required", retryable=False)
+        status_code, lifecycle = await runtime.get_request(request_id)
+        if int(status_code) != 200:
+            return JSONResponse(status_code=int(status_code), content=lifecycle)
+        if (lifecycle.get("state") or "") != "completed":
+            return _error(409, code="REGRESSION_NOT_COMPLETED", message=f"request state is {lifecycle.get('state')}", retryable=False)
+        image_path = regression_capture.testset_image(name)
+        if image_path is None:
+            return _error(404, code="REGRESSION_IMAGE_NOT_IN_TESTSET", message=f"add '{name}' to the testset first", retryable=False)
+        status_code, artifact = await runtime.artifact_path(request_id=request_id, artifact_name="rendered")
+        if int(status_code) != 200:
+            return JSONResponse(status_code=int(status_code), content=artifact)
+        rendered = Path(str(artifact["path"])).read_bytes()
+        response = dict(lifecycle.get("response") or {})
+        out = await anyio.to_thread.run_sync(
+            lambda: regression_capture.capture(
+                settings.ocr, response=response, rendered_png=rendered,
+                image_path=image_path, name=name, variant=variant,
+            )
+        )
+        return JSONResponse(status_code=200, content={**out, **regression_capture.status(name)})
 
     @app.get("/v1/completions", response_model=CompletionsEnvelope)
     async def get_completions(
