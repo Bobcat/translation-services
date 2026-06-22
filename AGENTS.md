@@ -22,8 +22,6 @@ wired into the task in `tasks/`.
 - Leave unrelated code untouched. No opportunistic refactors.
 - Do not add fallback/compatibility paths unless explicitly requested; do not
   leave dead code "just in case".
-- Single vocabulary: the queued unit is a **request**; do not reintroduce
-  "image-pool"/"pool"/"job" synonyms.
 - Do not run `git commit`/`git push` unless explicitly requested.
 
 ### Generalize, don't curve-fit (OCR / grouping / replacement)

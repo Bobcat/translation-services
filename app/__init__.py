@@ -1,2 +1,2 @@
-"""Image Pool service package."""
+"""Translation-services package: queued OCR/translation image jobs."""
 
