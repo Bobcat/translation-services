@@ -254,7 +254,7 @@ def create_app(settings_path: str | Path | None = None) -> FastAPI:
     async def regression_add_fixture(body: dict[str, Any] = Body(default_factory=dict)) -> JSONResponse:
         request_id = str(body.get("request_id") or "").strip()
         name = str(body.get("name") or "").strip()
-        variant = str(body.get("variant") or "v1").strip() or "v1"
+        variant = str(body.get("variant") or "").strip() or None
         if not request_id or not name:
             return _error(400, code="REGRESSION_BAD_REQUEST", message="request_id and name are required", retryable=False)
         status_code, lifecycle = await runtime.get_request(request_id)

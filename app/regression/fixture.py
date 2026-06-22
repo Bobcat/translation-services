@@ -108,10 +108,6 @@ def expected_unit_of(unit: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def variant_dir(regression_root: Path, name: str, variant: str) -> Path:
-    return regression_root / name / variant
-
-
 def load(variant_path: Path) -> tuple[Fixture, Snapshot]:
     fixture = Fixture.from_dict(json.loads((variant_path / "fixture.json").read_text()))
     snapshot = Snapshot.from_dict(json.loads((variant_path / "snapshot.json").read_text()))

@@ -24,7 +24,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--request-id", required=True)
     parser.add_argument("--name", required=True, help="testset stem to store the fixture under")
-    parser.add_argument("--variant", default="v1")
+    parser.add_argument("--variant", default=None, help="default: next free vN for this image+target lang")
     parser.add_argument("--base-url", default="http://127.0.0.1:8030")
     args = parser.parse_args()
 

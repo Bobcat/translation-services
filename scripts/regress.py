@@ -36,11 +36,13 @@ def _testset_image(testset: Path, name: str) -> Path | None:
 
 
 def _variant_dirs(root: Path) -> list[tuple[str, str, Path]]:
+    """``(name, label, path)`` for every ``<name>/<lang>/<variant>`` holding a fixture+snapshot."""
     out: list[tuple[str, str, Path]] = []
     for name_dir in sorted(p for p in root.iterdir() if p.is_dir()):
-        for variant_dir in sorted(p for p in name_dir.iterdir() if p.is_dir()):
-            if (variant_dir / "fixture.json").exists() and (variant_dir / "snapshot.json").exists():
-                out.append((name_dir.name, variant_dir.name, variant_dir))
+        for lang_dir in sorted(p for p in name_dir.iterdir() if p.is_dir()):
+            for variant_dir in sorted(p for p in lang_dir.iterdir() if p.is_dir()):
+                if (variant_dir / "fixture.json").exists() and (variant_dir / "snapshot.json").exists():
+                    out.append((name_dir.name, f"{lang_dir.name}/{variant_dir.name}", variant_dir))
     return out
 
 
@@ -59,10 +61,18 @@ def _run_one(ocr_settings, testset: Path, name: str, variant_path: Path) -> list
         actual_units, actual_ignored, rendered = replay_fixture(Path(handle.name), fixture)
     actual_rows = reocr_rows(ocr_settings, rendered, fixture.target_lang)
 
-    return (
+    diffs = (
         diff_units(snapshot.expected_units, actual_units, snapshot.ignored_cells, actual_ignored)
         + diff_reocr(snapshot.reocr, actual_rows)
     )
+    # On a failure, drop the current render next to the snapshot so it can be eyeballed against
+    # snapshot.png; remove a stale one on a pass.
+    actual_png = variant_path / "actual.png"
+    if diffs:
+        actual_png.write_bytes(rendered)
+    elif actual_png.exists():
+        actual_png.unlink()
+    return diffs
 
 
 def main() -> int:
