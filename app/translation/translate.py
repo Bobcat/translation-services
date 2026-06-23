@@ -513,6 +513,11 @@ def _parse_blocks(text: str) -> list[list[str]]:
         if not seen_category and line.lower().startswith("category:"):
             seen_category = True
             continue
+        # A prompt may prepend a reasoning preamble (e.g. "Number source languages detected: N")
+        # to focus the model before the units; drop it when it leads the output so it doesn't glue
+        # onto the first block. No-op for prompts that don't emit it.
+        if not blocks and not current and line.lower().startswith("number source languages"):
+            continue
         compact = line.replace(" ", "")
         if len(compact) >= 3 and set(compact) <= {"#", "-", "=", "*", ":"}:  # separator -> block break
             if current:

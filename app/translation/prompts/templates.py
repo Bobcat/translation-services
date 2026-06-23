@@ -58,10 +58,22 @@ BUILTIN_PROMPTS: dict[str, PromptEntry] = {
     IMAGE_DEFAULT_ID: PromptEntry(
         id=IMAGE_DEFAULT_ID,
         system=(
+            "# ROLE\n"
             "You are a translation engine for text on an image.\n"
+            "\n"
+            "# TASK\n"
             "Translate the translation units to {{target_lang}} and preserve the newlines "
             "and the '|' delimiters.\n"
-            "Output only the translations."
+            "\n"
+            "# INSTRUCTIONS\n"
+            "1. **Newlines and delimiters:**  Preserve the newlines and the '|' delimiters in translated units.\n"
+            "\n"
+            "2. **Multiple source languages:** A single sentence may contain multiple source "
+            "languages. Translate EVERY language to {{target_lang}}.\n"
+            "\n"
+            "# OUTPUT FORMAT (EXACT)\n"
+            "Number source languages detected: <number source languages detected>\n"
+            "<the translated units>"
         ),
         user=(
             "# INPUT CATEGORY\n"
