@@ -115,7 +115,12 @@ class _Job:
 
 
 def render_translated_image(input_path: Path, translation_units: list[dict[str, Any]]) -> bytes:
-    base = Image.open(input_path).convert("RGB")
+    opened = Image.open(input_path)
+    # Carry the source's ICC colour profile onto the output. ``convert("RGB")`` keeps the raw pixel
+    # values but drops the profile, so without re-embedding it a colour-managed display (a phone)
+    # shows the replacement as plain sRGB — the whole image reads duller/darker than the original.
+    icc_profile = opened.info.get("icc_profile")
+    base = opened.convert("RGB")
 
     jobs: list[_Job] = []
     groups = _groups(translation_units)
@@ -136,7 +141,10 @@ def render_translated_image(input_path: Path, translation_units: list[dict[str, 
             _composite(canvas, job)
 
     out = BytesIO()
-    Image.fromarray(canvas).save(out, format="PNG", compress_level=1)
+    save_kwargs: dict[str, Any] = {"compress_level": 1}
+    if icc_profile:
+        save_kwargs["icc_profile"] = icc_profile
+    Image.fromarray(canvas).save(out, format="PNG", **save_kwargs)
     return out.getvalue()
 
 

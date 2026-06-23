@@ -434,6 +434,9 @@ def _canonical_image_bytes(image_bytes: bytes, mime_type: str) -> bytes:
             image = ImageOps.exif_transpose(original)
             out = BytesIO()
             save_kwargs: dict[str, object] = {}
+            icc_profile = original.info.get("icc_profile")
+            if icc_profile:  # keep the colour profile through the re-encode (render re-embeds it)
+                save_kwargs["icc_profile"] = icc_profile
             if image_format == "JPEG":
                 if image.mode not in {"RGB", "L"}:
                     image = image.convert("RGB")
