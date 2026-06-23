@@ -63,8 +63,8 @@ This repo owns:
 
 It deliberately does **not** own:
 
-- The translation or vision models themselves — those are served by `llm-pool`
-  and selected by name in configuration.
+- The translation or vision models — they run in `llm-pool` (see Related
+  Repositories).
 - Any client UI — callers are separate apps.
 
 ## Related Repositories
@@ -217,11 +217,10 @@ diff is a real code regression. The test pins the code, not the models. It's als
 fast: a replay makes no VLM or translation calls per image.
 
 The render is compared by reading the image back with OCR — **re-OCR** — and
-checking the recognised text and box positions, not the raw pixels. That keeps it
-a *behavioural* check: it compares what the render produced, so it survives a font
-or rendering-library change that a pixel-exact diff would break on. It's reliable
-because OCR is **bit-stable**: identical pixels re-OCR to identical text and boxes,
-so the comparison adds no noise. And it catches real changes — a no-op replay
+checking the recognised text and box positions, not the raw pixels. That makes it
+a *behavioural* check, not a pixel-exact one. It's reliable because OCR is
+**bit-stable**: identical pixels re-OCR to identical text and boxes, so the
+comparison adds no noise. And it catches real changes — a no-op replay
 passes, a one-line render change (e.g. +2px erase pad) fails, and reverting it
 passes again.
 
