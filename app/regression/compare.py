@@ -30,6 +30,12 @@ def _norm(text: str) -> str:
     return "".join(ch.lower() for ch in str(text) if ch.isalnum())
 
 
+def _words(text: str) -> list[str]:
+    """Per-word normalized tokens (split on whitespace first), so it does not matter whether OCR
+    grouped a line into one box or several."""
+    return [w for w in (_norm(part) for part in str(text).split()) if w]
+
+
 def _centroid(row: dict[str, Any]) -> tuple[float, float]:
     return (row["left"] + row["width"] / 2.0, row["top"] + row["height"] / 2.0)
 
@@ -40,23 +46,28 @@ def diff_reocr(
     *,
     max_shift: float = 3.0,
 ) -> list[str]:
-    """Behavioural render comparison on the re-OCR of the rendered image. Token-recall must be 1.0
-    (no missing or extra normalized tokens) and each matched region's centroid must be within
-    ``max_shift`` px. On the capture machine (same fonts) this is effectively exact; the few px
-    absorb sub-pixel anti-aliasing."""
+    """Behavioural render comparison on the re-OCR of the rendered image. Text is compared as a WORD
+    multiset, so OCR grouping a line into one box vs several ("ah pizza" as one segment vs "ah" +
+    "pizza") never reads as missing/extra. Position is then checked per segment: each segment that
+    matches by full normalized text must have its centroid within ``max_shift`` px. On the capture
+    machine (same fonts) this is effectively exact; the few px absorb sub-pixel anti-aliasing."""
     diffs: list[str] = []
-    exp = [(_norm(r["text"]), *_centroid(r)) for r in expected if _norm(r["text"])]
-    act = [(_norm(r["text"]), *_centroid(r)) for r in actual if _norm(r["text"])]
 
-    missing = Counter(t for t, _, _ in exp) - Counter(t for t, _, _ in act)
-    extra = Counter(t for t, _, _ in act) - Counter(t for t, _, _ in exp)
+    exp_words = Counter(word for row in expected for word in _words(row["text"]))
+    act_words = Counter(word for row in actual for word in _words(row["text"]))
+    missing = exp_words - act_words
+    extra = act_words - exp_words
     if missing:
         diffs.append(f"missing rendered text: {dict(missing)}")
     if extra:
         diffs.append(f"extra rendered text: {dict(extra)}")
 
-    remaining = list(act)
-    for token, ex, ey in exp:
+    # A segment whose word-grouping changed has no full-text match and is skipped for position — its
+    # content is already covered by the word check above.
+    exp_seg = [(_norm(r["text"]), *_centroid(r)) for r in expected if _norm(r["text"])]
+    act_seg = [(_norm(r["text"]), *_centroid(r)) for r in actual if _norm(r["text"])]
+    remaining = list(act_seg)
+    for token, ex, ey in exp_seg:
         candidates = [(i, a) for i, a in enumerate(remaining) if a[0] == token]
         if not candidates:
             continue

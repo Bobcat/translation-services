@@ -199,13 +199,16 @@ never the units.
 - **Align diff** — `expected_units` (ordered cells + label fields) and `ignored_cells`,
   compared exactly and order-sensitively. Any composition / order / label / keep-drop change
   fails, localised to the unit.
-- **Render diff** — re-OCR the replayed render at **cell level** (`merge_lines=False`), match
-  regions, then require **token-recall = 1.0** and **centroid shift ≤ 3px**. Same machine and
-  fonts as capture → effectively exact; the 3px absorbs sub-pixel AA. Loosen only if a
-  cross-environment run is ever needed.
+- **Render diff** — re-OCR the replayed render at **cell level** (`merge_lines=False`). Text is
+  compared as a **word multiset** (each segment split on whitespace), so OCR grouping a line into
+  one box vs several ("ah pizza" as one segment vs "ah" + "pizza") never reads as missing/extra.
+  Position is then checked **per segment**: each segment that matches by full normalized text must
+  have its **centroid within 3px**. Same machine and fonts as capture → effectively exact; the 3px
+  absorbs sub-pixel AA. Loosen only if a cross-environment run is ever needed.
 
-Cell-level re-OCR conflates a genuine placement move with OCR re-segmentation caused by a
-slightly different text width; acceptable for now (the align diff carries the precise signal).
+A segment whose word-grouping changed has no full-text match and is skipped for the position check
+(its content is already covered by the word multiset); the align diff carries the precise
+structural signal regardless.
 
 ---
 
