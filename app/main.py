@@ -272,6 +272,32 @@ def create_app(settings_path: str | Path | None = None) -> FastAPI:
         rendered = Path(str(rendered_art["path"])).read_bytes()
         source_path = Path(str(input_art["path"]))
         response = dict(lifecycle.get("response") or {})
+        # A re-translate response carries only the new translations + render, not the OCR cells /
+        # grouping hint / model the replay needs. Walk up source_request_id to the run that did the
+        # grouping and graft those frozen inputs on, so the fixture stays replayable (grouping ->
+        # align -> render) with the re-translate's own translations, target language and flags.
+        source_request_id = str((response.get("metadata") or {}).get("source_request_id") or "").strip()
+        if source_request_id and not (response.get("ocr") or {}).get("cells"):
+            grouping_response = None
+            seen: set[str] = set()
+            cursor_id = source_request_id
+            while cursor_id and cursor_id not in seen:
+                seen.add(cursor_id)
+                sc, src_lifecycle = await runtime.get_request(cursor_id)
+                if int(sc) != 200:
+                    break
+                cursor = dict(src_lifecycle.get("response") or {})
+                if (cursor.get("ocr") or {}).get("cells"):
+                    grouping_response = cursor
+                    break
+                cursor_id = str((cursor.get("metadata") or {}).get("source_request_id") or "").strip()
+            if grouping_response is None:
+                return _error(
+                    409, code="REGRESSION_GROUPING_SOURCE_MISSING",
+                    message="re-translate source run with the OCR grouping is unavailable; capture from the original run",
+                    retryable=False,
+                )
+            response = regression_capture.graft_grouping_inputs(response, grouping_response)
         out = await anyio.to_thread.run_sync(
             lambda: regression_capture.capture(
                 settings.ocr, response=response, rendered_png=rendered,

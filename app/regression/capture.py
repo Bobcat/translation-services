@@ -62,6 +62,32 @@ def build_fixture(response: dict[str, Any], *, source_bytes: bytes) -> fx.Fixtur
     )
 
 
+def graft_grouping_inputs(response: dict[str, Any], grouping_response: dict[str, Any]) -> dict[str, Any]:
+    """Return ``response`` with the frozen grouping inputs the replay needs — OCR ``cells``,
+    ``ignored_cell_ids``, the grouping VLM call (→ ``raw_hint``) and ``grouping_model`` — copied from
+    ``grouping_response``. A re-translate response carries only the new translations + render; those
+    grouping inputs live on the run that actually did the OCR/grouping. Translations, target language
+    and request flags stay from ``response`` (the re-translate)."""
+    g_ocr = grouping_response.get("ocr") or {}
+    merged_ocr = dict(response.get("ocr") or {})
+    merged_ocr["cells"] = g_ocr.get("cells") or []
+    merged_ocr["ignored_cell_ids"] = g_ocr.get("ignored_cell_ids") or []
+    grouping_calls = [
+        call for call in (grouping_response.get("llm_calls") or [])
+        if "grouping" in str(call.get("role") or "").lower()
+    ]
+    merged_meta = dict(response.get("metadata") or {})
+    merged_meta["grouping_model"] = (
+        str((grouping_response.get("metadata") or {}).get("grouping_model") or "")
+        or str(merged_meta.get("grouping_model") or "")
+    )
+    out = dict(response)
+    out["ocr"] = merged_ocr
+    out["llm_calls"] = list(response.get("llm_calls") or []) + grouping_calls
+    out["metadata"] = merged_meta
+    return out
+
+
 def _next_variant(lang_dir: Path) -> str:
     """The next free ``vN`` under a ``<name>/<lang>`` dir (max existing + 1, so a deleted variant
     never collides)."""
