@@ -32,7 +32,13 @@ def reocr_rows(ocr_settings: OcrSettings, png_bytes: bytes, language: str) -> li
     with tempfile.NamedTemporaryFile(suffix=".png") as handle:
         handle.write(png_bytes)
         handle.flush()
-        segments = run_raw_ocr(ocr_settings, Path(handle.name), language=_ocr_language(language))
+        path = Path(handle.name)
+        try:
+            segments = run_raw_ocr(ocr_settings, path, language=_ocr_language(language))
+        except RuntimeError:
+            # Unknown/unsupported code: fall back to the Latin model so a capture never 500s.
+            # Capture and replay fall back identically, so the comparison stays consistent.
+            segments = run_raw_ocr(ocr_settings, path, language="en")
     rows = [
         {
             "text": str(segment.text or ""),
