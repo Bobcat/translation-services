@@ -266,7 +266,7 @@ _CJK_CLOSING = set("。、，．！？：；）」』】｝〕》〉")
 _CJK_OPENING = set("（「『【〔《〈｛")
 
 
-def _break_pieces(text: str) -> list[tuple[str, str]]:
+def break_pieces(text: str) -> list[tuple[str, str]]:
     """Atomic wrap units as (piece, glue) — ``glue`` is the separator to re-insert before the
     piece when it is not at a line start. Han/Kana/CJK-symbol chars each break individually
     (the script has no spaces); closing punctuation is kept on the preceding char and opening
@@ -323,7 +323,7 @@ def _break_pieces(text: str) -> list[tuple[str, str]]:
 
 
 def wrap_lines(font: ImageFont.FreeTypeFont, text: str, max_width: int) -> list[str]:
-    pieces = _break_pieces(text)
+    pieces = break_pieces(text)
     if not pieces:
         return [""]
     lines: list[str] = []

@@ -44,6 +44,7 @@ from app.grouping.heuristics import _is_nontranslatable
 from app.replacement import geometry as geo
 from app.replacement.color import contrasting_fg
 from app.replacement.color import sample_oriented_colors
+from app.replacement.fit import break_pieces
 from app.replacement.fit import is_cjk_text
 from app.replacement.fit import load_font
 
@@ -819,37 +820,44 @@ def _wrap_to_planes(font: Any, text: str, plane_widths: list[float]) -> list[str
     content = str(text or "").strip()
     if len(plane_widths) <= 1 or not content:
         return [content]
-    words = content.split()
-    line_count = len(_greedy_wrap(font, words, plane_widths))  # fewest lines at natural plane width
+    # Atomic wrap units, not ``.split()``: Han/Kana/CJK-symbol scripts have no spaces, so a whole
+    # CJK line is one "word" and never wraps — it stays on one line and the caller condenses it to a
+    # sliver. ``break_pieces`` breaks CJK per character (with kinsoku) and keeps Latin/Hangul/digits
+    # as whitespace words, so each piece carries the ``glue`` to re-insert when it is not a line start.
+    pieces = break_pieces(content)
+    line_count = len(_greedy_wrap(font, pieces, plane_widths))  # fewest lines at natural plane width
     caps = plane_widths[:line_count]
-    # Smallest scale on the plane widths that still packs the words into ``line_count`` lines: this
+    # Smallest scale on the plane widths that still packs the pieces into ``line_count`` lines: this
     # is the most-relaxed (least condensed) balanced fill. Binary search — monotone in the scale.
     lo, hi = 0.0, 10.0
     for _ in range(40):
         mid = (lo + hi) / 2.0
-        if _fits_in_lines(font, words, caps, mid):
+        if _fits_in_lines(font, pieces, caps, mid):
             hi = mid
         else:
             lo = mid
-    return _greedy_wrap(font, words, [cap * hi for cap in caps])
+    return _greedy_wrap(font, pieces, [cap * hi for cap in caps])
 
 
-def _greedy_wrap(font: Any, words: list[str], line_caps: list[float]) -> list[str]:
-    """Greedy fill: line ``i`` takes words while they fit ``line_caps[i]``; the LAST cap carries
-    every remaining word (so the result never exceeds ``len(line_caps)`` lines). A word that alone
-    exceeds its cap still starts the line (never an empty line) — the caller condenses/shrinks it."""
+def _greedy_wrap(font: Any, pieces: list[tuple[str, str]], line_caps: list[float]) -> list[str]:
+    """Greedy fill: line ``i`` takes pieces while they fit ``line_caps[i]``; the LAST cap carries
+    every remaining piece (so the result never exceeds ``len(line_caps)`` lines). A piece that alone
+    exceeds its cap still starts the line (never an empty line) — the caller condenses/shrinks it.
+    Each piece carries the ``glue`` (a space for Latin words, empty for CJK chars) re-inserted only
+    when it is not at a line start."""
     lines: list[str] = []
     current = ""
     index = 0
     last = len(line_caps) - 1
-    for word in words:
+    for piece, glue in pieces:
+        sep = glue if current else ""
         if index >= last:
-            current = f"{current} {word}".strip()
+            current = current + sep + piece
             continue
-        trial = f"{current} {word}".strip()
+        trial = current + sep + piece
         if current and font.getlength(trial) > line_caps[index]:
             lines.append(current)
-            current = word
+            current = piece
             index += 1
         else:
             current = trial
@@ -857,19 +865,20 @@ def _greedy_wrap(font: Any, words: list[str], line_caps: list[float]) -> list[st
     return lines
 
 
-def _fits_in_lines(font: Any, words: list[str], caps: list[float], scale: float) -> bool:
-    """Whether ``words`` pack into ``len(caps)`` lines with each line within ``caps[i] * scale``
-    (a word wider than its cap alone still starts a line). Used to find the smallest balancing
+def _fits_in_lines(font: Any, pieces: list[tuple[str, str]], caps: list[float], scale: float) -> bool:
+    """Whether ``pieces`` pack into ``len(caps)`` lines with each line within ``caps[i] * scale``
+    (a piece wider than its cap alone still starts a line). Used to find the smallest balancing
     scale by binary search."""
     index = 0
     current = ""
-    for word in words:
-        trial = f"{current} {word}".strip()
+    for piece, glue in pieces:
+        sep = glue if current else ""
+        trial = current + sep + piece
         if current and font.getlength(trial) > caps[index] * scale:
             index += 1
             if index >= len(caps):
                 return False
-            current = word
+            current = piece
         else:
             current = trial
     return True
