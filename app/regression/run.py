@@ -7,6 +7,7 @@ current render is dropped next to the snapshot as ``actual.png`` (removed on a p
 """
 from __future__ import annotations
 
+import time
 from typing import Any
 
 from app.core.config import OcrSettings
@@ -35,8 +36,10 @@ def run_variant(ocr_settings: OcrSettings, *, variant_path) -> dict[str, Any]:
     if error:
         return {"passed": False, "diffs": [error], "has_actual": False}
 
-    actual_units, actual_ignored, rendered = replay_fixture(source, fixture)
+    actual_units, actual_ignored, rendered, timings = replay_fixture(source, fixture)
+    reocr_started = time.perf_counter()
     actual_rows = reocr_rows(ocr_settings, rendered, fixture.target_lang)
+    timings = {**timings, "reocr_ms": (time.perf_counter() - reocr_started) * 1000.0}
 
     diffs = (
         diff_units(snapshot.expected_units, actual_units, snapshot.ignored_cells, actual_ignored)
@@ -47,7 +50,8 @@ def run_variant(ocr_settings: OcrSettings, *, variant_path) -> dict[str, Any]:
         actual_png.write_bytes(rendered)
     elif actual_png.exists():
         actual_png.unlink()
-    return {"passed": not diffs, "diffs": diffs, "has_actual": bool(diffs)}
+    timings = {key: round(value, 1) for key, value in timings.items()}
+    return {"passed": not diffs, "diffs": diffs, "has_actual": bool(diffs), "timings": timings}
 
 
 def resnapshot(ocr_settings: OcrSettings, *, variant_path) -> dict[str, Any]:
@@ -58,7 +62,7 @@ def resnapshot(ocr_settings: OcrSettings, *, variant_path) -> dict[str, Any]:
     if error:
         return {"ok": False, "error": error}
 
-    actual_units, actual_ignored, rendered = replay_fixture(source, fixture)
+    actual_units, actual_ignored, rendered, _timings = replay_fixture(source, fixture)
     snapshot = fx.Snapshot(
         expected_units=actual_units,
         ignored_cells=actual_ignored,

@@ -6,6 +6,7 @@ snapshot and the rendered PNG bytes to re-OCR.
 """
 from __future__ import annotations
 
+import time
 from pathlib import Path
 from typing import Any
 
@@ -21,14 +22,18 @@ from app.tasks.translate_image import _units_for_preserve_heuristic_text
 def replay_fixture(
     input_path: Path,
     fixture: Fixture,
-) -> tuple[list[dict[str, Any]], list[int], bytes]:
-    """``(actual_units, actual_ignored, rendered_png)``. ``actual_units`` is the order-sensitive
-    align output (one ``expected_unit_of`` entry per unit); ``rendered_png`` is the re-placed image."""
+) -> tuple[list[dict[str, Any]], list[int], bytes, dict[str, float]]:
+    """``(actual_units, actual_ignored, rendered_png, timings)``. ``actual_units`` is the
+    order-sensitive align output (one ``expected_unit_of`` entry per unit); ``rendered_png`` is the
+    re-placed image; ``timings`` holds the per-stage wall-clock (ms): ``group_ms`` (parse hint +
+    grouping/align) and ``render_ms``."""
+    group_started = time.perf_counter()
     hint = parse_grouping_output(fixture.raw_hint)
     grouping = group_cells_into_units(cells=fixture.cells, hint=hint, model=fixture.grouping_model)
 
     actual_units = [expected_unit_of(unit.to_dict()) for unit in grouping.units]
     actual_ignored = sorted(int(c) for c in grouping.ignored_cell_ids)
+    group_ms = (time.perf_counter() - group_started) * 1000.0
 
     # Only preserve_heuristic_text changes the set fed to render; re-apply it before attaching
     # the frozen translations (keyed by the unit's anchor cell).
@@ -45,5 +50,7 @@ def replay_fixture(
             unit_dict["field_translations"] = [tuple(pair) for pair in pairs] if pairs else None
         translation_units.append(unit_dict)
 
+    render_started = time.perf_counter()
     rendered_png = render_translated_image(input_path, translation_units)
-    return actual_units, actual_ignored, rendered_png
+    render_ms = (time.perf_counter() - render_started) * 1000.0
+    return actual_units, actual_ignored, rendered_png, {"group_ms": group_ms, "render_ms": render_ms}
