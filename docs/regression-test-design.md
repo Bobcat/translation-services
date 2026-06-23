@@ -103,11 +103,15 @@ deliberately curated test cases. Stable images keep one fixture; wobbly images g
 
 ---
 
-## Identity
+## Identity — self-contained source image
 
-Fixtures are keyed by the **canonical-ingest SHA-256** of the source image (the bytes
-`app.main` stores after canonicalisation), not the filename — robust to renames and matches a
-fresh submit to an existing testset image.
+A fixture **carries its own source image** (`source.<ext>`): the exact canonical-ingest bytes the
+snapshot was rendered on (the upload, fetched from the request's `input` artifact at capture).
+Replay renders on that, **not** on `testset/<name>`. This is deliberate: the rendered snapshot
+depends on the exact pixels uploaded, and a `testset/<name>` file can differ from what the user
+actually uploaded (a re-encoded copy) — anchoring to `testset/` then renders the snapshot on the
+upload but the replay on the testset file, so they silently diverge. Carrying the image removes
+that whole class of bug. `image_sha256` (of `source.<ext>`) stays as an integrity check.
 
 ---
 
@@ -219,11 +223,14 @@ structural signal regardless.
 ## Storage
 
 ```
-testset/_regression/<image>/<variant>/
-  fixture.json
-  snapshot.json
+testset/_regression/<image>/<lang>/<variant>/
+  fixture.json     # frozen inputs (cells, raw hint, translations)
+  snapshot.json    # expected align output + the rendered image's re-OCR
+  snapshot.png     # the approved render (inspection; not used in the diff)
+  source.<ext>     # the exact canonical image the render ran on
+  actual.png       # only after a failed run — the current render, for snapshot-vs-actual
 ```
-**gitignored** — snapshots contain re-OCR text of testset images, which carry real PII.
+**gitignored** — the source image and re-OCR text carry real PII.
 
 ---
 
@@ -266,8 +273,8 @@ Browses and manages existing fixtures by **replay** (no pipeline). It is a persi
 "Run all" survives sidebar navigation. Endpoints:
 
 - `GET /v1/regression/fixtures` — the inventory tree (name → lang → variant + light metadata).
-- `GET …/fixtures/{name}/{lang}/{variant}/{snapshot,actual}.png`, `GET …/source/{name}` — the
-  rendered images and the source image.
+- `GET …/fixtures/{name}/{lang}/{variant}/{snapshot.png,actual.png,source}` — the rendered images
+  and the fixture's own captured source image.
 - `POST /v1/regression/run {name,lang,variant}` — replay + diff one variant → `{passed, diffs}`.
 - `POST /v1/regression/resnapshot {name,lang,variant}` — **re-baseline**: overwrite the snapshot
   from the current replay (accept a deliberate render/align change whose result is good).

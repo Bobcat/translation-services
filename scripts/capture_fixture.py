@@ -32,16 +32,18 @@ def main() -> int:
     result = httpx.get(f"{base}/v1/requests/{args.request_id}", timeout=30).json()
     if (result.get("state") or "") != "completed":
         raise SystemExit(f"request not completed (state={result.get('state')})")
-    image_path = cap.testset_image(args.name)
-    if image_path is None:
-        raise SystemExit(f"testset image '{args.name}' not found under {cap.TESTSET_ROOT}/")
     rendered = httpx.get(f"{base}/v1/requests/{args.request_id}/artifacts/rendered", timeout=30).content
+    source = httpx.get(f"{base}/v1/requests/{args.request_id}/artifacts/input", timeout=30)
+    suffix = {"image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp"}.get(
+        str(source.headers.get("content-type", "")).split(";")[0].strip(), ".png"
+    )
 
     out = cap.capture(
         load_settings().ocr,
         response=result.get("response") or {},
         rendered_png=rendered,
-        image_path=image_path,
+        source_bytes=source.content,
+        source_suffix=suffix,
         name=args.name,
         variant=args.variant,
     )

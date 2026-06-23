@@ -129,3 +129,12 @@ def save_snapshot(variant_path: Path, snapshot: Snapshot) -> None:
     """Overwrite just the snapshot (re-baseline) — the fixture inputs stay."""
     variant_path.mkdir(parents=True, exist_ok=True)
     (variant_path / "snapshot.json").write_text(json.dumps(snapshot.to_dict(), ensure_ascii=False, indent=1))
+
+
+def source_path(variant_path: Path) -> Path | None:
+    """The fixture's own source image (``source.<ext>``) — the exact canonical bytes the snapshot
+    was rendered on. The fixture is self-contained: replay renders on this, not on ``testset/``."""
+    for child in sorted(variant_path.glob("source.*")):
+        if child.is_file():
+            return child
+    return None

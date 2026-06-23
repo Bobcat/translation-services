@@ -1,46 +1,41 @@
 """Run one fixture: replay -> re-OCR -> diff against its snapshot.
 
-Shared by ``scripts/regress.py`` and the ``POST /v1/regression/run`` endpoint, so the CLI and the
-admin view agree exactly. On a failure the current render is dropped next to the snapshot as
-``actual.png`` (removed on a pass) for a visual snapshot-vs-actual comparison.
+The fixture is self-contained — it renders on its own ``source.<ext>`` (the exact canonical bytes
+the capture ran on), so a run never depends on the ``testset/`` file. Shared by
+``scripts/regress.py`` and the ``/v1/regression/{run,resnapshot}`` endpoints. On a failure the
+current render is dropped next to the snapshot as ``actual.png`` (removed on a pass).
 """
 from __future__ import annotations
 
-import tempfile
-from pathlib import Path
 from typing import Any
 
 from app.core.config import OcrSettings
 from app.regression import fixture as fx
-from app.regression.capture import TESTSET_ROOT
-from app.regression.capture import testset_image
 from app.regression.compare import diff_reocr
 from app.regression.compare import diff_units
-from app.regression.image import canonical_bytes
 from app.regression.replay import replay_fixture
 from app.regression.snapshot import reocr_rows
 
 
-def run_variant(
-    ocr_settings: OcrSettings,
-    *,
-    variant_path: Path,
-    name: str,
-    testset_root: Path = TESTSET_ROOT,
-) -> dict[str, Any]:
+def _resolve_source(variant_path) -> tuple[object, str | None]:
+    """``(source_path, error)`` — the fixture's own source image, with an integrity check."""
+    fixture, _ = fx.load(variant_path)
+    source = fx.source_path(variant_path)
+    if source is None:
+        return None, "fixture has no source image"
+    if fx.sha256(source.read_bytes()) != fixture.image_sha256:
+        return None, "source image sha mismatch (corrupted fixture)"
+    return source, None
+
+
+def run_variant(ocr_settings: OcrSettings, *, variant_path) -> dict[str, Any]:
     """``{passed, diffs, has_actual}`` for one ``<name>/<lang>/<variant>``."""
     fixture, snapshot = fx.load(variant_path)
-    image_path = testset_image(name, testset_root=testset_root)
-    if image_path is None:
-        return {"passed": False, "diffs": [f"testset image '{name}' not found"], "has_actual": False}
-    canonical = canonical_bytes(image_path)
-    if fx.sha256(canonical) != fixture.image_sha256:
-        return {"passed": False, "diffs": ["image sha256 mismatch — fixture is stale"], "has_actual": False}
+    source, error = _resolve_source(variant_path)
+    if error:
+        return {"passed": False, "diffs": [error], "has_actual": False}
 
-    with tempfile.NamedTemporaryFile(suffix=image_path.suffix) as handle:
-        handle.write(canonical)
-        handle.flush()
-        actual_units, actual_ignored, rendered = replay_fixture(Path(handle.name), fixture)
+    actual_units, actual_ignored, rendered = replay_fixture(source, fixture)
     actual_rows = reocr_rows(ocr_settings, rendered, fixture.target_lang)
 
     diffs = (
@@ -55,26 +50,15 @@ def run_variant(
     return {"passed": not diffs, "diffs": diffs, "has_actual": bool(diffs)}
 
 
-def resnapshot(
-    ocr_settings: OcrSettings,
-    *,
-    variant_path: Path,
-    name: str,
-    testset_root: Path = TESTSET_ROOT,
-) -> dict[str, Any]:
+def resnapshot(ocr_settings: OcrSettings, *, variant_path) -> dict[str, Any]:
     """Re-baseline a variant: replay it and overwrite snapshot.json + snapshot.png with the current
-    output (the fixture inputs stay). Accepts a deliberate render/align change whose result is good."""
+    output (the fixture inputs and source stay). Accepts a deliberate render/align change."""
     fixture, _ = fx.load(variant_path)
-    image_path = testset_image(name, testset_root=testset_root)
-    if image_path is None:
-        return {"ok": False, "error": f"testset image '{name}' not found"}
-    canonical = canonical_bytes(image_path)
-    if fx.sha256(canonical) != fixture.image_sha256:
-        return {"ok": False, "error": "image sha256 mismatch — fixture is stale"}
-    with tempfile.NamedTemporaryFile(suffix=image_path.suffix) as handle:
-        handle.write(canonical)
-        handle.flush()
-        actual_units, actual_ignored, rendered = replay_fixture(Path(handle.name), fixture)
+    source, error = _resolve_source(variant_path)
+    if error:
+        return {"ok": False, "error": error}
+
+    actual_units, actual_ignored, rendered = replay_fixture(source, fixture)
     snapshot = fx.Snapshot(
         expected_units=actual_units,
         ignored_cells=actual_ignored,

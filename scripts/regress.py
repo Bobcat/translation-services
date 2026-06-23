@@ -33,7 +33,6 @@ def _variant_dirs(root: Path) -> list[tuple[str, str, Path]]:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", default="testset/_regression")
-    parser.add_argument("--testset", default="testset")
     args = parser.parse_args()
 
     root = Path(args.root)
@@ -49,7 +48,7 @@ def main() -> int:
     failures = 0
     for name, label, variant_path in variants:
         try:
-            diffs = run_variant(ocr_settings, variant_path=variant_path, name=name, testset_root=Path(args.testset))["diffs"]
+            diffs = run_variant(ocr_settings, variant_path=variant_path)["diffs"]
         except Exception as exc:  # noqa: BLE001 - report and continue
             diffs = [f"replay error: {exc}"]
         if diffs:

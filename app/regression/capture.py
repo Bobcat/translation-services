@@ -14,7 +14,6 @@ from typing import Any
 
 from app.core.config import OcrSettings
 from app.regression import fixture as fx
-from app.regression.image import canonical_bytes
 from app.regression.snapshot import build_snapshot
 
 TESTSET_ROOT = Path("testset")
@@ -37,7 +36,7 @@ def _raw_hint(llm_calls: list[dict[str, Any]]) -> str:
     return ""
 
 
-def build_fixture(response: dict[str, Any], *, image_path: Path) -> fx.Fixture:
+def build_fixture(response: dict[str, Any], *, source_bytes: bytes) -> fx.Fixture:
     ocr = response.get("ocr") or {}
     metadata = response.get("metadata") or {}
     units = ocr.get("translation_units") or []
@@ -49,7 +48,7 @@ def build_fixture(response: dict[str, Any], *, image_path: Path) -> fx.Fixture:
         for unit in units
     }
     return fx.Fixture(
-        image_sha256=fx.sha256(canonical_bytes(image_path)),
+        image_sha256=fx.sha256(source_bytes),
         cells=ocr.get("cells") or [],
         raw_hint=_raw_hint(response.get("llm_calls") or []),
         translations=translations,
@@ -104,15 +103,17 @@ def capture(
     *,
     response: dict[str, Any],
     rendered_png: bytes,
-    image_path: Path,
+    source_bytes: bytes,
+    source_suffix: str,
     name: str,
     variant: str | None = None,
     regression_root: Path = REGRESSION_ROOT,
 ) -> dict[str, Any]:
-    """Build and persist a fixture+snapshot under ``<name>/<target_lang>/<variant>``. The target
-    language is its own path level (it shapes the render, not the align); the variant counter runs
-    per language. ``variant`` is auto-assigned (next free ``vN``) when not given."""
-    fixture = build_fixture(response, image_path=image_path)
+    """Build and persist a self-contained fixture under ``<name>/<target_lang>/<variant>``: the
+    frozen inputs, the snapshot, the approved render, AND the exact ``source.<ext>`` the render ran
+    on (the canonical upload). Replay renders on that source, so the fixture never depends on the
+    ``testset/`` file matching what was captured. ``variant`` is auto-assigned when not given."""
+    fixture = build_fixture(response, source_bytes=source_bytes)
     lang = fixture.target_lang or "unknown"
     lang_dir = regression_root / name / lang
     # Auto-capture skips a true duplicate (same frozen inputs) — and the check runs before the
@@ -138,9 +139,11 @@ def capture(
     )
     variant_path = lang_dir / resolved_variant
     fx.save(variant_path, fixture, snapshot)
-    # The approved render itself, for human inspection (not used in the diff — that stays re-OCR
-    # based). Lets an admin view show what a snapshot looks like before deleting / re-approving.
+    # The approved render, for human inspection (not used in the diff — that stays re-OCR based).
     (variant_path / "snapshot.png").write_bytes(rendered_png)
+    # The exact image the render ran on, so replay is faithful regardless of testset/.
+    suffix = source_suffix if source_suffix.startswith(".") else f".{source_suffix or 'png'}"
+    (variant_path / f"source{suffix}").write_bytes(source_bytes)
     return {
         "path": str(variant_path),
         "name": name,

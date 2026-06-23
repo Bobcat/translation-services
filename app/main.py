@@ -263,18 +263,20 @@ def create_app(settings_path: str | Path | None = None) -> FastAPI:
             return JSONResponse(status_code=int(status_code), content=lifecycle)
         if (lifecycle.get("state") or "") != "completed":
             return _error(409, code="REGRESSION_NOT_COMPLETED", message=f"request state is {lifecycle.get('state')}", retryable=False)
-        image_path = regression_capture.testset_image(name)
-        if image_path is None:
-            return _error(404, code="REGRESSION_IMAGE_NOT_IN_TESTSET", message=f"add '{name}' to the testset first", retryable=False)
-        status_code, artifact = await runtime.artifact_path(request_id=request_id, artifact_name="rendered")
+        status_code, rendered_art = await runtime.artifact_path(request_id=request_id, artifact_name="rendered")
         if int(status_code) != 200:
-            return JSONResponse(status_code=int(status_code), content=artifact)
-        rendered = Path(str(artifact["path"])).read_bytes()
+            return JSONResponse(status_code=int(status_code), content=rendered_art)
+        status_code, input_art = await runtime.artifact_path(request_id=request_id, artifact_name="input")
+        if int(status_code) != 200:
+            return JSONResponse(status_code=int(status_code), content=input_art)
+        rendered = Path(str(rendered_art["path"])).read_bytes()
+        source_path = Path(str(input_art["path"]))
         response = dict(lifecycle.get("response") or {})
         out = await anyio.to_thread.run_sync(
             lambda: regression_capture.capture(
                 settings.ocr, response=response, rendered_png=rendered,
-                image_path=image_path, name=name, variant=variant,
+                source_bytes=source_path.read_bytes(), source_suffix=source_path.suffix or ".png",
+                name=name, variant=variant,
             )
         )
         return JSONResponse(status_code=200, content={**out, **regression_capture.status(name)})
@@ -283,26 +285,24 @@ def create_app(settings_path: str | Path | None = None) -> FastAPI:
     async def regression_list() -> JSONResponse:
         return JSONResponse(status_code=200, content={"images": regression_capture.list_fixtures()})
 
-    @app.get("/v1/regression/source/{name}")
-    async def regression_source(name: str):
-        image_path = regression_capture.testset_image(name)
-        if image_path is None:
-            return _error(404, code="REGRESSION_SOURCE_NOT_FOUND", message="testset image not found", retryable=False)
-        return FileResponse(path=str(image_path), filename=image_path.name)
-
     @app.get("/v1/regression/fixtures/{name}/{lang}/{variant}/{artifact}")
     async def regression_variant_artifact(name: str, lang: str, variant: str, artifact: str):
-        if artifact not in {"snapshot.png", "actual.png"}:
-            return _error(404, code="REGRESSION_ARTIFACT_UNKNOWN", message="unknown artifact", retryable=False)
         root = regression_capture.REGRESSION_ROOT.resolve()
-        path = (root / name / lang / variant / artifact).resolve()
+        variant_path = (root / name / lang / variant).resolve()
         try:
-            path.relative_to(root)
+            variant_path.relative_to(root)
         except ValueError:
             return _error(400, code="REGRESSION_PATH_INVALID", message="invalid path", retryable=False)
-        if not path.exists():
+        if artifact in {"snapshot.png", "actual.png"}:
+            path, media_type = variant_path / artifact, "image/png"
+        elif artifact == "source":  # the fixture's own captured image (variable extension)
+            sources = sorted(variant_path.glob("source.*"))
+            path, media_type = (sources[0] if sources else None), None
+        else:
+            return _error(404, code="REGRESSION_ARTIFACT_UNKNOWN", message="unknown artifact", retryable=False)
+        if path is None or not path.exists():
             return _error(404, code="REGRESSION_ARTIFACT_NOT_FOUND", message="artifact not found", retryable=False)
-        return FileResponse(path=str(path), media_type="image/png", filename=path.name)
+        return FileResponse(path=str(path), media_type=media_type, filename=path.name)
 
     @app.post("/v1/regression/run")
     async def regression_run_variant(body: dict[str, Any] = Body(default_factory=dict)) -> JSONResponse:
@@ -320,7 +320,7 @@ def create_app(settings_path: str | Path | None = None) -> FastAPI:
         if not (variant_path / "fixture.json").exists():
             return _error(404, code="REGRESSION_FIXTURE_NOT_FOUND", message="fixture not found", retryable=False)
         result = await anyio.to_thread.run_sync(
-            lambda: regression_run.run_variant(settings.ocr, variant_path=variant_path, name=name)
+            lambda: regression_run.run_variant(settings.ocr, variant_path=variant_path)
         )
         return JSONResponse(status_code=200, content={"name": name, "lang": lang, "variant": variant, **result})
 
@@ -340,7 +340,7 @@ def create_app(settings_path: str | Path | None = None) -> FastAPI:
         if not (variant_path / "fixture.json").exists():
             return _error(404, code="REGRESSION_FIXTURE_NOT_FOUND", message="fixture not found", retryable=False)
         result = await anyio.to_thread.run_sync(
-            lambda: regression_run.resnapshot(settings.ocr, variant_path=variant_path, name=name)
+            lambda: regression_run.resnapshot(settings.ocr, variant_path=variant_path)
         )
         return JSONResponse(status_code=200, content={"name": name, "lang": lang, "variant": variant, **result})
 
