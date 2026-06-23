@@ -37,6 +37,7 @@ from pydantic import Field
 
 from app.core.config import load_settings
 from app.regression import capture as regression_capture
+from app.regression import run as regression_run
 from app.runtime.service import RequestRuntime
 from app.core.schemas import CompletionsEnvelope
 from app.core.schemas import RequestLifecycle
@@ -277,6 +278,66 @@ def create_app(settings_path: str | Path | None = None) -> FastAPI:
             )
         )
         return JSONResponse(status_code=200, content={**out, **regression_capture.status(name)})
+
+    @app.get("/v1/regression/fixtures")
+    async def regression_list() -> JSONResponse:
+        return JSONResponse(status_code=200, content={"images": regression_capture.list_fixtures()})
+
+    @app.get("/v1/regression/source/{name}")
+    async def regression_source(name: str):
+        image_path = regression_capture.testset_image(name)
+        if image_path is None:
+            return _error(404, code="REGRESSION_SOURCE_NOT_FOUND", message="testset image not found", retryable=False)
+        return FileResponse(path=str(image_path), filename=image_path.name)
+
+    @app.get("/v1/regression/fixtures/{name}/{lang}/{variant}/{artifact}")
+    async def regression_variant_artifact(name: str, lang: str, variant: str, artifact: str):
+        if artifact not in {"snapshot.png", "actual.png"}:
+            return _error(404, code="REGRESSION_ARTIFACT_UNKNOWN", message="unknown artifact", retryable=False)
+        root = regression_capture.REGRESSION_ROOT.resolve()
+        path = (root / name / lang / variant / artifact).resolve()
+        try:
+            path.relative_to(root)
+        except ValueError:
+            return _error(400, code="REGRESSION_PATH_INVALID", message="invalid path", retryable=False)
+        if not path.exists():
+            return _error(404, code="REGRESSION_ARTIFACT_NOT_FOUND", message="artifact not found", retryable=False)
+        return FileResponse(path=str(path), media_type="image/png", filename=path.name)
+
+    @app.post("/v1/regression/run")
+    async def regression_run_variant(body: dict[str, Any] = Body(default_factory=dict)) -> JSONResponse:
+        name = str(body.get("name") or "").strip()
+        lang = str(body.get("lang") or "").strip()
+        variant = str(body.get("variant") or "").strip()
+        if not (name and lang and variant):
+            return _error(400, code="REGRESSION_BAD_REQUEST", message="name, lang and variant are required", retryable=False)
+        root = regression_capture.REGRESSION_ROOT.resolve()
+        variant_path = (root / name / lang / variant).resolve()
+        try:
+            variant_path.relative_to(root)
+        except ValueError:
+            return _error(400, code="REGRESSION_PATH_INVALID", message="invalid path", retryable=False)
+        if not (variant_path / "fixture.json").exists():
+            return _error(404, code="REGRESSION_FIXTURE_NOT_FOUND", message="fixture not found", retryable=False)
+        result = await anyio.to_thread.run_sync(
+            lambda: regression_run.run_variant(settings.ocr, variant_path=variant_path, name=name)
+        )
+        return JSONResponse(status_code=200, content={"name": name, "lang": lang, "variant": variant, **result})
+
+    @app.delete("/v1/regression/fixtures/{name}")
+    async def regression_delete_name(name: str) -> JSONResponse:
+        ok = regression_capture.delete_path(name)
+        return JSONResponse(status_code=200 if ok else 404, content={"deleted": ok})
+
+    @app.delete("/v1/regression/fixtures/{name}/{lang}")
+    async def regression_delete_lang(name: str, lang: str) -> JSONResponse:
+        ok = regression_capture.delete_path(name, lang)
+        return JSONResponse(status_code=200 if ok else 404, content={"deleted": ok})
+
+    @app.delete("/v1/regression/fixtures/{name}/{lang}/{variant}")
+    async def regression_delete_variant(name: str, lang: str, variant: str) -> JSONResponse:
+        ok = regression_capture.delete_path(name, lang, variant)
+        return JSONResponse(status_code=200 if ok else 404, content={"deleted": ok})
 
     @app.get("/v1/completions", response_model=CompletionsEnvelope)
     async def get_completions(

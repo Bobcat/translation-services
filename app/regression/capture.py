@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import re
+import shutil
 from pathlib import Path
 from typing import Any
 
@@ -174,3 +175,63 @@ def status(
         "fixture_count": sum(len(v) for v in langs.values()),
         "langs": langs,
     }
+
+
+def list_fixtures(
+    *,
+    regression_root: Path = REGRESSION_ROOT,
+    testset_root: Path = TESTSET_ROOT,
+) -> list[dict[str, Any]]:
+    """The full inventory the admin view lists: one entry per image, its fixtures grouped per
+    language with light metadata (no replay, no OCR)."""
+    out: list[dict[str, Any]] = []
+    if not regression_root.exists():
+        return out
+    for name_dir in sorted(p for p in regression_root.iterdir() if p.is_dir()):
+        langs: dict[str, list[dict[str, Any]]] = {}
+        for lang_dir in sorted(p for p in name_dir.iterdir() if p.is_dir()):
+            variants: list[dict[str, Any]] = []
+            for variant_dir in sorted(p for p in lang_dir.iterdir() if p.is_dir()):
+                try:
+                    fixture_data = json.loads((variant_dir / "fixture.json").read_text())
+                    snapshot_data = json.loads((variant_dir / "snapshot.json").read_text())
+                except (OSError, ValueError):
+                    continue
+                variants.append({
+                    "variant": variant_dir.name,
+                    "target_lang": fixture_data.get("target_lang") or lang_dir.name,
+                    "units": len(fixture_data.get("translations") or {}),
+                    "reocr_rows": len(snapshot_data.get("reocr") or []),
+                    "has_snapshot_png": (variant_dir / "snapshot.png").exists(),
+                })
+            if variants:
+                langs[lang_dir.name] = variants
+        if langs:
+            out.append({
+                "name": name_dir.name,
+                "in_testset": testset_image(name_dir.name, testset_root=testset_root) is not None,
+                "langs": langs,
+            })
+    return out
+
+
+def delete_path(
+    name: str,
+    lang: str | None = None,
+    variant: str | None = None,
+    *,
+    regression_root: Path = REGRESSION_ROOT,
+) -> bool:
+    """Cascade-delete a name / lang / variant dir. Refuses to escape ``regression_root`` or to
+    delete the root itself."""
+    segments = [name, *([lang] if lang else []), *([variant] if variant else [])]
+    target = regression_root.joinpath(*segments).resolve()
+    root = regression_root.resolve()
+    try:
+        target.relative_to(root)
+    except ValueError:
+        return False
+    if target == root or not target.exists():
+        return False
+    shutil.rmtree(target)
+    return True
