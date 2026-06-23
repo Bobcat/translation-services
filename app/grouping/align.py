@@ -193,19 +193,45 @@ def _resolve_claim_clusters(
     dropped: list[int] = []
     covered_tokens: set[str] = set()
     covered_fields: set[int] = set()
+    to_merge: list[int] = []
     for k in order:
         members = claim_lists[k]
         tokens = tokens_of(members)
         if not kept or (fields_of(tokens) - covered_fields):
             kept.append(list(members))                       # primary, or a distinct ``|`` field
+            covered_tokens |= tokens
+            covered_fields |= fields_of(tokens)
+        elif tokens - covered_tokens:
+            to_merge.append(k)                               # adds new content -> merge into its line
         else:
-            target = _merge_target(members, kept, cells) if (tokens - covered_tokens) else None
-            if target is None:
-                dropped.extend(members)                      # redundant stray / mismatch
+            dropped.extend(members)                          # redundant stray / mismatch
+
+    # Merge each new-token claim into an adjacent kept group, iterating to a fixpoint: a merge grows
+    # the kept box, which can then reach a claim that was out of range before. So a tilted line chains
+    # in (the right-end words attach via the middle word) regardless of the token-count order — without
+    # this, "0800-1995" is compared against the far-left "Of bel de" before "stoplijn" bridges them, and
+    # a real continuation is wrongly dropped. A claim adjacent to nothing even after the boxes have grown
+    # is a genuinely detached stray (an embedded image's text) and still drops.
+    changed = True
+    while changed and to_merge:
+        changed = False
+        still: list[int] = []
+        for k in to_merge:
+            members = claim_lists[k]
+            if not (tokens_of(members) - covered_tokens):
+                dropped.extend(members)                      # an earlier merge already covered its tokens
+                changed = True
                 continue
-            target.extend(members)                           # wrapped continuation of its line
-        covered_tokens |= tokens
-        covered_fields |= fields_of(tokens)
+            target = _merge_target(members, kept, cells)
+            if target is None:
+                still.append(k)
+                continue
+            target.extend(members)                           # wrapped/tilted continuation of its line
+            covered_tokens |= tokens_of(members)
+            changed = True
+        to_merge = still
+    for k in to_merge:
+        dropped.extend(claim_lists[k])                       # never reached a kept group -> detached stray
     return kept, dropped
 
 
