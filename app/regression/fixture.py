@@ -1,10 +1,14 @@
 """The fixture (frozen replay inputs) and snapshot (approved expected output) data model.
 
 A fixture freezes everything the deterministic chain needs: the OCR ``cells``, the ``raw_hint``
-string the VLM produced, and the per-unit ``translations`` (keyed by the unit's anchor cell). A
-snapshot records the approved ``expected_units`` (the align output, order-sensitive),
-``ignored_cells``, and ``reocr`` (the rendered image read back). Both are plain JSON on disk
-under ``testset/_regression/<name>/<variant>/``.
+string the VLM produced, and the translations. The translations are split by what they are a
+function of: ``hint_translations`` (keyed by ``hint_index``) is the translation of each hint line —
+a pure function of the frozen hint, independent of how align groups cells; ``leftover_translations``
+(keyed by a member cell id) covers the cells that matched no hint line, which are inherently
+per-cell. Neither keys on an align *output* (the old anchor-cell key was such an output, so an align
+change that moved the anchor silently detached the translation). A snapshot records the approved
+``expected_units`` (the align output, order-sensitive), ``ignored_cells``, and ``reocr`` (the
+rendered image read back). Both are plain JSON on disk under ``testset/_regression/<name>/<variant>/``.
 """
 from __future__ import annotations
 
@@ -20,8 +24,12 @@ class Fixture:
     image_sha256: str
     cells: list[dict[str, Any]]
     raw_hint: str
-    # anchor-cell-id (str) -> {"translated_text": str, "field_translations": list[[src, tr]] | None}
-    translations: dict[str, dict[str, Any]]
+    # hint_index (str) -> {"translated_text": str, "field_translations": list[[src, tr]] | None}
+    # The translation of a hint line; attached at replay to whichever unit matched that line.
+    hint_translations: dict[str, dict[str, Any]]
+    # member-cell-id (str) -> same entry shape; for leftover units (matched no hint line). Attached
+    # at replay by cell membership, so a cell joining/leaving the unit does not detach it.
+    leftover_translations: dict[str, dict[str, Any]]
     request_flags: dict[str, bool]
     grouping_model: str
     target_lang: str
@@ -37,7 +45,8 @@ class Fixture:
             "image_sha256": self.image_sha256,
             "cells": self.cells,
             "raw_hint": self.raw_hint,
-            "translations": self.translations,
+            "hint_translations": self.hint_translations,
+            "leftover_translations": self.leftover_translations,
             "request_flags": self.request_flags,
             "grouping_model": self.grouping_model,
             "target_lang": self.target_lang,
@@ -49,7 +58,8 @@ class Fixture:
             image_sha256=str(data["image_sha256"]),
             cells=list(data["cells"]),
             raw_hint=str(data.get("raw_hint") or ""),
-            translations=dict(data.get("translations") or {}),
+            hint_translations=dict(data.get("hint_translations") or {}),
+            leftover_translations=dict(data.get("leftover_translations") or {}),
             request_flags=dict(data.get("request_flags") or {}),
             grouping_model=str(data.get("grouping_model") or ""),
             target_lang=str(data.get("target_lang") or ""),
@@ -85,8 +95,9 @@ def sha256(image_bytes: bytes) -> str:
 
 
 def anchor_key(unit: dict[str, Any]) -> str:
-    """The unit's anchor cell id (the member with the lowest reading ``order``) as a string — the
-    stable, unique key for attaching a frozen translation to a re-grouped unit."""
+    """The unit's anchor cell id (the member with the lowest reading ``order``) as a string. Used as
+    the capture-time key for a leftover unit's translation; replay re-attaches it by cell membership,
+    so it only has to be *a* member, not still the anchor."""
     members = unit.get("members") or []
     anchor = min(members, key=lambda m: int(m.get("order") or 0))
     return str(anchor["cell_id"])

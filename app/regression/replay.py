@@ -13,7 +13,6 @@ from typing import Any
 from app.grouping import group_cells_into_units
 from app.grouping.hint_parser import parse_grouping_output
 from app.regression.fixture import Fixture
-from app.regression.fixture import anchor_key
 from app.regression.fixture import expected_unit_of
 from app.replacement import render_translated_image
 from app.tasks.translate_image import _units_for_preserve_heuristic_text
@@ -36,19 +35,32 @@ def replay_fixture(
     group_ms = (time.perf_counter() - group_started) * 1000.0
 
     # Only preserve_heuristic_text changes the set fed to render; re-apply it before attaching
-    # the frozen translations (keyed by the unit's anchor cell).
+    # the frozen translations.
     units = _units_for_preserve_heuristic_text(
         grouping.units, preserve_heuristic_text=fixture.preserve_heuristic_text
     )
-    translation_units: list[dict[str, Any]] = []
-    for unit in units:
-        unit_dict = unit.to_dict()
-        entry = fixture.translations.get(anchor_key(unit_dict))
-        if entry is not None:
-            unit_dict["translated_text"] = str(entry.get("translated_text") or "")
-            pairs = entry.get("field_translations")
-            unit_dict["field_translations"] = [tuple(pair) for pair in pairs] if pairs else None
-        translation_units.append(unit_dict)
+    # Attach the frozen translations without keying on an align OUTPUT. A hint-matched unit takes the
+    # translation of the hint line it matched (``hint_translations`` by ``hint_index`` — independent of
+    # how cells grouped). A leftover unit (matched no hint line) takes its translation by cell
+    # MEMBERSHIP: cells are frozen inputs, so a cell joining/leaving (or the anchor moving on a tilted
+    # line) does not detach it. A leftover key cell now ignored, or two keys colliding on one unit (a
+    # merge), is a real align change the align diff already flags.
+    translation_units = [unit.to_dict() for unit in units]
+    for unit_dict in translation_units:
+        hint_index = unit_dict.get("hint_index")
+        if hint_index is not None:
+            entry = fixture.hint_translations.get(str(hint_index))
+        else:
+            entry = next(
+                (e for member in (unit_dict.get("members") or [])
+                 if (e := fixture.leftover_translations.get(str(member.get("cell_id")))) is not None),
+                None,
+            )
+        if entry is None:
+            continue
+        unit_dict["translated_text"] = str(entry.get("translated_text") or "")
+        pairs = entry.get("field_translations")
+        unit_dict["field_translations"] = [tuple(pair) for pair in pairs] if pairs else None
 
     render_started = time.perf_counter()
     rendered_png = render_translated_image(input_path, translation_units)

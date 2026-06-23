@@ -47,7 +47,7 @@ single recorded expected result suffices and any diff is a genuine regression.
 ## Terminology
 
 - **fixture** — the frozen *inputs* for one replay of one image: OCR cells, the raw VLM hint
-  string, and the per-unit translations. The replay-input.
+  string, and the translations (per hint line, plus per-cell for leftovers). The replay-input.
 - **snapshot** — the approved *expected output*: the align result (units + ignored cells) and
   the re-OCR of the rendered result.
 - **approve** — record (or re-record) a snapshot + fixture.
@@ -117,19 +117,29 @@ that whole class of bug. `image_sha256` (of `source.<ext>`) stays as an integrit
 
 ## Keying translations to re-grouped units
 
-At replay, align re-produces units and we must attach each frozen translation to the right
-unit. A unit *is* its set of member cells (cells are partitioned across units), and each
-member carries a reading `order`.
+At replay, align re-produces units and we must attach each frozen translation to the right unit —
+**without keying on anything align produces.** A unit is an align *output* (which cells grouped, and
+hence its anchor / member set), so a key derived from it (the old anchor-cell key) breaks the moment
+align regroups. We split the translations by what they are genuinely a function of:
 
-- **Key = the anchor cell** (the member with the lowest `order`). Positionally the first cell
-  is the unit's anchor — the text places from there — and because cells are partitioned, that
-  one cell already identifies the unit uniquely. It is the most stable key: a trailing wrap
-  cell joining or leaving does not change it.
+- **Hint-matched units → `hint_translations`, keyed by `hint_index`.** The structured translator
+  re-translates the *hint lines*; the translation of hint line *i* is a pure function of the frozen
+  hint, independent of how align groups cells onto that line. At replay a unit carries the
+  `hint_index` of the line it matched, and takes `hint_translations[hint_index]`. So a cell joining,
+  leaving, or re-anchoring the unit changes nothing — the line, and its translation, are the same.
+- **Leftover units (matched no hint line) → `leftover_translations`, keyed by a member cell id.** A
+  leftover is inherently per-cell (a cell OCR'd with no hint line), so its translation is keyed by a
+  cell — a frozen input. Replay attaches it by cell **membership** (the unit that contains the key
+  cell), which tolerates the anchor moving or sibling cells shifting. Capture writes the anchor cell
+  as the key, but any member works because the match is by membership, not by the cell still being
+  the anchor.
 - Order matters semantically (member order builds `source_text`, hence the translation), so
   the **snapshot comparison** uses the full **ordered** cell list, not a set.
 
-If align re-groups so the anchor moves, the key misses and that unit gets no translation —
-but the align diff already fails on the composition change, so the render diff is secondary.
+Why `hint_index` cannot key *everything*: leftovers have no hint line (they are common — a busy
+social-overlay image can have a dozen), so they would all collide on the empty index. Hence the two
+maps. Residual failure modes, both real align changes the align diff already flags: a leftover key
+cell becomes `ignored` (that translation unplaced), or two keys land in one unit (a merge).
 
 ### Worked example
 
@@ -143,16 +153,19 @@ OCR yields cells 0–8. The frozen hint has 2 lines. Align produces:
 | ignored | 5, 6, 7 | none — OCR noise / icon / unmatched fragment; original pixels kept |
 
 ```json
-"translations": {
+"hint_translations": {
   "0": { "translated_text": "Hallo wereld", "field_translations": null },
-  "2": { "translated_text": "Totaalbedrag", "field_translations": null },
-  "8": { "translated_text": "Prijs",        "field_translations": null }
+  "1": { "translated_text": "Totaalbedrag", "field_translations": null }
+},
+"leftover_translations": {
+  "8": { "translated_text": "Prijs", "field_translations": null }
 }
 ```
-Keyed by the anchor (lowest-order) cell of each unit. A table-row unit carries non-null
-`field_translations` (the per-column `[source, translated]` pairs) that `_split_table_row`
-needs. Ignored cells have no entry — no text to place. "Which cells are ignored" is itself an
-align decision, so the snapshot records it: a cell flipping unit↔ignored is a regression.
+Units A and B are keyed by their `hint_index` (0, 1); the leftover unit C by its member cell (8),
+attached at replay by membership. A table-row unit carries non-null `field_translations` (the
+per-column `[source, translated]` pairs) that `_split_table_row` needs. Ignored cells have no entry —
+no text to place. "Which cells are ignored" is itself an align decision, so the snapshot records it:
+a cell flipping unit↔ignored is a regression.
 
 ---
 
@@ -164,8 +177,11 @@ align decision, so the snapshot records it: a cell flipping unit↔ignored is a 
   "image_sha256": "…",
   "cells": [ … ],
   "raw_hint": "…",
-  "translations": {
-    "<anchor_cell_id>": { "translated_text": "…", "field_translations": [["src", "tr"], …] }, …
+  "hint_translations": {
+    "<hint_index>": { "translated_text": "…", "field_translations": [["src", "tr"], …] }, …
+  },
+  "leftover_translations": {
+    "<member_cell_id>": { "translated_text": "…", "field_translations": null }, …
   },
   "request_flags": {
     "preserve_heuristic_text": true, "preserve_unchanged_text": false, "use_geometry_columns": true
@@ -253,7 +269,7 @@ completed request, so capture re-runs nothing:
 |---|---|
 | cells | `response.ocr.cells` |
 | raw hint | the grouping call's `output_text` in `response.llm_calls` |
-| translations | `response.ocr.translation_units` → per-unit text, keyed by anchor cell |
+| translations | `response.ocr.translation_units` → split into `hint_translations` (by `hint_index`) and `leftover_translations` (by member cell) |
 | rendered result (for the snapshot re-OCR) | artifact `rendered` |
 | identity | canonical-ingest SHA-256 of the input |
 

@@ -40,18 +40,24 @@ def build_fixture(response: dict[str, Any], *, source_bytes: bytes) -> fx.Fixtur
     ocr = response.get("ocr") or {}
     metadata = response.get("metadata") or {}
     units = ocr.get("translation_units") or []
-    translations = {
-        fx.anchor_key(unit): {
+    hint_translations: dict[str, dict[str, Any]] = {}
+    leftover_translations: dict[str, dict[str, Any]] = {}
+    for unit in units:
+        entry = {
             "translated_text": unit.get("translated_text") or "",
             "field_translations": unit.get("field_translations"),
         }
-        for unit in units
-    }
+        hint_index = unit.get("hint_index")
+        if hint_index is not None:
+            hint_translations[str(hint_index)] = entry      # the hint line's translation
+        else:
+            leftover_translations[fx.anchor_key(unit)] = entry  # a cell with no hint line
     return fx.Fixture(
         image_sha256=fx.sha256(source_bytes),
         cells=ocr.get("cells") or [],
         raw_hint=_raw_hint(response.get("llm_calls") or []),
-        translations=translations,
+        hint_translations=hint_translations,
+        leftover_translations=leftover_translations,
         request_flags={
             "preserve_heuristic_text": bool(metadata.get("preserve_heuristic_text", True)),
             "preserve_unchanged_text": bool(metadata.get("preserve_unchanged_text", False)),
@@ -176,7 +182,7 @@ def capture(
         "target_lang": lang,
         "variant": resolved_variant,
         "duplicate": False,
-        "units": len(fixture.translations),
+        "units": len(fixture.hint_translations) + len(fixture.leftover_translations),
         "reocr_rows": len(snapshot.reocr),
     }
 
@@ -229,7 +235,8 @@ def list_fixtures(
                 variants.append({
                     "variant": variant_dir.name,
                     "target_lang": fixture_data.get("target_lang") or lang_dir.name,
-                    "units": len(fixture_data.get("translations") or {}),
+                    "units": len(fixture_data.get("hint_translations") or {})
+                    + len(fixture_data.get("leftover_translations") or {}),
                     "reocr_rows": len(snapshot_data.get("reocr") or []),
                     "has_snapshot_png": (variant_dir / "snapshot.png").exists(),
                 })
