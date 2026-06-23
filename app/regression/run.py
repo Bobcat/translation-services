@@ -53,3 +53,36 @@ def run_variant(
     elif actual_png.exists():
         actual_png.unlink()
     return {"passed": not diffs, "diffs": diffs, "has_actual": bool(diffs)}
+
+
+def resnapshot(
+    ocr_settings: OcrSettings,
+    *,
+    variant_path: Path,
+    name: str,
+    testset_root: Path = TESTSET_ROOT,
+) -> dict[str, Any]:
+    """Re-baseline a variant: replay it and overwrite snapshot.json + snapshot.png with the current
+    output (the fixture inputs stay). Accepts a deliberate render/align change whose result is good."""
+    fixture, _ = fx.load(variant_path)
+    image_path = testset_image(name, testset_root=testset_root)
+    if image_path is None:
+        return {"ok": False, "error": f"testset image '{name}' not found"}
+    canonical = canonical_bytes(image_path)
+    if fx.sha256(canonical) != fixture.image_sha256:
+        return {"ok": False, "error": "image sha256 mismatch — fixture is stale"}
+    with tempfile.NamedTemporaryFile(suffix=image_path.suffix) as handle:
+        handle.write(canonical)
+        handle.flush()
+        actual_units, actual_ignored, rendered = replay_fixture(Path(handle.name), fixture)
+    snapshot = fx.Snapshot(
+        expected_units=actual_units,
+        ignored_cells=actual_ignored,
+        reocr=reocr_rows(ocr_settings, rendered, fixture.target_lang),
+    )
+    fx.save_snapshot(variant_path, snapshot)
+    (variant_path / "snapshot.png").write_bytes(rendered)
+    actual_png = variant_path / "actual.png"
+    if actual_png.exists():
+        actual_png.unlink()
+    return {"ok": True}

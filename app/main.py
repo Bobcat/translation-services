@@ -324,6 +324,26 @@ def create_app(settings_path: str | Path | None = None) -> FastAPI:
         )
         return JSONResponse(status_code=200, content={"name": name, "lang": lang, "variant": variant, **result})
 
+    @app.post("/v1/regression/resnapshot")
+    async def regression_resnapshot(body: dict[str, Any] = Body(default_factory=dict)) -> JSONResponse:
+        name = str(body.get("name") or "").strip()
+        lang = str(body.get("lang") or "").strip()
+        variant = str(body.get("variant") or "").strip()
+        if not (name and lang and variant):
+            return _error(400, code="REGRESSION_BAD_REQUEST", message="name, lang and variant are required", retryable=False)
+        root = regression_capture.REGRESSION_ROOT.resolve()
+        variant_path = (root / name / lang / variant).resolve()
+        try:
+            variant_path.relative_to(root)
+        except ValueError:
+            return _error(400, code="REGRESSION_PATH_INVALID", message="invalid path", retryable=False)
+        if not (variant_path / "fixture.json").exists():
+            return _error(404, code="REGRESSION_FIXTURE_NOT_FOUND", message="fixture not found", retryable=False)
+        result = await anyio.to_thread.run_sync(
+            lambda: regression_run.resnapshot(settings.ocr, variant_path=variant_path, name=name)
+        )
+        return JSONResponse(status_code=200, content={"name": name, "lang": lang, "variant": variant, **result})
+
     @app.delete("/v1/regression/fixtures/{name}")
     async def regression_delete_name(name: str) -> JSONResponse:
         ok = regression_capture.delete_path(name)

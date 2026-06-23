@@ -94,14 +94,19 @@ def anchor_key(unit: dict[str, Any]) -> str:
 
 def expected_unit_of(unit: dict[str, Any]) -> dict[str, Any]:
     """The align fields of a unit, compared order-sensitively in a regression: the ordered member
-    cell ids plus the hint-derived labels. Translation/text is deliberately excluded (it is a
-    frozen input, not an align output)."""
+    cells plus the hint-derived labels AND the render-relevant fields align derives — the per-member
+    translate flags and the font family/weight. Including those localises a render diff that stems
+    from an align change here (upstream) instead of only surfacing as a pixel diff. Translation/text
+    is excluded (a frozen input, not an align output)."""
     members = sorted(unit.get("members") or [], key=lambda m: int(m.get("order") or 0))
     return {
         "cells": [int(m["cell_id"]) for m in members],
+        "member_translate": [bool(m.get("translate", True)) for m in members],
         "hint_index": unit.get("hint_index"),
         "level": unit.get("level"),
         "alignment": unit.get("alignment"),
+        "font_family": unit.get("font_family"),
+        "font_weight": unit.get("font_weight"),
         "bullet": bool(unit.get("bullet", False)),
         "bullet_marker": unit.get("bullet_marker"),
         "block_id": unit.get("block_id"),
@@ -117,4 +122,10 @@ def load(variant_path: Path) -> tuple[Fixture, Snapshot]:
 def save(variant_path: Path, fixture: Fixture, snapshot: Snapshot) -> None:
     variant_path.mkdir(parents=True, exist_ok=True)
     (variant_path / "fixture.json").write_text(json.dumps(fixture.to_dict(), ensure_ascii=False, indent=1))
+    save_snapshot(variant_path, snapshot)
+
+
+def save_snapshot(variant_path: Path, snapshot: Snapshot) -> None:
+    """Overwrite just the snapshot (re-baseline) — the fixture inputs stay."""
+    variant_path.mkdir(parents=True, exist_ok=True)
     (variant_path / "snapshot.json").write_text(json.dumps(snapshot.to_dict(), ensure_ascii=False, indent=1))

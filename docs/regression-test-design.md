@@ -183,8 +183,9 @@ never the units.
 ```json
 {
   "expected_units": [
-    { "cells": [0,1], "hint_index": 0, "level": "header",
-      "alignment": "center", "bullet": false, "bullet_marker": null, "block_id": 0 },
+    { "cells": [0,1], "member_translate": [true, true], "hint_index": 0, "level": "header",
+      "alignment": "center", "font_family": "Helvetica", "font_weight": 400,
+      "bullet": false, "bullet_marker": null, "block_id": 0 },
     …
   ],
   "ignored_cells": [5,6,7],
@@ -196,9 +197,12 @@ never the units.
 
 ## Comparison and tolerances
 
-- **Align diff** — `expected_units` (ordered cells + label fields) and `ignored_cells`,
-  compared exactly and order-sensitively. Any composition / order / label / keep-drop change
-  fails, localised to the unit.
+- **Align diff** — `expected_units` and `ignored_cells`, compared exactly and order-sensitively.
+  `expected_units` carries the ordered cells, the label fields, AND the render-relevant fields align
+  derives — the per-member translate flags and the font family/weight. So a render diff that stems
+  from an align change is **localised here** (upstream, to the unit/field) rather than only
+  surfacing as a pixel diff; a clean align diff + a render diff therefore points at `render.py`
+  itself. Any composition / order / label / font / keep-drop change fails, localised to the unit.
 - **Render diff** — re-OCR the replayed render at **cell level** (`merge_lines=False`). Text is
   compared as a **word multiset** (each segment split on whitespace), so OCR grouping a line into
   one box vs several ("ah pizza" as one segment vs "ah" + "pizza") never reads as missing/extra.
@@ -255,6 +259,24 @@ completed request, so capture re-runs nothing:
 | image not in testset | "not in testset" | **Add to testset** → `POST /testset` |
 | in testset, 0 fixtures | "no fixture" | **Capture fixture** → `POST /fixtures` |
 | N fixtures | "N fixture(s)" + variant list | **Capture variant** → `POST /fixtures` (new variant) |
+
+### Admin view (a separate "Regression" workflow)
+
+Browses and manages existing fixtures by **replay** (no pipeline). It is a persistent view, so a
+"Run all" survives sidebar navigation. Endpoints:
+
+- `GET /v1/regression/fixtures` — the inventory tree (name → lang → variant + light metadata).
+- `GET …/fixtures/{name}/{lang}/{variant}/{snapshot,actual}.png`, `GET …/source/{name}` — the
+  rendered images and the source image.
+- `POST /v1/regression/run {name,lang,variant}` — replay + diff one variant → `{passed, diffs}`.
+- `POST /v1/regression/resnapshot {name,lang,variant}` — **re-baseline**: overwrite the snapshot
+  from the current replay (accept a deliberate render/align change whose result is good).
+- `DELETE …/fixtures/{name}[/{lang}[/{variant}]]` — cascade delete.
+
+Per-variant actions: **Run replay**, **Accept (re-snapshot)**, **Delete**. "Run all" replays
+sequentially, image by image. Capturing a genuinely new variant (a fresh VLM output) stays on the
+translation-requests surface — it needs the live pipeline, which the admin view deliberately does
+not touch.
 
 ---
 
