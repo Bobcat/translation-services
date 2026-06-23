@@ -3,7 +3,7 @@
 How we turn the manual, one-by-one eyeballing of pipeline output into an automatic
 regression test — without being defeated by the pipeline's non-determinism.
 
-Last updated: 2026-06-22.
+Last updated: 2026-06-23.
 
 ---
 
@@ -170,7 +170,8 @@ align decision, so the snapshot records it: a cell flipping unit↔ignored is a 
   "request_flags": {
     "preserve_heuristic_text": true, "preserve_unchanged_text": false, "use_geometry_columns": true
   },
-  "grouping_model": "…"
+  "grouping_model": "…",
+  "target_lang": "…"
 }
 ```
 Each translation entry stores **both** `translated_text` and `field_translations`: a table-row
@@ -182,6 +183,10 @@ set fed to render, so the replay re-applies `_units_for_preserve_heuristic_text`
 are recorded for **provenance** only: they shaped the (now frozen) translation, so they cannot
 affect a replay that re-runs nothing upstream of render. The fixture stores align *inputs*,
 never the units.
+
+`target_lang` is the render's target language: it places the fixture under
+`<name>/<target_lang>/` and selects the re-OCR recognizer for the snapshot/replay (mapped to the
+PaddleOCR model code, with a Latin fallback for an unsupported code).
 
 **snapshot.json** (the approved expected output)
 ```json
@@ -207,16 +212,20 @@ never the units.
   from an align change is **localised here** (upstream, to the unit/field) rather than only
   surfacing as a pixel diff; a clean align diff + a render diff therefore points at `render.py`
   itself. Any composition / order / label / font / keep-drop change fails, localised to the unit.
-- **Render diff** — re-OCR the replayed render at **cell level** (`merge_lines=False`). Text is
-  compared as a **word multiset** (each segment split on whitespace), so OCR grouping a line into
-  one box vs several ("ah pizza" as one segment vs "ah" + "pizza") never reads as missing/extra.
-  Position is then checked **per segment**: each segment that matches by full normalized text must
-  have its **centroid within 3px**. Same machine and fonts as capture → effectively exact; the 3px
-  absorbs sub-pixel AA. Loosen only if a cross-environment run is ever needed.
+- **Render diff** — re-OCR the replayed render at **cell level** (`merge_lines=False`) and compare
+  **whole segments**. OCR is bit-stable on identical pixels — verified segment-for-segment across
+  the testset (text *and* boxes match exactly on a no-op replay) — so the read-back is exact when
+  nothing changed: every segment must be present with matching normalized text. A change in how the
+  render groups or splits a line ("ah pizza" as one segment vs "ah" + "pizza") therefore **is**
+  caught, not normalised away. Position is then checked **per segment**: each segment that matches
+  by text must have its **centroid within 3px** (same machine and fonts as capture → effectively
+  exact; the 3px absorbs sub-pixel AA). Loosen only if a cross-environment run is ever needed.
 
-A segment whose word-grouping changed has no full-text match and is skipped for the position check
-(its content is already covered by the word multiset); the align diff carries the precise
-structural signal regardless.
+(An earlier version compared a **word** multiset — each segment split on whitespace — to tolerate
+OCR reading a line as one box vs several. That was a workaround for a since-fixed bug where capture
+and replay rendered *different* pixels, the source-divergence the self-contained source removed; on
+identical pixels OCR is deterministic, so the word split was both unnecessary and able to mask a
+real grouping change.)
 
 ---
 
@@ -243,15 +252,24 @@ completed request, so capture re-runs nothing:
 | fixture part | source on the completed request |
 |---|---|
 | cells | `response.ocr.cells` |
-| raw hint | `response.ocr.raw` (`hint_raw`) / `llm_calls` |
+| raw hint | the grouping call's `output_text` in `response.llm_calls` |
 | translations | `response.ocr.translation_units` → per-unit text, keyed by anchor cell |
 | rendered result (for the snapshot re-OCR) | artifact `rendered` |
 | identity | canonical-ingest SHA-256 of the input |
 
+**Capturing a re-translate.** A `retranslate_image` response carries only the *new* translations +
+render — not the OCR `cells`, raw grouping hint or `grouping_model` the replay needs (those live on
+the run that actually did the OCR/grouping). So when the captured request is a re-translate, capture
+walks up `source_request_id` to the run that did the grouping and **grafts** those inputs onto the
+response before freezing; the translations, target language and request flags stay from the
+re-translate. If that source run is no longer in the store, the capture fails with a clear error
+rather than freezing an unreplayable empty fixture (one that would replay to the untranslated
+source).
+
 ### Backend endpoints (translation-services)
 
-1. `GET /v1/regression/status?name=<name>` — `{ name, in_testset, fixture_count, variants:[…] }`,
-   drives the UI badges. A dedicated endpoint rather than a field on every lifecycle response, so
+1. `GET /v1/regression/status?name=<name>` —
+   `{ name, in_testset, fixture_count, langs:{ <lang>: [<variant>, …] } }`, drives the UI badges. A dedicated endpoint rather than a field on every lifecycle response, so
    the hot poll path is untouched.
 2. `POST /v1/regression/testset {request_id, name}` — copies the canonical input into
    `testset/<name>.<ext>`.
@@ -275,7 +293,10 @@ Browses and manages existing fixtures by **replay** (no pipeline). It is a persi
 - `GET /v1/regression/fixtures` — the inventory tree (name → lang → variant + light metadata).
 - `GET …/fixtures/{name}/{lang}/{variant}/{snapshot.png,actual.png,source}` — the rendered images
   and the fixture's own captured source image.
-- `POST /v1/regression/run {name,lang,variant}` — replay + diff one variant → `{passed, diffs}`.
+- `POST /v1/regression/run {name,lang,variant}` — replay + diff one variant →
+  `{passed, diffs, has_actual, timings}`. `timings` is the per-stage replay wall-clock
+  (`group_ms` = parse hint + grouping/align, `render_ms`, `reocr_ms`), shown after the variant in
+  the admin tree; `has_actual` is true when the run wrote an `actual.png` (i.e. it failed).
 - `POST /v1/regression/resnapshot {name,lang,variant}` — **re-baseline**: overwrite the snapshot
   from the current replay (accept a deliberate render/align change whose result is good).
 - `DELETE …/fixtures/{name}[/{lang}[/{variant}]]` — cascade delete.
@@ -289,13 +310,17 @@ not touch.
 
 ## Phased plan
 
+**Status: implemented.** All three steps below shipped; this is the original build plan, kept as
+the record of how it was rolled out. The shipped `replay_fixture` signature is
+`replay_fixture(input_path, fixture) → (actual_units, actual_ignored, rendered_png, timings)`.
+
 **Step 1 — replay + regression run (backend only).** Prove a fixture replays deterministically
 and a diff catches a real change.
 
 - New subpackage `app/regression/`: `fixture.py` (model + load/save), `replay.py`
-  (`replay_fixture(settings, input_path, fixture) → (units, rendered_bytes)`, reusing the
-  existing stage functions and re-applying the `preserve_heuristic_text` filter so the unit set
-  matches), `snapshot.py` (capture + re-OCR), `compare.py` (align + render diff).
+  (`replay_fixture(input_path, fixture)`, reusing the existing stage functions and re-applying the
+  `preserve_heuristic_text` filter so the unit set matches), `snapshot.py` (capture + re-OCR),
+  `compare.py` (align + render diff).
 - `scripts/regress.py` — replay all fixtures, diff, print pass/fail, exit ≠ 0 on failure.
 - `scripts/capture_fixture.py` — `--request-id`: the CLI precursor of the capture endpoint.
 - Acceptance: capture 3 fixtures (a stable image, a bullet list, **and a receipt/menu** so the

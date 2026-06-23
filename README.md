@@ -21,6 +21,7 @@ via PaddleOCR.
 - [Configuration](#configuration)
 - [Development](#development)
 - [Tests](#tests)
+- [Regression Testing](#regression-testing)
 - [Deployment Notes](#deployment-notes)
 - [License](#license)
 
@@ -190,6 +191,84 @@ reachable `llm-pool`.
 `tests/` covers the API surface (`test_api.py`), grouping/alignment
 (`test_grouping.py`), re-placement rendering (`test_replacement.py`), and
 translation routing (`test_translate.py`).
+
+## Regression Testing
+
+The testset grows as new cases are added, and a fix aimed at one image can change
+the grouping, alignment or render of others. Checking every image by hand after
+each change doesn't scale — so it gets skipped, and a regression slips through
+unnoticed.
+
+Automating it isn't as simple as re-rendering and comparing, because the pipeline
+isn't fully deterministic: for the same image, two runs usually agree but can
+differ slightly — a different element alignment, or an equally valid translation.
+A plain re-render would flag that normal variation as a regression.
+
+The fix is to **freeze the non-deterministic stages and re-run the deterministic
+ones:**
+
+- Freeze the grouping **hint** (from the VLM), the OCR **cells**, and the
+  **translations**.
+- Re-run `parse_grouping_output` → `group_cells_into_units` (align) →
+  `render_translated_image` on them.
+
+With the code unchanged, that chain produces the same result every time, so any
+diff is a real code regression. The test pins the code, not the models. It's also
+fast: a replay makes no VLM or translation calls per image.
+
+The render is compared by reading the image back with OCR — **re-OCR** — and
+checking the recognised text and box positions, not the raw pixels. That keeps it
+a *behavioural* check: it compares what the render produced, so it survives a font
+or rendering-library change that a pixel-exact diff would break on. It's reliable
+because OCR is **bit-stable**: identical pixels re-OCR to identical text and boxes,
+so the comparison adds no noise. And it catches real changes — a no-op replay
+passes, a one-line render change (e.g. +2px erase pad) fails, and reverting it
+passes again.
+
+### What it tests
+
+| stage | in a regression run |
+|---|---|
+| VLM grouping hint | **frozen** (raw string) — `hint_parser` still re-runs |
+| OCR cells | **frozen** (OCR is deterministic) |
+| alignment (`grouping/align.py`) | **re-runs** — tested |
+| translation | **frozen** — one approved variant, attached to the re-grouped units |
+| render (`replacement/render.py`) | **re-runs** — tested |
+
+Alignment and render are the deterministic stages where the bugs live; the hint
+parser runs too. Translation *quality* stays frozen, so it's out of scope here.
+
+### How a result is compared
+
+- **Alignment** — compared exactly, field by field: each unit's ordered cells,
+  which cells were ignored, and the render-relevant fields the aligner sets
+  (per-member translate flag, font family/weight, level, alignment). A failure
+  points at the exact unit and field.
+- **Render** — the re-OCR of the replayed image is checked two ways:
+    - **text** — every segment must be present with matching text. OCR is exact
+      on identical pixels, so a change in how a line is split or grouped is caught.
+    - **position** — each matched segment must land within **3px**.
+
+  Same machine and fonts make this effectively exact; the 3px only absorbs
+  sub-pixel anti-aliasing.
+
+### Approve and replay
+
+A fixture freezes the exact result you approved in the workbench. After that:
+
+- **Replay** one fixture or all of them; each gets a pass/fail against its
+  snapshot, with per-stage timings (align, render, re-OCR).
+- **Re-baseline** when a change to align or render is intended and correct.
+
+Each fixture carries its own source image, so a replay never drifts against an
+external file. Fixtures are organised per target language, and a language can hold
+several variants (`v1`, `v2`, …) — each freezing a different valid hint or
+translation, which aligns and renders differently. They're curated cases, not a
+growing accept-set.
+
+Full design — freeze boundary, schema, comparison rules, the measured variance
+study and the regression API endpoints:
+**[docs/regression-test-design.md](docs/regression-test-design.md)**.
 
 ## Deployment Notes
 
