@@ -43,22 +43,27 @@ class GroupingHint:
     bullet_markers: list[str | None] = field(default_factory=list)
 
 
-# The prompt asks for a wrapped label, but serving non-determinism makes the model vary the wrapper
-# and drop the importance code from run to run. Match four shapes so a dropped wrapper/code never
-# leaks the label into the text: a "**label**", a "*label:*" (single-star, colon required inside —
-# so a stray "*emphasis*" in the text is not mistaken for a label), a bare "t|...:" (the importance
-# code + fields), or a "fmt" typography label whose importance code was dropped ("|Roboto|16pt|400|
+# The prompt asks for a wrapped label, but serving non-determinism (and other model families) makes
+# the model vary the wrapper and drop the importance code from run to run. Match four shapes so a
+# dropped wrapper/code never leaks the label into the text: a "**label**", a "*label:*" (single
+# wrapper char, colon required inside — so a stray "*emphasis*" in the text is not mistaken for a
+# label; the opening char may be "*" OR "|", since some models — e.g. Qwen — open with "|"), a bare
+# "t|...:" importance code + fields (the code may be a single letter t/h/b/m OR spelled out —
+# "title|"/"header|"/"body|"/"metadata|" — since the model sometimes writes the word the prompt
+# names instead of the letter), or a "fmt" typography label whose importance code was dropped ("|Roboto|16pt|400|
 # l:") — anchored on a "|<digits>pt|" field so an ordinary "word | value" row is never one. A
-# stray surrounding "'" (some prompts quote the template) is tolerated. The bare/fmt field runs
+# a stray "'" from a quoted template is tolerated both before the label and right after the colon
+# ("'t|..c:' text"); a model that wraps the WHOLE "'label:text'" line in one quote pair is unwrapped
+# earlier, in parse_grouping_output (both quote habits occur run to run). The bare/fmt field runs
 # stop at "@" so a colon-less bullet line ("...|l|@bullet|item") keeps its item in the text
 # (handled by _BULLET_SENTINEL) instead of swallowing it into the label.
 _LABELED_LINE = re.compile(
     r"^\s*'?\s*(?:"
     r"\*\*(?P<st>(?:(?!\*\*).)+?)\*\*"
-    r"|\*(?P<si>[^*\n]+?):\s*\*"
-    r"|(?P<bare>[thbm]\s*\|[^:\[\]\n@]*)"
+    r"|[*|](?P<si>[^*\n]+?):\s*\*"
+    r"|(?P<bare>(?:title|header|body|metadata|footer|[thbm])\s*\|[^:\[\]\n@]*)"
     r"|(?P<fmt>\|\s*[^:|\[\]\n]*\|\s*\d{1,3}\s*pt\s*\|[^:\[\]\n@]*)"
-    r")\s*'?\s*:?\s*\**\s*(?P<rest>.*)$",
+    r")\s*'?\s*:?\s*'?\s*\**\s*(?P<rest>.*)$",
     re.IGNORECASE,
 )
 
@@ -146,6 +151,12 @@ def parse_grouping_output(output_text: str) -> GroupingHint:
         if not line or _is_separator(line):
             close_block()
             continue
+        # Some models (e.g. Qwen) take the OUTPUT FORMAT's quoted "'label:text'" example literally and
+        # wrap the WHOLE line in one quote pair, every line. Unwrap a single matched outer pair so the
+        # closing quote can't leak into the text (and the leading one out of the label). Only when both
+        # ends match, so a real trailing apostrophe on an unquoted line is left alone.
+        if len(line) >= 2 and line[0] == line[-1] == "'":
+            line = line[1:-1].strip()
         if line.lower().lstrip("*' ").startswith("image classification"):
             if not category and ":" in line:
                 category = line.split(":", 1)[1].strip().strip("*'").strip()
