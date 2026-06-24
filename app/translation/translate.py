@@ -123,7 +123,9 @@ def translate_units(
     # and map each translated line back to its unit by hint index, so a multi-line unit
     # keeps full-sentence context (e.g. "THE SHOE WORKS IF YOU DO." is not split). Falls
     # back to the numbered-list batch when no hint is available or the structure is not preserved.
-    batched = decision.translator_mode != "translategemma" and len(translatable) > 1
+    # translategemma can batch too (one ###-window call, structure preserved), so it no longer goes
+    # per-unit — only the count gate applies.
+    batched = len(translatable) > 1
     batch: dict[int, str] = {}
     batch_fields: dict[int, list[tuple[str, str]]] = {}
     if batched:
@@ -138,11 +140,14 @@ def translate_units(
                 target_lang_code=target_lang_code,
                 category=category,
                 prompt=prompt or BUILTIN_PROMPTS[IMAGE_DEFAULT_ID],
+                translator_mode=decision.translator_mode,
                 call_log=call_log,
                 preserve_heuristic_text=preserve_heuristic_text,
                 preserve_unchanged_text=preserve_unchanged_text,
             )
-        if not batch:
+        # The numbered-list batch is instruction-based — not for translategemma; if its structured
+        # call did not preserve the structure, fall through to the per-unit translategemma path.
+        if not batch and decision.translator_mode != "translategemma":
             batch = _translate_batch(
                 settings=settings,
                 model=decision.translator_model,
@@ -355,6 +360,17 @@ def _batch_system_prompt(target_lang_code: str, category: str = "") -> str:
     )
 
 
+# Prepended to the ###-joined source when routing translategemma in the structured (batched) path.
+# The template alone takes only source/target codes; this preamble gives the per-segment multilingual
+# guidance, and was validated to translate the whole window cleanly while keeping the ### structure.
+_TRANSLATEGEMMA_PREAMBLE = (
+    "You must translate the text from an image of catgory: **{category}** The source language may "
+    "vary throughout the text. Identify the source language of each sentence or segment and translate "
+    "all translatable content into the target language. Keep proper names (places, brands). Output "
+    "ONLY the translation."
+)
+
+
 def _translate_structured(
     *,
     settings: AppSettings,
@@ -366,6 +382,7 @@ def _translate_structured(
     target_lang_code: str,
     category: str,
     prompt: PromptEntry,
+    translator_mode: str = "",
     call_log: list[dict[str, Any]] | None = None,
     preserve_heuristic_text: bool = True,
     preserve_unchanged_text: bool = False,
@@ -389,19 +406,36 @@ def _translate_structured(
     if leftovers:
         source_blocks = source_blocks + [[text for _unit_id, text in leftovers]]
     source_window = "\n###\n".join("\n".join(block) for block in source_blocks)
-    variables = {
-        "source_window": source_window,
-        "source_lang": _lang_name(source_lang_code),
-        "target_lang": _lang_name(target_lang_code),
-        "category": str(category or "").strip() or "unknown",
-    }
-    payload: dict[str, Any] = {
-        "model": model,
-        "input": render_template(prompt.user, variables),
-        "instructions": render_template(prompt.system, variables),
-        "stream": False,
-        "decoding": {"top_k": 1, "top_p": 1, "temperature": 0.0, "repetition_penalty": 1.0, "max_tokens": 4096},
-    }
+    decoding = {"top_k": 1, "top_p": 1, "temperature": 0.0, "repetition_penalty": 1.0, "max_tokens": 4096}
+    if str(translator_mode or "").strip().lower() == "translategemma":
+        # translategemma_template: source text in `input` + source/target codes, NO `instructions`.
+        # It CAN translate the whole ###-joined window in one call (keeps the ### structure), so the
+        # batched/structured path applies here too — no per-unit calls. The preamble gives the
+        # per-segment multilingual guidance the bare template lacks.
+        preamble = _TRANSLATEGEMMA_PREAMBLE.format(category=str(category or "").strip() or "unknown")
+        payload: dict[str, Any] = {
+            "model": model,
+            "input": f"{preamble}\n\n\n{source_window}",
+            "source_lang_code": source_lang_code,
+            "target_lang_code": target_lang_code,
+            "stream": False,
+            "decoding": decoding,
+        }
+    else:
+        variables = {
+            "source_window": source_window,
+            "source_lang": _lang_name(source_lang_code),
+            "target_lang": _lang_name(target_lang_code),
+            "category": str(category or "").strip() or "unknown",
+            "category_instructions": _category_instructions(category),
+        }
+        payload = {
+            "model": model,
+            "input": render_template(prompt.user, variables),
+            "instructions": render_template(prompt.system, variables),
+            "stream": False,
+            "decoding": decoding,
+        }
     url = f"{settings.llm_pool.base_url}{_RESPONSES_PATH}"
     try:
         response = httpx.post(url, json=payload, timeout=settings.llm_pool.request_timeout_s)
@@ -513,11 +547,6 @@ def _parse_blocks(text: str) -> list[list[str]]:
         if not seen_category and line.lower().startswith("category:"):
             seen_category = True
             continue
-        # A prompt may prepend a reasoning preamble (e.g. "Number source languages detected: N")
-        # to focus the model before the units; drop it when it leads the output so it doesn't glue
-        # onto the first block. No-op for prompts that don't emit it.
-        if not blocks and not current and line.lower().startswith("number source languages"):
-            continue
         compact = line.replace(" ", "")
         if len(compact) >= 3 and set(compact) <= {"#", "-", "=", "*", ":"}:  # separator -> block break
             if current:
@@ -618,3 +647,20 @@ def _field_text_key(value: str) -> str:
 def _lang_name(code: str) -> str:
     normalized = str(code or "").strip().lower()
     return _LANG_NAMES.get(normalized, normalized or "the target language")
+
+
+# Extra, category-specific guidance injected into the prompt's ``{{category_instructions}}`` slot.
+# The category is the VLM's free-text classification (e.g. "restaurant menu", "Restaurant menu page"),
+# so match on a discriminating keyword, not an exact string. First matching rule wins; add rules here
+# as categories need them.
+_CATEGORY_RULES: tuple[tuple[str, str], ...] = ()  # empty for now — no category hint; add rules later
+
+
+def _category_instructions(category: str) -> str:
+    """An extra instruction line for the VLM's free-text ``category``, injected into the prompt's
+    ``{{category_instructions}}`` slot, or ``""`` when no rule matches. Injected as a plain line in
+    the prompt flow (no ``# Additional instructions`` heading — a markdown section measurably lowered
+    translation reliability), so an empty result leaves the core prompt exactly as-is."""
+    cat = str(category or "").strip().lower()
+    body = next((text for keyword, text in _CATEGORY_RULES if keyword in cat), "")
+    return f"{body}\n" if body else ""
