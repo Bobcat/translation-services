@@ -4,7 +4,7 @@ Per-image findings from running the pipeline on `testset/` screenshots: what goe
 the diagnosed cause, and whether it is fixed or parked. Each entry names the test image so a
 fix can be re-checked against it.
 
-Last updated: 2026-06-20.
+Last updated: 2026-06-24.
 
 ---
 
@@ -201,6 +201,73 @@ covering the original text extent (+pad). A speech bubble is rounded with an out
 the text; when the translation is much shorter (e.g. "Hoedje van papier?" -> "Paper hat?"), the
 wide erase wipes the bubble's right rounded border and spills a little onto the photo. A clean fix
 needs the bubble shape (erase within the rounded outline / inpaint), so it is parked.
+
+
+## `danger-1.jpg` / `danger-2.jpg` (multilingual warning + info signs, photos, →nl/zh/en)
+
+These signs repeat the **same** message in several languages on one line/region
+(`HÆTTA! DANGER!`, `GEFAHR! 危险`). It is a hard class — off-the-shelf translation tools garble
+them more than we do. Two distinct problems, addressed differently.
+
+### Fixed — translation prompt: translate every language, including repeats
+
+- **Symptom.** On a line carrying the same word in two+ languages the model translated one and left
+  the rest (`HÆTTA! DANGER!` → `GEVAAR! DANGER!`; `GEFAHR! 危险` → `GEVAAR! 危险`).
+- **Diagnosis.** Recognition and the translation **input** are reliably correct; the variance is the
+  translation **output** (vLLM serving non-determinism) and it is **prompt-driven**. The `###` block
+  structure is preserved run to run — this is **not** cross-talk / block misalignment. The model
+  just won't repeat the same target word, so it keeps the other-language copy.
+- **Findings** (≈20 runs per candidate on a danger-2 input, scored "no source word left"):
+  - a "count the source languages first" output-format prompt: **0/20** (always leaves DANGER + 危险);
+  - reliable (**~18/20**): **flat prose**, lead *"Translate every word … even words already in
+    another language"* plus an explicit *"translate each occurrence even if it produces the same word
+    twice"* **with a concrete example**. The concrete example is **load-bearing**; an abstract one
+    ("three words meaning 'welcome' → that word three times") works as well as a sign-specific one,
+    so no curve-fit is needed;
+  - putting that same rule inside a `# ROLE / # TASK / # INSTRUCTIONS` structure or a numbered list
+    **breaks it** (0–4/18) — the markdown sectioning itself, not the wording. The core rule must stay
+    in the flat lead.
+  - **Measurement note:** compare candidates **interleaved** (A,B,C,A,B,C…), never in blocks —
+    serving load is a large confound (the same prompt scored 0/20 then 12/16 in separate blocks).
+- **Change.** The prompt (`data/prompts/translate_image_default/`, mirrored in the builtin in
+  `app/translation/prompts/templates.py`) keeps the multilingual rule in the flat lead and appends a
+  `{{category_instructions}}` slot — a section that materialises **only when populated** (an empty
+  section measurably lowers reliability) — as the seam for later category-specific instructions
+  (`_category_instructions()` in `app/translation/translate.py`, empty map for now). No-regression
+  verified: 0 output diffs across the testset inputs × nl/zh/en (monolingual images unchanged).
+
+### Open / parked — leftover doubling, and the VLM↔OCR-text strategy
+
+- **Symptom.** A hint line the VLM read correctly is **split** because one OCR cell does not bind:
+  the orphan becomes a leftover, is translated and rendered **separately**, and its translation shows
+  up a second time over the same line (`HÆTTA` → a second "GEVAAR!"; `Local soup` → a second
+  "Lokaal").
+- **Two causes.** (1) **`æ`** — NFKD does not fold `æ→ae`, so the `[a-z0-9]` tokenizer splits
+  `HÆTTA`→`{h, tta}`; OCR's `HAETTA` (=`haetta`) matches neither → leftover. (2) **`Local`** is a
+  confident exact match to `Local soup` but `align._pick_hint`'s position guard rejects it (the
+  y-based position estimate is unreliable in the horizontal menu-icon row).
+- **Why the easy fixes are wrong.**
+  - A **global `æ`-fold in `tokens._normalize` breaks `danger-1`**: it turns the hint token into a
+    clean `haetta`, and `danger-1`'s **misread** `HATTA`→`hatta` then fuzzy-matches it (ratio 0.90)
+    → binds to the title. The `æ`-split currently **shields** `danger-1` (fragments too short to
+    fuzzy-match). The two photos read the same glyph differently — `danger-2` expands `æ`→`ae`,
+    `danger-1` drops it to `a` — so no single normalization catches both.
+  - A **position-guard skip for confident-single cells breaks `kassabon` / `adv-budgets`** (the
+    guard is load-bearing for dense receipts/lists).
+  - **Tooling note:** verify these with the real regression harness (`run_variant` + re-OCR on all
+    fixtures); a hand-rolled cell-id signature missed the `hint_index` leftover→title flip that
+    `run_variant` caught. OCR params are not a lever either — raising `text_det_limit_side_len` did
+    not change the `æ` reading (stable per photo) and regressed `FJARAN`→`EJARAN`.
+- **Designed, not built.** The discriminator is **exact-vs-fuzzy**: normalize the hint for the
+  **exact** match (`danger-2` `HAETTA` binds exact, score 1.0) but keep the **fuzzy** fallback on the
+  **original** `{h, tta}` tokens (`danger-1` `hatta` reaches a line only via fuzzy → still fails →
+  stays leftover). Alternative: a **spatial gate** — bind an orphan only when it is adjacent to an
+  already-bound cell of that VLM line (`danger-1`'s lone heading has none). Both are
+  `danger-1`-safe by construction.
+- **Parked (by agreement).** Leave as-is for now (quality already ahead of off-the-shelf translators
+  on these signs). Design the general approach once we have **several hard-language signs where the
+  VLM text and the OCR text diverge** (`æ/œ/ß/ø/þ/ð` — Icelandic/Danish/Norwegian/German/French),
+  then lean on the VLM (which reads these correctly) to repair OCR-misread leftovers.
 
 
 ## Parked: VLM serving non-determinism (after the `*…:*` prompt lock-in)
