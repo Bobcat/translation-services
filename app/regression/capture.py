@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from app.core.config import OcrSettings
+from app.grouping.hint_parser import parse_grouping_output
 from app.regression import fixture as fx
 from app.regression.snapshot import build_snapshot
 
@@ -107,9 +108,33 @@ def _next_variant(lang_dir: Path) -> str:
 
 
 def _fixture_key(fixture: fx.Fixture) -> str:
-    """A content hash of the fixture's frozen inputs. The snapshot is a deterministic function of
-    these, so equal keys mean a true duplicate — no need to hash the (re-OCR-derived) snapshot."""
-    return fx.sha256(json.dumps(fixture.to_dict(), sort_keys=True, ensure_ascii=False).encode("utf-8"))
+    """A content hash of what the deterministic replay actually consumes — so equal keys mean a true
+    duplicate (same align+render+re-OCR), even when the raw VLM wording differs run to run.
+
+    Hash the PARSED hint, not the raw string: replay re-runs ``parse_grouping_output(raw_hint)``, so
+    only the parse result drives the test. The raw string wobbles cosmetically every run (whitespace,
+    label formatting, the parsed-off font-size, the free-text ``category``) without changing the
+    outcome — hashing it made every capture look unique. Cells + the parsed hint's render-relevant
+    fields (units/levels/blocks/alignment/font family+weight/bullets) + the frozen translations are
+    the real identity; ``category`` and font-size are excluded (not used by align/render at replay)."""
+    hint = parse_grouping_output(fixture.raw_hint)
+    identity = {
+        "units": hint.units,
+        "levels": hint.levels,
+        "block_ids": hint.block_ids,
+        "alignments": hint.alignments,
+        "font_families": hint.font_families,
+        "font_weights": hint.font_weights,
+        "bullets": hint.bullets,
+        "bullet_markers": hint.bullet_markers,
+        "cells": fixture.cells,
+        "hint_translations": fixture.hint_translations,
+        "leftover_translations": fixture.leftover_translations,
+        "preserve_heuristic_text": fixture.preserve_heuristic_text,
+        "grouping_model": fixture.grouping_model,
+        "target_lang": fixture.target_lang,
+    }
+    return fx.sha256(json.dumps(identity, sort_keys=True, ensure_ascii=False).encode("utf-8"))
 
 
 def _find_duplicate(lang_dir: Path, key: str) -> str | None:
@@ -139,6 +164,7 @@ def capture(
     source_suffix: str,
     name: str,
     variant: str | None = None,
+    allow_duplicate: bool = False,
     regression_root: Path = REGRESSION_ROOT,
 ) -> dict[str, Any]:
     """Build and persist a self-contained fixture under ``<name>/<target_lang>/<variant>``: the
@@ -148,9 +174,10 @@ def capture(
     fixture = build_fixture(response, source_bytes=source_bytes)
     lang = fixture.target_lang or "unknown"
     lang_dir = regression_root / name / lang
-    # Auto-capture skips a true duplicate (same frozen inputs) — and the check runs before the
-    # re-OCR, so it costs nothing. An explicit ``variant`` forces a (re-)write.
-    if variant is None:
+    # A capture that replays identically to an existing variant is flagged as a duplicate (the check
+    # runs before the re-OCR, so it costs nothing) — the caller then decides whether to add it anyway.
+    # ``allow_duplicate`` forces the add; an explicit ``variant`` forces a (re-)write.
+    if variant is None and not allow_duplicate:
         duplicate = _find_duplicate(lang_dir, _fixture_key(fixture))
         if duplicate is not None:
             return {
@@ -159,6 +186,11 @@ def capture(
                 "target_lang": lang,
                 "variant": duplicate,
                 "duplicate": True,
+                "reason": (
+                    f"Replays identically to {lang}/{duplicate}: same OCR cells, parsed grouping "
+                    f"structure (levels / alignment / font / blocks) and translations. The raw VLM "
+                    f"wording differs but is re-parsed the same, so it would test nothing new."
+                ),
             }
     resolved_variant = variant or _next_variant(lang_dir)
     ocr = response.get("ocr") or {}

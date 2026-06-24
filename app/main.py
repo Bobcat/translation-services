@@ -256,6 +256,7 @@ def create_app(settings_path: str | Path | None = None) -> FastAPI:
         request_id = str(body.get("request_id") or "").strip()
         name = str(body.get("name") or "").strip()
         variant = str(body.get("variant") or "").strip() or None
+        allow_duplicate = bool(body.get("allow_duplicate"))
         if not request_id or not name:
             return _error(400, code="REGRESSION_BAD_REQUEST", message="request_id and name are required", retryable=False)
         status_code, lifecycle = await runtime.get_request(request_id)
@@ -302,7 +303,7 @@ def create_app(settings_path: str | Path | None = None) -> FastAPI:
             lambda: regression_capture.capture(
                 settings.ocr, response=response, rendered_png=rendered,
                 source_bytes=source_path.read_bytes(), source_suffix=source_path.suffix or ".png",
-                name=name, variant=variant,
+                name=name, variant=variant, allow_duplicate=allow_duplicate,
             )
         )
         return JSONResponse(status_code=200, content={**out, **regression_capture.status(name)})
