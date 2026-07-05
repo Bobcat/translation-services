@@ -5,6 +5,8 @@ from app.grouping.units import TranslationUnit
 from app.grouping.units import UnitMember
 from app.tasks.translate_image import _units_for_preserve_heuristic_text
 from app.translation import translate as translate_module
+from app.translation.prompts import PromptEntry
+from app.translation.translate import _parse_blocks
 from app.translation.translate import translate_units
 
 
@@ -126,7 +128,7 @@ def test_noise_unit_is_skipped_without_a_call(monkeypatch) -> None:
     assert out[0].translated_text == ""
     assert out[1].translated_text == "danger"
     assert len(calls) == 1  # only the CJK unit was sent
-    assert calls[0]["input"] == "危險"
+    assert "危險" in calls[0]["input"]  # rendered into the resolved prompt's user template
 
 
 def test_structured_translation_carries_leftovers_as_extra_block(monkeypatch) -> None:
@@ -208,15 +210,17 @@ def test_translatable_segment_drops_price_tax_but_keeps_url_sentences() -> None:
     assert translate_module._translatable_segment("Stop nu! Kijk op www.ikstopnu.nl") == "Stop nu! Kijk op www.ikstopnu.nl"
 
 
-def test_hinted_unit_missing_from_batch_is_skipped_without_per_unit_fallback(monkeypatch) -> None:
-    # If the structured output changes one block's line count, that hinted unit is missing. Do not
-    # send its OCR-source text to a per-unit fallback prompt; for hinted image text the VLM line was
-    # the cleaner source of truth.
+def test_hinted_unit_missing_from_batch_falls_back_per_hint_line(monkeypatch) -> None:
+    # If the structured output changes one block's line count, that hinted unit is missing from
+    # the batch. It falls back to ONE call for its clean VLM hint line (never its OCR-source
+    # fragment — the VLM line is the cleaner source of truth), mapped like the structured path.
     calls: list[dict] = []
 
     def fake_post(url, json, timeout):  # noqa: A002
         calls.append(json)
-        return _FakeResponse({"output_text": "Cardholder\n###\nextra\nline"})
+        if len(calls) == 1:  # structured: block 0 ok, block 1 wobbled (2 lines for 1)
+            return _FakeResponse({"output_text": "Cardholder\n###\nextra\nline"})
+        return _FakeResponse({"output_text": "clean translated line"})
 
     monkeypatch.setattr(translate_module.httpx, "post", fake_post)
 
@@ -231,10 +235,11 @@ def test_hinted_unit_missing_from_batch_is_skipped_without_per_unit_fallback(mon
         hint_block_ids=[0, 1],
     )
 
-    assert len(calls) == 1
+    assert len(calls) == 2  # structured + one hint-line call
+    assert "clean VLM text" in calls[1]["input"]  # the VLM line, not "garbled ocr text"
     assert out[0].translated_text == "Cardholder"
-    assert out[1].translated_text == ""
-    assert out[1].translation_route == "skipped_hinted_missing"
+    assert out[1].translated_text == "clean translated line"
+    assert out[1].translation_route.endswith("_hint_line_fallback")
 
 
 def test_structured_table_row_keeps_text_fields_and_drops_numeric_fields(monkeypatch) -> None:
@@ -444,11 +449,13 @@ def test_generic_mode_uses_target_only_instructions(monkeypatch) -> None:
     )
 
     payload = captured[0]
-    # generic: an instructions prompt naming the target only, no language-code fields
+    # generic: an instructions prompt naming the target only, no language-code fields.
+    # A single unit translates under the RESOLVED prompt (the same one the structured path
+    # uses), so its text arrives rendered into that prompt's user template.
     assert "into Dutch" in payload["instructions"]
     assert "English" not in payload["instructions"]  # source must NOT be in the prompt
     assert "source_lang_code" not in payload
-    assert payload["input"] == "The shoe works if you do."
+    assert "The shoe works if you do." in payload["input"]
 
 
 def test_generic_mode_names_client_target_languages_in_instructions(monkeypatch) -> None:
@@ -514,3 +521,274 @@ def test_generic_mode_names_client_target_languages_in_instructions(monkeypatch)
 
         assert f"into {target_name}" in payloads[0]["instructions"]
         assert f"into {target_code}" not in payloads[0]["instructions"]
+
+
+def test_custom_prompt_reaches_a_single_unit_translation(monkeypatch) -> None:
+    # A one-unit image bypasses the structured path, but the caller's prompt (custom or
+    # default) must still reach the model — a prompt A/B on a one-line sign was a silent no-op.
+    captured: list[dict] = []
+
+    def fake_post(url, json, timeout):  # noqa: A002
+        captured.append(json)
+        return _FakeResponse({"output_text": "x"})
+
+    monkeypatch.setattr(translate_module.httpx, "post", fake_post)
+    prompt = PromptEntry(
+        id="custom",
+        system="Fit the footprint. Translate into {{target_lang}}.",
+        user="{{source_window}}",
+    )
+    translate_units(
+        settings=AppSettings(),
+        units=[_unit(1, "PUSH")],
+        source_lang_code="en",
+        target_lang_code="nl",
+        translator_model="gemma",
+        translator_mode="generic",
+        prompt=prompt,
+    )
+
+    assert captured[0]["instructions"].startswith("Fit the footprint.")
+    assert captured[0]["input"] == "PUSH"
+
+
+def test_renumbered_batch_reply_is_rejected_not_misassigned(monkeypatch) -> None:
+    # A 0-based numbered reply would map item "1." — the SECOND source's translation — onto
+    # unit 1: wrong text in place. Reject the reply; the per-unit fallback then translates.
+    calls: list[dict] = []
+
+    def fake_post(url, json, timeout):  # noqa: A002
+        calls.append(json)
+        if len(calls) == 1:  # the numbered batch call: a renumbered (0-based) reply
+            return _FakeResponse({"output_text": "0. EEN\n1. TWEE"})
+        return _FakeResponse({"output_text": f"OK{len(calls)}"})
+
+    monkeypatch.setattr(translate_module.httpx, "post", fake_post)
+    out = translate_units(
+        settings=AppSettings(),
+        units=[_unit(1, "eerste regel"), _unit(2, "tweede regel")],
+        source_lang_code="nl",
+        target_lang_code="en",
+        translator_model="gemma",
+        translator_mode="generic",
+    )
+
+    assert [item.translated_text for item in out] == ["OK2", "OK3"]
+    assert all(item.translation_route.endswith("_batch_fallback") for item in out)
+
+
+def test_failed_fallback_call_degrades_one_unit_not_the_request(monkeypatch) -> None:
+    # One transient HTTP failure on a per-unit fallback must not discard the whole request:
+    # that unit degrades to untranslated (with a route saying why), the rest keeps its result,
+    # and the failed call is recorded in the call log.
+    calls: list[dict] = []
+
+    def fake_post(url, json, timeout):  # noqa: A002
+        calls.append(json)
+        if len(calls) == 1:  # numbered batch: unusable reply -> rejected
+            return _FakeResponse({"output_text": "no numbers here"})
+        if len(calls) == 2:  # first per-unit fallback dies
+            raise translate_module.httpx.ConnectError("boom")
+        return _FakeResponse({"output_text": "OK"})
+
+    monkeypatch.setattr(translate_module.httpx, "post", fake_post)
+    call_log: list[dict] = []
+    out = translate_units(
+        settings=AppSettings(),
+        units=[_unit(1, "eerste regel"), _unit(2, "tweede regel")],
+        source_lang_code="nl",
+        target_lang_code="en",
+        translator_model="gemma",
+        translator_mode="generic",
+        call_log=call_log,
+    )
+
+    assert out[0].translated_text == ""
+    assert out[0].translation_route.endswith("_batch_fallback_failed")
+    assert out[1].translated_text == "OK"
+    assert any("error" in entry for entry in call_log)  # the failed call is in llm_calls
+
+
+def test_parse_blocks_keeps_amount_sign_and_ignores_rule_decoration() -> None:
+    # "-25% KORTING": the '-' is the sign, not a bullet. A ---/=== line is decoration and must
+    # not break a block (only the prompt's '###' separator does), or the block counts shift and
+    # a good structured reply is discarded.
+    out = _parse_blocks("-25% KORTING\n---\nvolgende regel\n###\nblok twee")
+    assert out == [["-25% KORTING", "volgende regel"], ["blok twee"]]
+
+
+def test_translategemma_structured_failure_falls_back_per_hint_line(monkeypatch) -> None:
+    # translategemma has no numbered-list fallback; when its one structured window does not
+    # preserve the block structure, every hinted unit must still translate — one call per hint
+    # line (with the language codes, no instructions), not an empty document.
+    calls: list[dict] = []
+
+    def fake_post(url, json, timeout):  # noqa: A002
+        calls.append(json)
+        if len(calls) == 1:  # structured window: one block too many -> rejected
+            return _FakeResponse({"output_text": "extra\n###\nA\n###\nB"})
+        return _FakeResponse({"output_text": f"LINE{len(calls)}"})
+
+    monkeypatch.setattr(translate_module.httpx, "post", fake_post)
+
+    out = translate_units(
+        settings=AppSettings(),
+        units=[_unit(1, "eerste ocr", hint_index=0), _unit(2, "tweede ocr", hint_index=1)],
+        source_lang_code="nl",
+        target_lang_code="en",
+        translator_model="translategemma",
+        translator_mode="translategemma",
+        hint_units=["eerste regel", "tweede regel"],
+        hint_block_ids=[0, 1],
+    )
+
+    assert len(calls) == 3  # structured + one per hint line
+    assert calls[1]["input"] == "eerste regel"
+    assert "source_lang_code" in calls[1] and "instructions" not in calls[1]
+    assert [item.translated_text for item in out] == ["LINE2", "LINE3"]
+    assert all(item.translation_route.endswith("_hint_line_fallback") for item in out)
+
+
+def test_units_sharing_a_hint_line_share_one_fallback_call(monkeypatch) -> None:
+    # Two units bound to the same hint line (a kept '|' field split) must cost ONE line call,
+    # and both map from the same translated line.
+    calls: list[dict] = []
+
+    def fake_post(url, json, timeout):  # noqa: A002
+        calls.append(json)
+        if len(calls) == 1:
+            return _FakeResponse({"output_text": "wrong\n###\nblock\n###\ncount"})
+        return _FakeResponse({"output_text": "vertaalde regel"})
+
+    monkeypatch.setattr(translate_module.httpx, "post", fake_post)
+
+    out = translate_units(
+        settings=AppSettings(),
+        units=[_unit(1, "veld a", hint_index=0), _unit(2, "veld b", hint_index=0)],
+        source_lang_code="nl",
+        target_lang_code="en",
+        translator_model="translategemma",
+        translator_mode="translategemma",
+        hint_units=["veld a en veld b samen"],
+        hint_block_ids=[0],
+    )
+
+    assert len(calls) == 2  # structured + ONE shared line call
+    assert [item.translated_text for item in out] == ["vertaalde regel", "vertaalde regel"]
+
+
+def test_failed_hint_line_call_degrades_to_skipped(monkeypatch) -> None:
+    # A dead llm-pool during the line fallback keeps the old behaviour: the unit stays
+    # untranslated (original pixels), the request does not fail, the failure is logged.
+    calls: list[dict] = []
+
+    def fake_post(url, json, timeout):  # noqa: A002
+        calls.append(json)
+        if len(calls) == 1:
+            return _FakeResponse({"output_text": "wrong\n###\nblock\n###\ncount"})
+        raise translate_module.httpx.ConnectError("boom")
+
+    monkeypatch.setattr(translate_module.httpx, "post", fake_post)
+
+    call_log: list[dict] = []
+    out = translate_units(
+        settings=AppSettings(),
+        units=[_unit(1, "eerste ocr", hint_index=0), _unit(2, "tweede ocr", hint_index=0)],
+        source_lang_code="nl",
+        target_lang_code="en",
+        translator_model="translategemma",
+        translator_mode="translategemma",
+        hint_units=["een gedeelde regel"],
+        hint_block_ids=[0],
+        call_log=call_log,
+    )
+
+    assert len(calls) == 2  # the failed line call is not retried for the second unit
+    assert [item.translated_text for item in out] == ["", ""]
+    assert all(item.translation_route == "skipped_hinted_missing" for item in out)
+    assert any("error" in entry for entry in call_log)
+
+
+def test_generic_structured_failure_prefers_hint_line_fallback_over_numbered(monkeypatch) -> None:
+    # With hints present, a failed structured call must NOT detour through the numbered batch:
+    # its items are OCR fragments, and it succeeding would shadow the better per-hint-line
+    # fallback. The numbered batch stays reserved for documents with no usable hint at all.
+    calls: list[dict] = []
+
+    def fake_post(url, json, timeout):  # noqa: A002
+        calls.append(json)
+        if len(calls) == 1:  # structured: wrong block count -> rejected
+            return _FakeResponse({"output_text": "wrong\n###\nblock\n###\ncount"})
+        return _FakeResponse({"output_text": f"LINE{len(calls)}"})
+
+    monkeypatch.setattr(translate_module.httpx, "post", fake_post)
+
+    out = translate_units(
+        settings=AppSettings(),
+        units=[_unit(1, "een ocr fragment", hint_index=0), _unit(2, "twee ocr fragment", hint_index=1)],
+        source_lang_code="nl",
+        target_lang_code="en",
+        translator_model="gemma",
+        translator_mode="generic",
+        hint_units=["schone regel een", "schone regel twee"],
+        hint_block_ids=[0, 1],
+    )
+
+    assert len(calls) == 3  # structured + one per hint line; NO numbered batch
+    assert "schone regel een" in calls[1]["input"]
+    assert "1." not in calls[1]["input"]  # not a numbered list
+    assert [item.translated_text for item in out] == ["LINE2", "LINE3"]
+    assert all(item.translation_route.endswith("_hint_line_fallback") for item in out)
+
+
+def test_translation_calls_pin_allow_remote_off(monkeypatch) -> None:
+    # Document TEXT must never route to a remote backend — every translation payload pins
+    # allow_remote off, matching the grouping VLM call (belt and braces over the pool default).
+    calls: list[dict] = []
+
+    def fake_post(url, json, timeout):  # noqa: A002
+        calls.append(json)
+        return _FakeResponse({"output_text": "x\n###\ny"})
+
+    monkeypatch.setattr(translate_module.httpx, "post", fake_post)
+    translate_units(
+        settings=AppSettings(),
+        units=[_unit(1, "een", hint_index=0), _unit(2, "twee", hint_index=1)],
+        source_lang_code="nl",
+        target_lang_code="en",
+        translator_model="gemma",
+        translator_mode="generic",
+        hint_units=["een regel", "twee regel"],
+        hint_block_ids=[0, 1],
+    )
+    assert calls and all(payload["allow_remote"] is False for payload in calls)
+
+
+def test_truncated_structured_reply_is_rejected_not_mapped(monkeypatch) -> None:
+    # The pool envelope has no finish_reason; output tokens hitting the decoding cap is the
+    # truncation signal. A truncated window lost its tail — mapping it would leave tail units
+    # silently untranslated, so it must go to the per-hint-line fallback instead.
+    calls: list[dict] = []
+
+    def fake_post(url, json, timeout):  # noqa: A002
+        calls.append(json)
+        if len(calls) == 1:  # structured reply: RIGHT shape, but flagged as capped
+            return _FakeResponse({
+                "output_text": "one\n###\ntwo",
+                "metrics": {"engine_output_tokens": json["decoding"]["max_tokens"]},
+            })
+        return _FakeResponse({"output_text": f"LINE{len(calls)}"})
+
+    monkeypatch.setattr(translate_module.httpx, "post", fake_post)
+    out = translate_units(
+        settings=AppSettings(),
+        units=[_unit(1, "een", hint_index=0), _unit(2, "twee", hint_index=1)],
+        source_lang_code="nl",
+        target_lang_code="en",
+        translator_model="translategemma",
+        translator_mode="translategemma",
+        hint_units=["een regel", "twee regel"],
+        hint_block_ids=[0, 1],
+    )
+    assert [item.translated_text for item in out] == ["LINE2", "LINE3"]
+    assert all(item.translation_route.endswith("_hint_line_fallback") for item in out)

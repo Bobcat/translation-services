@@ -30,15 +30,23 @@ class Fixture:
     # member-cell-id (str) -> same entry shape; for leftover units (matched no hint line). Attached
     # at replay by cell membership, so a cell joining/leaving the unit does not detach it.
     leftover_translations: dict[str, dict[str, Any]]
-    request_flags: dict[str, bool]
+    request_flags: dict[str, Any]
     grouping_model: str
     target_lang: str
 
     @property
     def preserve_heuristic_text(self) -> bool:
-        # The one flag a replay must re-apply (it filters the unit set fed to render). The other
-        # flags are recorded for provenance only — they shaped the now-frozen translation.
+        # A flag a replay must re-apply: it shapes the unit set that is BOTH compared against the
+        # snapshot and fed to render. The remaining flags are recorded for provenance only — they
+        # acted on the translation side of the freeze boundary, so their effect is baked into the
+        # frozen translations.
         return bool(self.request_flags.get("preserve_heuristic_text", True))
+
+    @property
+    def render_size_mode(self) -> str:
+        # Also re-applied at replay: it changes the render itself, so a fixture approved under
+        # "median" must replay under "median" or it is born-failing.
+        return str(self.request_flags.get("render_size_mode") or "min")
 
     def to_dict(self) -> dict[str, Any]:
         return {

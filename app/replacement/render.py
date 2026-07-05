@@ -29,6 +29,7 @@ from __future__ import annotations
 import difflib
 import math
 import re
+import unicodedata
 from dataclasses import dataclass
 from io import BytesIO
 from pathlib import Path
@@ -45,6 +46,7 @@ from app.replacement import geometry as geo
 from app.replacement.color import contrasting_fg
 from app.replacement.color import sample_oriented_colors
 from app.replacement.fit import break_pieces
+from app.replacement.fit import fold_lone_fullwidth_punctuation
 from app.replacement.fit import is_cjk_text
 from app.replacement.fit import load_font
 
@@ -115,7 +117,9 @@ class _Job:
     dst_quad: list[tuple[float, float]] | None
 
 
-def render_translated_image(input_path: Path, translation_units: list[dict[str, Any]]) -> bytes:
+def render_translated_image(
+    input_path: Path, translation_units: list[dict[str, Any]], *, render_size_mode: str = "min"
+) -> bytes:
     opened = Image.open(input_path)
     # Carry the source's ICC colour profile onto the output. ``convert("RGB")`` keeps the raw pixel
     # values but drops the profile, so without re-embedding it a colour-managed display (a phone)
@@ -127,7 +131,7 @@ def render_translated_image(input_path: Path, translation_units: list[dict[str, 
     groups = _groups(translation_units)
     snap_horizontal = _image_is_flat(translation_units)
     for group in groups:
-        jobs.extend(_plan_group(base, group, snap_horizontal=snap_horizontal))
+        jobs.extend(_plan_group(base, group, snap_horizontal=snap_horizontal, render_size_mode=render_size_mode))
 
     # Pass 1: cover every original (along the slant) so no source text peeks through.
     erase = ImageDraw.Draw(base)
@@ -307,13 +311,23 @@ def _cell_axis_box(cell: dict[str, Any]) -> tuple[float, float, float, float]:
     return left, top, right, bottom
 
 
+def _field_key(text: str) -> str:
+    """Comparable letters+digits of a field text, script-agnostic: lowercased, diacritics folded
+    (café == cafe), every non-word character dropped. An ASCII-only key ([a-z0-9]) would be EMPTY
+    for Cyrillic/Greek/CJK source text — every rank ties at zero, no member ever places, and the
+    column split silently never fires for non-Latin rows."""
+    folded = unicodedata.normalize("NFKD", str(text or "").lower())
+    folded = "".join(ch for ch in folded if not unicodedata.combining(ch))
+    return re.sub(r"[\W_]", "", folded)
+
+
 def _field_overlap(a: str, b: str) -> float:
     """Overlap of a row member against a field source: matched run length over the SHORTER of the
-    two (alphanumeric-only, tolerant to OCR garble like AHNEDAARBEI vs AHNEDAARDBEI). 1.0 when one
+    two (letters+digits only, tolerant to OCR garble like AHNEDAARBEI vs AHNEDAARDBEI). 1.0 when one
     contains the other, so a column OCR split into wrapped fragments ('advertising &') still binds
     to its full field source — which a symmetric ratio scores too low to clear _FIELD_MATCH_MIN."""
-    na = re.sub(r"[^a-z0-9]", "", str(a or "").lower())
-    nb = re.sub(r"[^a-z0-9]", "", str(b or "").lower())
+    na = _field_key(a)
+    nb = _field_key(b)
     if not na or not nb:
         return 0.0
     matched = sum(block.size for block in difflib.SequenceMatcher(None, na, nb).get_matching_blocks())
@@ -321,8 +335,8 @@ def _field_overlap(a: str, b: str) -> float:
 
 
 def _field_match_rank(source: str, member_text: str) -> tuple[float, int, int]:
-    source_key = re.sub(r"[^a-z0-9]", "", str(source or "").lower())
-    member_key = re.sub(r"[^a-z0-9]", "", str(member_text or "").lower())
+    source_key = _field_key(source)
+    member_key = _field_key(member_text)
     if not source_key or not member_key:
         return 0.0, 0, -10**9
     score = _field_overlap(source, member_text)
@@ -421,11 +435,23 @@ def _strip_leading_glyph(units: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return out
 
 
-def _plan_group(base: Image.Image, units: list[dict[str, Any]], *, snap_horizontal: bool = False) -> list[_Job]:
+def _plan_group(
+    base: Image.Image,
+    units: list[dict[str, Any]],
+    *,
+    snap_horizontal: bool = False,
+    render_size_mode: str = "min",
+) -> list[_Job]:
     if len(units) == 1:
         cells = _split_table_row(units[0])
         if cells is not None:
-            return [job for cell in cells for job in _plan_group(base, [cell], snap_horizontal=snap_horizontal)]
+            return [
+                job
+                for cell in cells
+                for job in _plan_group(
+                    base, [cell], snap_horizontal=snap_horizontal, render_size_mode=render_size_mode
+                )
+            ]
 
     # Marker routing by TYPE, not by whether OCR read it. An alphanumeric enumerate marker ("1."/"(a)")
     # is redrawn as text on the cell (the per-cell erase wipes the original, we redraw -> aligned); re-add
@@ -443,8 +469,10 @@ def _plan_group(base: Image.Image, units: list[dict[str, Any]], *, snap_horizont
     group_quads: list = []
     quad_tokens: list[set[str]] = []  # source words of each quad's member, parallel to group_quads
     for unit in units:
-        translated = str(unit.get("translated_text") or "").strip()
-        if len(translated) <= 1:  # empty / OCR-noise single char -> leave the original alone
+        translated = fold_lone_fullwidth_punctuation(str(unit.get("translated_text") or "").strip())
+        # Empty or an OCR-noise single char -> leave the original alone. A single CJK character
+        # is a full word ("PUSH" -> "推"), not noise, and must render.
+        if not translated or (len(translated) == 1 and not is_cjk_text(translated)):
             continue
         members = [
             m for m in (unit.get("members") or [])
@@ -523,7 +551,7 @@ def _plan_group(base: Image.Image, units: list[dict[str, Any]], *, snap_horizont
     # (which re-wraps) until the floor suffices or the size floor is hit. If the minimum size
     # still cannot fit, leave the original pixels; this catches chatty model replies on tiny
     # OCR-noise cells instead of erasing far beyond the source footprint.
-    size = min(plane["target"] for plane in planes)
+    size = _group_size(planes, render_size_mode)
     font, lines = _fit_group(joined, size=size, plane_widths=plane_widths, family=family, weight=weight)
     while size > _MIN_RENDER_SIZE and _raw_condense(font, lines, planes) < _CONDENSE_FLOOR:
         size -= 1
@@ -657,6 +685,20 @@ def _ink_runs(mask) -> list[tuple[int, int]]:
         runs.append((start, len(mask) - 1))
     return runs
 
+def _group_size(planes: list[dict[str, Any]], mode: str) -> int:
+    """The group's ONE render size, chosen from its per-line targets. ``min`` (the default)
+    never draws taller than the smallest measured line — but one under-measured line (ink
+    without ascenders reads ~70% of cap height) drags the whole block down. ``median`` is the
+    better estimator of the element's single true size, at the cost that a genuinely smaller
+    line the VLM mixed into the element renders over its own band. Selectable per request
+    (``render_size_mode``) to compare; an unknown value falls back to ``min``. A future smarter
+    selection policy slots in here as another mode."""
+    targets = [plane["target"] for plane in planes]
+    if mode == "median":
+        return int(median(targets))
+    return min(targets)
+
+
 def _baseline_angle(clusters: list[list], fallback: float) -> float:
     """The block's text-line direction, fit through the word CENTRES rather than read off the
     OCR quad edges (which jitter several degrees per word and bias the median shallow). Each line's
@@ -670,9 +712,14 @@ def _baseline_angle(clusters: list[list], fallback: float) -> float:
         centres = [(sum(p[0] for p in q) / 4.0, sum(p[1] for p in q) / 4.0) for q in cluster]
         if len(centres) < 2:
             continue
+        # De-mean BOTH axes per cluster: with only y de-meaned, clusters of different x-extents
+        # (a long line above a short last line) share one forced intercept, which drags the
+        # fitted slope toward 0 — the very shallow bias this fit exists to remove. Centred per
+        # cluster, parallel lines fit their true slope exactly.
+        mean_x = sum(c[0] for c in centres) / len(centres)
         mean_y = sum(c[1] for c in centres) / len(centres)
         for cx, cy in centres:
-            xs.append(cx)
+            xs.append(cx - mean_x)
             ys.append(cy - mean_y)
     if len(xs) < 2 or (max(xs) - min(xs)) < 1.0:
         return fallback

@@ -6,9 +6,15 @@ import numpy as np
 from PIL import Image
 from PIL import ImageDraw
 
+import math
+
 from app.replacement.color import sample_region_colors
 from app.replacement.fit import _dominant_script
 from app.replacement.fit import fit_text
+from app.replacement.fit import fold_lone_fullwidth_punctuation
+from app.replacement.fit import is_cjk_text
+from app.replacement.render import _baseline_angle
+from app.replacement.render import _group_size
 from app.replacement.render import _plan_group
 from app.replacement.render import _reproduced_in
 from app.replacement.render import _split_table_row
@@ -168,6 +174,71 @@ def test_split_table_row_single_changed_field_leaves_preserved_neighbor_outside_
     assert cells is not None and len(cells) == 1
     assert cells[0]["translated_text"] == "Contactless payment"
     assert [member["text"] for member in cells[0]["members"]] == ["Contactloze betaling"]
+
+
+def test_split_table_row_fires_for_cyrillic_fields() -> None:
+    # A non-Latin row: an ASCII-only field key is empty for Cyrillic, no member ever placed, and
+    # the row silently reflowed as one joined line — the price rendered behind the item name.
+    unit = {
+        "field_translations": [("МОЛОКО", "MILK"), ("1,69", "1,69")],
+        "members": [
+            {"text": "МОЛОКО", "translate": True, "bbox": {"left": 40, "top": 10, "width": 160, "height": 30}},
+            {"text": "1,69", "translate": True, "bbox": {"left": 500, "top": 10, "width": 80, "height": 30}},
+        ],
+    }
+    cells = _split_table_row(unit)
+    assert cells is not None and len(cells) == 2
+    assert {c["translated_text"] for c in cells} == {"MILK", "1,69"}
+
+
+def test_baseline_angle_is_exact_for_parallel_lines_of_unequal_length() -> None:
+    # A long line above a short last line, both at a true 6°: with only y de-meaned the shared
+    # intercept dragged the fit shallow (~4.5°); de-meaning x per cluster makes it exact.
+    slope = math.tan(math.radians(6.0))
+
+    def quad(cx: float, cy: float) -> list[tuple[float, float]]:
+        return [(cx - 5, cy - 5), (cx + 5, cy - 5), (cx + 5, cy + 5), (cx - 5, cy + 5)]
+
+    long_line = [quad(x, x * slope) for x in (0, 250, 500, 750, 1000)]
+    short_line = [quad(x, 80 + x * slope) for x in (0, 150, 300)]
+    angle = _baseline_angle([long_line, short_line], fallback=0.0)
+    assert abs(angle - 6.0) < 0.05
+
+
+def test_group_size_mode_selects_min_or_median() -> None:
+    # "min": one under-measured (lowercase) line drags the block to its size. "median": the
+    # block keeps the element's typical size. Unknown modes fall back to "min".
+    planes = [{"target": 16}, {"target": 16}, {"target": 10}]
+    assert _group_size(planes, "min") == 10
+    assert _group_size(planes, "median") == 16
+    assert _group_size(planes, "auto") == 10  # unknown -> the safe default
+
+
+def test_lone_fullwidth_punctuation_does_not_make_a_line_cjk() -> None:
+    # One retained "！" must not shrink the group to the CJK ratio or reroute the font.
+    assert fold_lone_fullwidth_punctuation("DANGER！") == "DANGER!"
+    assert not is_cjk_text(fold_lone_fullwidth_punctuation("DANGER！"))
+    # Real CJK text keeps its fullwidth punctuation.
+    assert fold_lone_fullwidth_punctuation("小心！") == "小心！"
+
+
+def test_single_cjk_character_translation_still_renders(tmp_path) -> None:
+    # "PUSH" -> "推": one han character is a full word, not OCR noise — the original must be
+    # erased and the translation drawn, not silently skipped.
+    input_path = tmp_path / "input.png"
+    img = Image.new("RGB", (200, 100), (255, 255, 255))
+    ImageDraw.Draw(img).text((30, 40), "PUSH", fill=(0, 0, 0))
+    img.save(input_path)
+    units = [{
+        "translated_text": "推",
+        "members": [{"cell_id": 1, "text": "PUSH", "translate": True,
+                     "bbox": {"left": 25, "top": 35, "width": 60, "height": 25}}],
+    }]
+    png = render_translated_image(input_path, units)
+    out = Image.open(BytesIO(png)).convert("RGB")
+    before = np.asarray(Image.open(input_path).convert("RGB").crop((25, 35, 85, 60)))
+    after = np.asarray(out.crop((25, 35, 85, 60)))
+    assert not np.array_equal(before, after)
 
 
 def test_top_stray_redundant_word_does_not_starve_the_body_render() -> None:

@@ -63,27 +63,33 @@ def _tokens(text: str) -> list[str]:
     return _SPACED.findall(normalized) + _CJK_CHAR.findall(normalized)
 
 
+def _token_pair_matches(token: str, hint_token: str) -> bool:
+    """The one fuzzy rule for a single token pair: substring or high character similarity, both
+    only for tokens long enough that they cannot collide by chance. Everything that judges
+    garble — binding (``_token_score``) and claim dedup — must use THIS predicate, so a cell a
+    fuzzy match bound cannot later be judged token-free by an exact-only comparison."""
+    if len(token) < _FUZZY_MIN_LEN or len(hint_token) < _FUZZY_MIN_LEN:
+        return False
+    if token in hint_token or hint_token in token:
+        return True
+    shorter, longer = sorted((len(token), len(hint_token)))
+    if 2 * shorter / (shorter + longer) < _FUZZY_RATIO:  # ratio can't reach the bar
+        return False
+    return difflib.SequenceMatcher(None, token, hint_token).ratio() >= _FUZZY_RATIO
+
+
 def _token_score(token: str, hint_set: set[str]) -> float:
     """1.0 exact, else fuzzy (slightly lower, so exact wins a tie) for OCR garble: the cell
     must still bind to its clean VLM line when OCR splits a word ("Kaar thouder" vs
     "Kaarthouder") or drops/adds a character ("AHNEDAARDBEI" vs "AHNEDAARBEI") — otherwise
     the cell becomes a leftover, the per-unit fallback translates the garbled text in
-    isolation, and the good structured translation of the VLM line is orphaned. Fuzzy =
-    substring or high character similarity, both only for tokens long enough that they
-    cannot collide by chance; below exact so "Kaart" still binds its own line, not
-    "Kaarthouder"."""
+    isolation, and the good structured translation of the VLM line is orphaned. Below exact
+    so "Kaart" still binds its own line, not "Kaarthouder"."""
     if token in hint_set:
         return 1.0
     if len(token) < _FUZZY_MIN_LEN:
         return 0.0
     for hint_token in hint_set:
-        if len(hint_token) < _FUZZY_MIN_LEN:
-            continue
-        if token in hint_token or hint_token in token:
-            return 0.9
-        shorter, longer = sorted((len(token), len(hint_token)))
-        if 2 * shorter / (shorter + longer) < _FUZZY_RATIO:  # ratio can't reach the bar
-            continue
-        if difflib.SequenceMatcher(None, token, hint_token).ratio() >= _FUZZY_RATIO:
+        if _token_pair_matches(token, hint_token):
             return 0.9
     return 0.0

@@ -32,6 +32,15 @@ def main() -> int:
     result = httpx.get(f"{base}/v1/requests/{args.request_id}", timeout=30).json()
     if (result.get("state") or "") != "completed":
         raise SystemExit(f"request not completed (state={result.get('state')})")
+    response = result.get("response") or {}
+    # A retranslate response has no OCR cells or grouping call — a fixture built from it would
+    # replay to zero units and fail forever. The /v1/regression/fixtures endpoint grafts the
+    # grouping inputs from the source run; use that (or capture the original run) instead.
+    if not (response.get("ocr") or {}).get("cells"):
+        raise SystemExit(
+            "response has no OCR cells (a retranslate run?) — capture the ORIGINAL run, or use "
+            "POST /v1/regression/fixtures, which grafts the grouping inputs from the source run"
+        )
     rendered = httpx.get(f"{base}/v1/requests/{args.request_id}/artifacts/rendered", timeout=30).content
     source = httpx.get(f"{base}/v1/requests/{args.request_id}/artifacts/input", timeout=30)
     suffix = {"image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp"}.get(
@@ -40,13 +49,16 @@ def main() -> int:
 
     out = cap.capture(
         load_settings().ocr,
-        response=result.get("response") or {},
+        response=response,
         rendered_png=rendered,
         source_bytes=source.content,
         source_suffix=suffix,
         name=args.name,
         variant=args.variant,
     )
+    if out.get("duplicate"):
+        print(f"duplicate of {out['path']} — not written. {out.get('reason', '')}")
+        return 1
     print(f"wrote {out['path']}/  (units={out['units']}, reocr_rows={out['reocr_rows']})")
     return 0
 

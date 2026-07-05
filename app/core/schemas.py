@@ -13,7 +13,10 @@ TranslatorMode = Literal["translategemma", "generic"]
 
 
 class RequestPayload(BaseModel):
-    request_id: str | None = None
+    # Records key on the raw id but directories on ``safe_token(id)`` — an unconstrained id
+    # lets two distinct requests collide on one work dir (pruning one deletes the other's
+    # artifacts). Constrain at the edge to exactly what safe_token passes through unchanged.
+    request_id: str | None = Field(default=None, max_length=120, pattern=r"^[A-Za-z0-9._-]+$")
     task: TaskName
     source_lang_code: str | None = None
     target_lang_code: str | None = None
@@ -39,6 +42,10 @@ class RequestPayload(BaseModel):
     # Feed translation the geometry-adjusted hints (a `|` injected where OCR cell gaps show a column
     # the VLM missed) instead of the raw VLM hints, so a `label  value` row renders per column.
     use_geometry_columns: bool = True
+    # How a render group's single font size is chosen from its lines' measured heights: "min"
+    # never overflows the smallest line's band; "median" resists one under-measured (lowercase)
+    # line dragging the whole block down. A/B toggle while the trade-off is being evaluated.
+    render_size_mode: Literal["min", "median"] = "min"
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -75,3 +82,6 @@ class CompletionEvent(BaseModel):
 class CompletionsEnvelope(BaseModel):
     events: list[CompletionEvent] = Field(default_factory=list)
     next_seq: int = Field(default=0, ge=0)
+    # Per-process id: seq numbers restart at 1 on a service restart, so a poller must reset its
+    # cursor whenever this changes — without it a stale large cursor waits forever.
+    instance_id: str = ""

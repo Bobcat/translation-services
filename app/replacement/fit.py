@@ -5,6 +5,7 @@ the font metrics directly (no draw context needed).
 """
 from __future__ import annotations
 
+import unicodedata
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -80,6 +81,42 @@ def is_cjk_text(text: str) -> bool:
     """True when the text contains CJK script (Han/Kana/CJK symbols or Hangul). The renderer
     uses this to size CJK lines tighter — their glyphs fill the em, unlike upper-biased Latin."""
     return _has_cjk(text) or _has_hangul(text)
+
+
+def _has_cjk_letters(text: str) -> bool:
+    # Actual Han/Kana glyphs — NOT the symbol/fullwidth ranges _has_cjk also spans.
+    return any(
+        "぀" <= ch <= "ヿ"
+        or "㐀" <= ch <= "鿿"
+        or "豈" <= ch <= "﫿"
+        for ch in str(text or "")
+    )
+
+
+def fold_lone_fullwidth_punctuation(text: str) -> str:
+    """Fold fullwidth/CJK punctuation to its ASCII form in a line that carries NO CJK letters.
+
+    A model translating out of Japanese/Chinese often keeps one fullwidth mark ("DANGER！");
+    that single character makes ``is_cjk_text`` true, which shrinks the whole group to the CJK
+    size ratio and reroutes the line to the CJK face — a ~20% size drop and a family change off
+    one punctuation glyph. Real CJK text (any Han/Kana/Hangul letter present) is left untouched:
+    its fullwidth punctuation is correct. Only marks whose NFKC image is ASCII fold ("！"→"!",
+    ideographic space→space); an unfoldable "。" stays and the line then still routes to the CJK
+    face that has its glyph — tofu is never a possible outcome of this fold."""
+    value = str(text or "")
+    if not value or _has_cjk_letters(value) or _has_hangul(value):
+        return value
+    out: list[str] = []
+    changed = False
+    for ch in value:
+        if "　" <= ch <= "〿" or "＀" <= ch <= "￯":
+            folded = unicodedata.normalize("NFKC", ch)
+            if folded.isascii():
+                out.append(folded)
+                changed = True
+                continue
+        out.append(ch)
+    return "".join(out) if changed else value
 
 
 @lru_cache(maxsize=1)

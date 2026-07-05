@@ -87,7 +87,11 @@ class RequestStore:
             "error": rec.error,
         }
 
-    def prune(self) -> None:
+    def prune(self) -> list[Path]:
+        """Drop expired/overflowing terminal records; RETURNS their artifact dirs instead of
+        deleting them. Deleting here would put ``rmtree`` (a TTL boundary can expire dozens of
+        record dirs full of debug PNGs) inside every submit/poll, under the runtime lock and on
+        the event loop — the caller hands the paths to ``remove_dirs`` off-loop, lock released."""
         now_unix = time.time()
         removable: list[str] = []
         for rid, rec in self.records.items():
@@ -108,18 +112,27 @@ class RequestStore:
                 terminal_rows.append((float(ref_unix), str(rid)))
             terminal_rows.sort(key=lambda row: row[0])
             removable.extend(rid for _ref, rid in terminal_rows[:overflow])
+        stale_dirs: list[Path] = []
         for rid in set(removable):
             self.records.pop(rid, None)
-            self._cleanup_request_filesystem(rid)
+            stale_dirs.extend(self._request_dirs(rid))
+        return stale_dirs
 
-    def _cleanup_request_filesystem(self, request_id: str) -> None:
+    def _request_dirs(self, request_id: str) -> list[Path]:
         roots = [
             (self.work_root / safe_token(request_id)).resolve(),
             (self.work_root / "_uploads" / safe_token(request_id)).resolve(),
         ]
+        out: list[Path] = []
         for root in roots:
             try:
                 root.relative_to(self.work_root)
             except ValueError:
                 continue
-            shutil.rmtree(root, ignore_errors=True)
+            out.append(root)
+        return out
+
+
+def remove_dirs(paths: list[Path]) -> None:
+    for path in paths:
+        shutil.rmtree(path, ignore_errors=True)

@@ -4,7 +4,7 @@ The grouping VLM is asked for one strict line per element —
 ``<t|h|b|m>|<font>|<size>pt|<weight>|<l|c|r>: text``. Even with greedy decode and an unchanged
 prompt + image (see ``request_grouping_hint``) the response drifts run to run — serving-level
 non-determinism, not sampling — so this layer parses defensively: across otherwise identical runs
-the label may be wrapped in ``[...]`` / ``**...**`` / ``*...*`` or bare, the importance code may be
+the label may be wrapped in ``**...**`` / ``*...*`` or bare, the importance code may be
 dropped (``|Roboto|16pt|400|l: …``), alignment may be a letter or a spelled word, the ``:`` may be
 missing, or a label may sit on its own line above the text. Every regex here absorbs one such
 variation so the label never leaks into the translated text.
@@ -74,6 +74,10 @@ _LABELED_LINE = re.compile(
 _ALIGN_CENTER = re.compile(r"\bcent(?:ered|er|red|re)\b")
 _ALIGN_WORD = re.compile(r"cent(?:ered|er|red|re)|left|right|[lcr]")
 
+# Leading markdown decoration ("- item", "* item", "# heading") — only stripped when whitespace
+# (or line end) follows, so a numeric sign ("-2,00") survives.
+_MARKDOWN_LEAD = re.compile(r"^[-*#]+(?=\s|$)")
+
 # A bullet-list item: the prompt has the VLM emit the element as "|@blt|@<bullet>|<item>" — a stable
 # "@blt" sentinel, then the actual glyph it SAW substituted into "@<bullet>". Asking for substitution
 # (rather than a fixed "@bullet") stops the model rewriting the sentinel itself, e.g. "@bullet"->"@-".
@@ -81,9 +85,19 @@ _ALIGN_WORD = re.compile(r"cent(?:ered|er|red|re)|left|right|[lcr]")
 # the image (the renderer insets the text past it). Tolerant of the older "|@bullet|"/"|@<glyph>|"
 # forms and of a missing glyph field; the "|" framing + line-start "@" keep it off ordinary text.
 _BULLET_SENTINEL = re.compile(
-    r"^\s*\|?\s*@(?P<sentinel>blt|bullet|[•·∙●○◦‣⁃*–—-])(?:\s*\|\s*@?(?P<marker>[^|]*)\|)?\s*\|?\s*",
+    r"^\s*\|?\s*@(?P<sentinel>blt|bullet|[•·∙●○◦‣⁃*–—-])(?:\s*\|\s*(?P<marker>@?[^|]*)\|)?\s*\|?\s*",
     re.IGNORECASE,
 )
+# The sentinel without the marker field — used to re-match when the "marker" turned out to be an
+# ordinary |-field of the row's content.
+_BULLET_SENTINEL_BARE = re.compile(
+    r"^\s*\|?\s*@(?:blt|bullet|[•·∙●○◦‣⁃*–—-])\s*\|?\s*",
+    re.IGNORECASE,
+)
+# A substituted bullet glyph is a couple of characters at most ("•", "-", "1.", "(iv)"). Anything
+# longer without an explicit "@" is the row's first content field ("@blt|Prijs | 12,50"), which
+# must stay in the text.
+_BULLET_MARKER_MAX_LEN = 4
 def _bullet_of(text: str) -> tuple[bool, str | None, str]:
     """``(is_bullet, marker, remaining_text)`` for a possible bullet line. The marker is the glyph the
     VLM substituted into a SEPARATE ``@<bullet>`` field (``@blt|@•|item``), stripped from the text so
@@ -94,26 +108,36 @@ def _bullet_of(text: str) -> tuple[bool, str | None, str]:
     if not match:
         return False, None, text
     captured = (match.group("marker") or "").strip()
+    explicit = captured.startswith("@")
+    marker_text = captured.lstrip("@").strip()
+    if marker_text and not explicit and len(marker_text) > _BULLET_MARKER_MAX_LEN:
+        # Not a glyph but the first content field of a colon-less row — re-match without the
+        # marker group so the field survives in the text.
+        bare = _BULLET_SENTINEL_BARE.match(text)
+        return True, None, text[bare.end():].strip() if bare else text
     sentinel = match.group("sentinel")
-    if captured:
-        marker = captured
+    if marker_text:
+        marker = marker_text
     elif sentinel and sentinel.lower() not in ("blt", "bullet"):
         marker = sentinel  # old format: the glyph was the sentinel itself
     else:
         marker = None  # only the "@blt" word -> the marker (if any) stays in the text
     return True, marker, text[match.end():].strip()
 
-# The label's first '|'-field is a single-letter importance code (the v3 prompt: t/h/b/m).
+# The label's first '|'-field is a single-letter importance code (the v3 prompt: t/h/b/m),
+# or the spelled-out word some models write instead.
 _LEVEL_BY_CODE = {"t": "title", "h": "header", "b": "body", "m": "footer"}
+_LEVEL_BY_WORD = {"title": "title", "header": "header", "body": "body", "metadata": "footer", "footer": "footer"}
 
 
 def parse_grouping_output(output_text: str) -> GroupingHint:
     """Split the VLM output into the classification and the labeled hint lines.
 
-    The leading ``[Image Classification: ...]`` line becomes the category; every other
-    non-empty line is one unit. A ``[Level n / ...]`` / ``[Metadata/Footer]`` prefix is
-    stripped into the line's level — the model wavers between ``[Label] text``,
-    ``[Label: text]`` and a standalone ``[Label]`` line above the text; all three parse.
+    The leading ``Image classification: ...`` line becomes the category; every other
+    non-empty line is one unit. A label prefix (see ``_LABELED_LINE``: bold-wrapped,
+    single-star, or a bare/fmt pipe label) is stripped into the line's level — the model
+    wavers between ``label: text``, the text inside the wrapper, and a standalone label
+    line above the text; all three parse.
     Every LABELED line starts a new block (the label boundary is the element boundary);
     unlabeled lines (a wrapped continuation) join the block and inherit its level.
     Blank lines and separator lines (``###`` / ``-----``) also close the block; leading
@@ -174,6 +198,14 @@ def parse_grouping_output(output_text: str) -> GroupingHint:
             # when no level is read (some models drop the importance code) — strip it so it cannot
             # leak into the text; the level then falls back to None for that element.
             pipe_label = bool(match.group("bare") or match.group("fmt") or match.group("si"))
+            # But a BARE match with no text can also be a content row whose first field happens to
+            # be a level word/letter (a receipt tax row "B | 1,69", a table row "Title | Mr").
+            # A real standalone label shows its label-ness: several |-fields, a "<n>pt" size, or
+            # the trailing ':' the prompt format ends a label with. Without any of those, keep the
+            # row as text rather than deleting it as a label.
+            if not text and match.group("bare") and not _bare_label_stands_alone(label, line):
+                level = None
+                pipe_label = False
             if level is not None or pipe_label:
                 close_block()  # a label starts a new element
                 line = text
@@ -187,7 +219,10 @@ def parse_grouping_output(output_text: str) -> GroupingHint:
         if not category and not units and line.lower().startswith("category:"):
             category = line.split(":", 1)[1].strip()
             continue
-        cleaned = line.lstrip("-*#").strip().strip("*").strip()
+        # Strip a leading markdown bullet/heading marker only when whitespace follows it: a bare
+        # "- Alpha" is decoration, but the "-" of "-2,00 korting" is the amount's sign and must
+        # reach the translation. (The .strip("*") after still unwraps "*emphasis*"/"**bold**".)
+        cleaned = _MARKDOWN_LEAD.sub("", line).strip().strip("*").strip()
         bullet, marker, cleaned = _bullet_of(cleaned)
         if not cleaned or _is_separator(cleaned):
             continue
@@ -214,13 +249,27 @@ def parse_grouping_output(output_text: str) -> GroupingHint:
     )
 
 
+def _bare_label_stands_alone(label: str, line: str) -> bool:
+    """Whether a bare label with no text after it is a genuine standalone label (it labels the
+    lines below) rather than a content row starting with a level word/letter."""
+    return (
+        label.count("|") >= 2
+        or re.search(r"\d{1,3}\s*pt\b", label, re.IGNORECASE) is not None
+        or line.rstrip("'* ").endswith(":")
+    )
+
+
 def _level_of(label: str) -> str | None:
-    # The first '|'-field is the importance code (t/h/b/m); take it exactly, then by first letter
-    # so a spelled-out first field ("header|..."/"metadata|...") still maps. None when absent.
+    # The first '|'-field is the importance code (t/h/b/m) or its spelled-out word; take those
+    # exactly. The first-LETTER fallback (a truncated/mangled first field) applies only when the
+    # label carries '|'-fields at all: a bare bolded text word ("**Menu**", "**Totaal**") is image
+    # text, not a label, and must not become one just because m/t happen to be level codes.
     first = label.split("|", 1)[0].strip().lower()
     if first in _LEVEL_BY_CODE:
         return _LEVEL_BY_CODE[first]
-    if first[:1] in _LEVEL_BY_CODE:
+    if first in _LEVEL_BY_WORD:
+        return _LEVEL_BY_WORD[first]
+    if "|" in label and first[:1] in _LEVEL_BY_CODE:
         return _LEVEL_BY_CODE[first[:1]]
     return None
 

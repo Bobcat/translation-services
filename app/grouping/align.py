@@ -21,6 +21,7 @@ from app.grouping.heuristics import _is_continuation
 from app.grouping.heuristics import _is_icon_fragment
 from app.grouping.heuristics import _is_nontranslatable
 from app.grouping.heuristics import _near
+from app.grouping.tokens import _token_pair_matches
 from app.grouping.tokens import _token_score
 from app.grouping.tokens import _tokens
 from app.grouping.units import GroupingResult
@@ -183,7 +184,20 @@ def _resolve_claim_clusters(
     line_tokens: set[str] = set().union(*fields) if fields else set()
 
     def tokens_of(members: list[int]) -> set[str]:
-        return {t for i in members for t in _tokens(str(cells[i].get("text") or ""))} & line_tokens
+        # The LINE tokens this claim covers. Exact first; a cell token that only fuzzy-matches
+        # (the claim bound its line through OCR garble) covers the line token it garbles —
+        # dedup must judge a claim by the same rules that bound it, or an all-garble wrapped
+        # continuation ("kortlng") looks token-free, can never register a field or new content,
+        # and is dropped as a stray: exactly the leftover-doubling this dedup exists to prevent.
+        # For clean cells the fuzzy branch never fires, so this is the old exact intersection.
+        covered: set[str] = set()
+        for i in members:
+            for t in _tokens(str(cells[i].get("text") or "")):
+                if t in line_tokens:
+                    covered.add(t)
+                else:
+                    covered.update(h for h in line_tokens if _token_pair_matches(t, h))
+        return covered
 
     def fields_of(tokens: set[str]) -> set[int]:
         return {fi for fi, fset in enumerate(fields) if fset and (tokens & fset)}
@@ -310,9 +324,10 @@ def _candidate_hints(cell: dict[str, Any], token_to_hints: dict[str, set[int]]) 
     """The hint lines a cell shares an EXACT token with — the only lines worth scoring for a
     cleanly-read cell. ``None`` when it shares none: its tokens are OCR garble (or non-translatable)
     that can still bind by the fuzzy substring/ratio match in _token_score, which the exact index
-    cannot see, so the caller falls back to scanning every line. Garble is the minority, so the
-    fallback is rare and the match stays near-linear. Verified to reproduce the full-scan result
-    across the testset (incl. garbled receipts) and the fixtures; see _match_scores."""
+    cannot see, so the caller falls back to scanning every line. ``_match_scores`` additionally
+    full-scans when the indexed result lands below the bind threshold (a partially-garbled cell),
+    so pruning can never turn a bindable cell into a leftover. Garble is the minority, so both
+    fallbacks are rare and the match stays near-linear."""
     candidates: set[int] = set()
     for token in _tokens(str(cell.get("text") or "")):
         candidates.update(token_to_hints.get(token, ()))
@@ -344,8 +359,28 @@ def _match_scores(
                 best_matched = matched
     if not best_matched:
         return _Match(candidates=[], score=0.0)
+    # Below the bind threshold the indexed scan may not be the last word: it only saw lines the
+    # cell shares an EXACT token with, but a cell with one clean token and the rest OCR garble can
+    # belong to a line it matches only fuzzily ("Kaarthuder betallng pas" carries "pas" of one line
+    # exactly, yet is a garbled read of "Kaarthouder betaling"). Rescan every line before letting
+    # the cell fall through as a leftover. Cells the index already binds keep the indexed result
+    # untouched, and an all-garble cell arrives here with ``candidate_indices`` None already — so
+    # this fires only for the mixed case, which stays rare enough to keep the match near-linear.
+    if candidate_indices is not None and best_matched / len(cell_tokens) < _MATCH_THRESHOLD:
+        return _match_scores(cell, hint_token_sets, None)
     candidates = [index for index, matched in matched_by_index if matched == best_matched]
-    full = tuple(index for index in candidates if best_matched + 1e-9 >= len(hint_token_sets[index]))
+    # ``full`` means "the cell carries every token of the line", so it is recounted on DISTINCT
+    # cell tokens: the raw mass above counts duplicates separately, and per-character CJK tokens
+    # repeat constantly (小心小心 has mass 4), letting a repeated fragment reach a line's set size
+    # while covering only half of it. For a duplicate-free cell the distinct sum equals the mass,
+    # so this is exactly the old test.
+    distinct_tokens = list(dict.fromkeys(cell_tokens))
+    full = tuple(
+        index
+        for index in candidates
+        if sum(_token_score(token, hint_token_sets[index]) for token in distinct_tokens) + 1e-9
+        >= len(hint_token_sets[index])
+    )
     has_alpha = any(any(ch.isalpha() for ch in token) for token in cell_tokens)
     return _Match(
         candidates=candidates,

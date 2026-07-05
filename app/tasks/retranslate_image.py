@@ -17,6 +17,7 @@ from io import BytesIO
 from pathlib import Path
 import time
 from typing import Any
+from typing import Callable
 
 from app.core.config import AppSettings
 from app.grouping.units import TranslationUnit
@@ -37,6 +38,7 @@ def run_retranslate_image_pipeline(
     input_path: Path,
     source_grouping: dict[str, Any],
     request: dict[str, Any],
+    checkpoint: Callable[[], None] = lambda: None,
 ) -> TranslateImageResult:
     started_at = time.perf_counter()
     source_lang = str(request.get("source_lang_code") or "").strip()
@@ -47,7 +49,19 @@ def run_retranslate_image_pipeline(
     units = [TranslationUnit.from_dict(item) for item in source_grouping.get("units") or []]
     if not units:
         raise RuntimeError("source run has no cached translation units to re-translate")
-    hint_units = [str(line) for line in source_grouping.get("hint_units") or []]
+    use_geometry_columns = _bool_request_flag(request, "use_geometry_columns", default=True)
+    raw_hint_units = [str(line) for line in source_grouping.get("hint_units") or []]
+    adjusted_hint_units = [str(line) for line in source_grouping.get("hint_units_adjusted") or []]
+    # Feed translation the same hint variant the source run fed (translate_image uses the
+    # geometry-adjusted lines when use_geometry_columns is on — the default): re-translating
+    # with the RAW lines would silently change the translation input, so a prompt A/B would
+    # compare more than the prompt. An older grouping.json without the adjusted key (or a
+    # non-parallel one) falls back to the raw lines.
+    hint_units = (
+        adjusted_hint_units
+        if use_geometry_columns and adjusted_hint_units and len(adjusted_hint_units) == len(raw_hint_units)
+        else raw_hint_units
+    )
     hint_block_ids = [int(block_id) for block_id in source_grouping.get("hint_block_ids") or []]
     image_category = str(source_grouping.get("category") or "")
 
@@ -55,6 +69,7 @@ def run_retranslate_image_pipeline(
     translator_mode = str(request.get("translator_mode") or "").strip() or settings.llm_pool.translator_mode
     preserve_heuristic_text = _bool_request_flag(request, "preserve_heuristic_text", default=True)
     preserve_unchanged_text = _bool_request_flag(request, "preserve_unchanged_text", default=False)
+    render_size_mode = str(request.get("render_size_mode") or "min").strip() or "min"
     units_for_translation = _units_for_preserve_heuristic_text(
         units,
         preserve_heuristic_text=preserve_heuristic_text,
@@ -67,6 +82,7 @@ def run_retranslate_image_pipeline(
     )
 
     llm_calls: list[dict[str, Any]] = []
+    checkpoint()
     translation_started = time.perf_counter()
     translations = translate_units(
         settings=settings,
@@ -100,8 +116,9 @@ def run_retranslate_image_pipeline(
     full_translated_text = "\n".join(item.translated_text for item in translations if item.translated_text)
     sent_input, sent_instructions = _translation_call_io(llm_calls)
 
+    checkpoint()
     replacement_started = time.perf_counter()
-    rendered_image = render_translated_image(input_path, translation_units)
+    rendered_image = render_translated_image(input_path, translation_units, render_size_mode=render_size_mode)
     replacement_wall_ms = _elapsed_ms(replacement_started)
 
     # Carry the cached grouping forward so this run is itself a valid re-translate source.
@@ -149,6 +166,8 @@ def run_retranslate_image_pipeline(
         "translator_mode": translator_mode,
         "preserve_heuristic_text": preserve_heuristic_text,
         "preserve_unchanged_text": preserve_unchanged_text,
+        "use_geometry_columns": use_geometry_columns,
+        "render_size_mode": render_size_mode,
         "translation_source": "llm_pool_retranslate",
         "source_request_id": str(request.get("source_request_id") or ""),
         "image_category": image_category,
@@ -158,12 +177,22 @@ def run_retranslate_image_pipeline(
         "note": "Re-translate of a prior run's cached units with an alternative prompt (no VLM/OCR/grouping).",
     }
 
+    # ``segments`` keeps the SAME cell shape translate_image emits ({id, text, bbox}): a consumer
+    # written against one task must not break on the other. The cells come from the cached units'
+    # members (OCR confidence was not cached, so that key is absent).
+    segment_cells = [
+        {"id": member.cell_id, "text": member.text, "bbox": dict(member.bbox or {})}
+        for unit in units
+        for member in unit.members
+        if member.bbox
+    ]
+
     return TranslateImageResult(
         image=_input_png_bytes(input_path),
         mime_type="image/png",
         rendered_image=rendered_image,
         rendered_mime_type="image/png",
-        segments=[unit.to_dict() for unit in units],
+        segments=segment_cells,
         metadata=metadata,
         metrics={
             "translation_wall_ms": translation_wall_ms,

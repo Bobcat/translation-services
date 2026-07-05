@@ -145,9 +145,13 @@ def translate_units(
                 preserve_heuristic_text=preserve_heuristic_text,
                 preserve_unchanged_text=preserve_unchanged_text,
             )
-        # The numbered-list batch is instruction-based — not for translategemma; if its structured
-        # call did not preserve the structure, fall through to the per-unit translategemma path.
-        if not batch and decision.translator_mode != "translategemma":
+        # The numbered-list batch is the no-hint batch: one call for a document the VLM gave no
+        # usable hint for (its items are OCR fragments — there is nothing better then). With
+        # hints present, a failed structured call goes to the per-hint-line fallback in the
+        # result loop below instead: clean full lines beat numbered fragments, and the numbered
+        # batch succeeding would shadow that better path. Not for translategemma
+        # (instruction-based).
+        if not batch and not hint_units and decision.translator_mode != "translategemma":
             batch = _translate_batch(
                 settings=settings,
                 model=decision.translator_model,
@@ -156,6 +160,41 @@ def translate_units(
                 category=category,
                 call_log=call_log,
             )
+
+    # Per-hint-line fallback for hinted units the batch left untranslated (a wobbled block, a
+    # rejected numbered reply, or a failed translategemma window): translate the clean VLM LINE —
+    # full-sentence context, mapped exactly like the structured path — instead of leaving the
+    # unit as original pixels. Never the unit's OCR text: an isolated cell fragment ("WORKS IF")
+    # is untranslatable in any prompt. Cached per line: units sharing a line share the one call.
+    hint_line_fallbacks: dict[int, tuple[str, list[tuple[str, str]] | None] | None] = {}
+
+    def _translate_hint_line(index: int) -> tuple[str, list[tuple[str, str]] | None] | None:
+        if index not in hint_line_fallbacks:
+            try:
+                line = _translate_one(
+                    settings=settings,
+                    model=decision.translator_model,
+                    mode=decision.translator_mode,
+                    text=hint_units[index],
+                    source_lang_code=source_lang_code,
+                    target_lang_code=target_lang_code,
+                    category=category,
+                    prompt=prompt or BUILTIN_PROMPTS[IMAGE_DEFAULT_ID],
+                    call_log=call_log,
+                ).strip()
+            except TranslationError:
+                line = ""  # degrade to skipped: original pixels stay, the failed call is logged
+            hint_line_fallbacks[index] = (
+                _mapped_hint_line(
+                    hint_units[index],
+                    line,
+                    preserve_heuristic_text=preserve_heuristic_text,
+                    preserve_unchanged_text=preserve_unchanged_text,
+                )
+                if line
+                else None
+            )
+        return hint_line_fallbacks[index]
 
     results: list[TranslatedUnit] = []
     for unit in units:
@@ -174,28 +213,59 @@ def translate_units(
         translated = batch.get(unit.id)
         route = f"{decision.translation_route}_batch"
         if translated is None:
-            if batched and unit.hint_index is not None:
-                results.append(
-                    TranslatedUnit(
-                        unit_id=unit.id,
-                        source_text=unit.source_text,
-                        translated_text="",
-                        translator_model="",
-                        translation_route="skipped_hinted_missing",
-                    )
+            hint_index = unit.hint_index
+            if batched and hint_index is not None:
+                fallback = (
+                    _translate_hint_line(hint_index)
+                    if hint_units and 0 <= hint_index < len(hint_units)
+                    else None
                 )
-                continue
-            translated = _translate_one(
-                settings=settings,
-                model=decision.translator_model,
-                mode=decision.translator_mode,
-                text=source_text,
-                source_lang_code=source_lang_code,
-                target_lang_code=target_lang_code,
-                category=category,
-                call_log=call_log,
-            )
-            route = f"{decision.translation_route}_batch_fallback" if batched else decision.translation_route
+                if fallback is None:
+                    results.append(
+                        TranslatedUnit(
+                            unit_id=unit.id,
+                            source_text=unit.source_text,
+                            translated_text="",
+                            translator_model="",
+                            translation_route="skipped_hinted_missing",
+                        )
+                    )
+                    continue
+                translated, pairs = fallback
+                if pairs:
+                    batch_fields[unit.id] = pairs
+                route = f"{decision.translation_route}_hint_line_fallback"
+            else:
+                try:
+                    translated = _translate_one(
+                        settings=settings,
+                        model=decision.translator_model,
+                        mode=decision.translator_mode,
+                        text=source_text,
+                        source_lang_code=source_lang_code,
+                        target_lang_code=target_lang_code,
+                        category=category,
+                        prompt=prompt or BUILTIN_PROMPTS[IMAGE_DEFAULT_ID],
+                        call_log=call_log,
+                    )
+                except TranslationError:
+                    # One transient HTTP failure on a fallback unit must not discard the whole
+                    # request (and all completed batch work) — for a BATCHED run, degrade this one
+                    # unit to untranslated (original pixels stay) with a route that says why. A
+                    # single-unit run has nothing else to save: stay loud.
+                    if not batched:
+                        raise
+                    results.append(
+                        TranslatedUnit(
+                            unit_id=unit.id,
+                            source_text=unit.source_text,
+                            translated_text="",
+                            translator_model="",
+                            translation_route=f"{decision.translation_route}_batch_fallback_failed",
+                        )
+                    )
+                    continue
+                route = f"{decision.translation_route}_batch_fallback" if batched else decision.translation_route
         if (
             translated
             and preserve_unchanged_text
@@ -219,6 +289,64 @@ def translate_units(
     return results
 
 
+def _log_failed_call(
+    call_log: list[dict[str, Any]] | None, *, role: str, payload: dict[str, Any], error: str
+) -> None:
+    """Record a FAILED llm-pool call before raising, so the persisted ``llm_calls`` artifact
+    shows what died — not only the calls that succeeded."""
+    if call_log is not None:
+        call_log.append({"role": role, "payload": payload, "error": error})
+
+
+def _post_responses(
+    settings: AppSettings,
+    payload: dict[str, Any],
+    *,
+    role: str,
+    call_log: list[dict[str, Any]] | None,
+) -> dict[str, Any]:
+    """The one door to llm-pool ``/v1/responses`` for every translation call. Pins
+    ``allow_remote`` off — document TEXT must never route to a remote backend, matching the
+    grouping call's pin (the pool default is already False; this survives a default change).
+    Logs the call (or its failure) into ``call_log`` and raises ``TranslationError`` on
+    transport/HTTP errors. Kept on module-level ``httpx.post`` deliberately: it is the seam
+    the tests fake."""
+    payload = {**payload, "allow_remote": False}
+    url = f"{settings.llm_pool.base_url}{_RESPONSES_PATH}"
+    try:
+        response = httpx.post(url, json=payload, timeout=settings.llm_pool.request_timeout_s)
+        response.raise_for_status()
+        data = response.json()
+    except httpx.HTTPStatusError as exc:
+        body = exc.response.text.strip()
+        message = f"llm-pool /v1/responses HTTP {exc.response.status_code}: {body or exc}"
+        _log_failed_call(call_log, role=role, payload=payload, error=message)
+        raise TranslationError(message) from exc
+    except httpx.HTTPError as exc:
+        message = f"llm-pool /v1/responses unavailable: {exc}"
+        _log_failed_call(call_log, role=role, payload=payload, error=message)
+        raise TranslationError(message) from exc
+    if not isinstance(data, dict):
+        raise TranslationError("llm-pool /v1/responses returned a non-object response")
+    if call_log is not None:
+        call_log.append({"role": role, "payload": payload, "response": data})
+    return data
+
+
+def _reply_truncated(data: dict[str, Any], payload: dict[str, Any]) -> bool:
+    """Whether the reply hit the decoding cap. The pool's envelope carries no finish_reason;
+    ``metrics.engine_output_tokens`` reaching ``max_tokens`` is the truncation signal it does
+    carry. A truncated structured/numbered reply has lost its tail blocks — resending it to a
+    same-capped fallback truncates again, so the caller must reject it instead of mapping it."""
+    metrics = data.get("metrics") or {}
+    try:
+        produced = int(metrics.get("engine_output_tokens"))
+    except (TypeError, ValueError):
+        return False
+    cap = int((payload.get("decoding") or {}).get("max_tokens") or 0)
+    return cap > 0 and produced >= cap
+
+
 def _translate_batch(
     *,
     settings: AppSettings,
@@ -239,26 +367,17 @@ def _translate_batch(
         "stream": False,
         "decoding": {"top_k": 1, "top_p": 1, "temperature": 0.0, "repetition_penalty": 1.0, "max_tokens": 4096},
     }
-    url = f"{settings.llm_pool.base_url}{_RESPONSES_PATH}"
-    try:
-        response = httpx.post(url, json=payload, timeout=settings.llm_pool.request_timeout_s)
-        response.raise_for_status()
-        data = response.json()
-    except httpx.HTTPStatusError as exc:
-        body = exc.response.text.strip()
-        raise TranslationError(f"llm-pool /v1/responses HTTP {exc.response.status_code}: {body or exc}") from exc
-    except httpx.HTTPError as exc:
-        raise TranslationError(f"llm-pool /v1/responses unavailable: {exc}") from exc
-    if not isinstance(data, dict):
-        raise TranslationError("llm-pool /v1/responses returned a non-object response")
-    if call_log is not None:
-        call_log.append({"role": "translation_main_numbered", "payload": payload, "response": data})
+    data = _post_responses(settings, payload, role="translation_main_numbered", call_log=call_log)
+    if _reply_truncated(data, payload):
+        return {}  # tail items lost -> per-unit handling decides, never a partial mis-mapping
 
-    out: dict[int, str] = {}
-    for number, translation in _parse_numbered(str(data.get("output_text") or "")).items():
-        if 1 <= number <= len(items):
-            out[items[number - 1][0]] = translation
-    return out
+    parsed = _parse_numbered(str(data.get("output_text") or ""))
+    # Accept the reply only when it numbers exactly 1..n: a renumbered (0-based), merged or
+    # partial list means at least one translation would silently land on the WRONG unit —
+    # wrong-text-in-place is worse than the per-unit fallback this rejection hands over to.
+    if sorted(parsed) != list(range(1, len(items) + 1)):
+        return {}
+    return {items[number - 1][0]: translation for number, translation in parsed.items()}
 
 
 def _parse_numbered(text: str) -> dict[int, str]:
@@ -292,6 +411,7 @@ def _translate_one(
     source_lang_code: str,
     target_lang_code: str,
     category: str = "",
+    prompt: PromptEntry | None = None,
     call_log: list[dict[str, Any]] | None = None,
 ) -> str:
     if not str(model or "").strip():
@@ -314,25 +434,24 @@ def _translate_one(
         # pass the image category here; it only helps the instruction-based modes.
         payload["source_lang_code"] = source_lang_code
         payload["target_lang_code"] = target_lang_code
+    elif prompt is not None:
+        # The RESOLVED prompt — the same one the structured call uses. A single-unit image and
+        # a batch-fallback unit must translate under the caller's prompt (custom or default,
+        # with its every-occurrence rule), not under a divergent hardcoded one.
+        variables = {
+            "source_window": text,
+            "source_lang": _lang_name(source_lang_code),
+            "target_lang": _lang_name(target_lang_code),
+            "category": str(category or "").strip() or "unknown",
+            "category_instructions": _category_instructions(category),
+        }
+        payload["input"] = render_template(prompt.user, variables)
+        payload["instructions"] = render_template(prompt.system, variables)
     else:
         payload["instructions"] = _system_prompt(target_lang_code, category)
-    url = f"{settings.llm_pool.base_url}{_RESPONSES_PATH}"
-    try:
-        response = httpx.post(url, json=payload, timeout=settings.llm_pool.request_timeout_s)
-        response.raise_for_status()
-        data = response.json()
-    except httpx.HTTPStatusError as exc:
-        body = exc.response.text.strip()
-        raise TranslationError(
-            f"llm-pool /v1/responses HTTP {exc.response.status_code}: {body or exc}"
-        ) from exc
-    except httpx.HTTPError as exc:
-        raise TranslationError(f"llm-pool /v1/responses unavailable: {exc}") from exc
-
-    if not isinstance(data, dict):
-        raise TranslationError("llm-pool /v1/responses returned a non-object response")
-    if call_log is not None:
-        call_log.append({"role": f"translation_fallback: {text[:40]!r}", "payload": payload, "response": data})
+    data = _post_responses(settings, payload, role=f"translation_fallback: {text[:40]!r}", call_log=call_log)
+    if _reply_truncated(data, payload):
+        return ""  # a cut-off line is not a translation; empty degrades to original pixels
     return str(data.get("output_text") or "").strip()
 
 
@@ -364,7 +483,7 @@ def _batch_system_prompt(target_lang_code: str, category: str = "") -> str:
 # The template alone takes only source/target codes; this preamble gives the per-segment multilingual
 # guidance, and was validated to translate the whole window cleanly while keeping the ### structure.
 _TRANSLATEGEMMA_PREAMBLE = (
-    "You must translate the text from an image of catgory: **{category}** The source language may "
+    "You must translate the text from an image of category: **{category}** The source language may "
     "vary throughout the text. Identify the source language of each sentence or segment and translate "
     "all translatable content into the target language. Keep proper names (places, brands). Output "
     "ONLY the translation."
@@ -436,20 +555,9 @@ def _translate_structured(
             "stream": False,
             "decoding": decoding,
         }
-    url = f"{settings.llm_pool.base_url}{_RESPONSES_PATH}"
-    try:
-        response = httpx.post(url, json=payload, timeout=settings.llm_pool.request_timeout_s)
-        response.raise_for_status()
-        data = response.json()
-    except httpx.HTTPStatusError as exc:
-        body = exc.response.text.strip()
-        raise TranslationError(f"llm-pool /v1/responses HTTP {exc.response.status_code}: {body or exc}") from exc
-    except httpx.HTTPError as exc:
-        raise TranslationError(f"llm-pool /v1/responses unavailable: {exc}") from exc
-    if not isinstance(data, dict):
-        raise TranslationError("llm-pool /v1/responses returned a non-object response")
-    if call_log is not None:
-        call_log.append({"role": "translation_main", "payload": payload, "response": data})
+    data = _post_responses(settings, payload, role="translation_main", call_log=call_log)
+    if _reply_truncated(data, payload):
+        return {}, {}  # tail blocks lost -> the per-hint-line fallback covers the whole document
 
     translated_blocks = _parse_blocks(str(data.get("output_text") or ""))
     if not source_blocks or len(source_blocks) != len(translated_blocks):
@@ -472,32 +580,18 @@ def _translate_structured(
         line = aligned[index]
         if line is None:
             continue
-        pairs = _field_pairs(
+        mapped = _mapped_hint_line(
             hint_units[index],
             line,
             preserve_heuristic_text=preserve_heuristic_text,
             preserve_unchanged_text=preserve_unchanged_text,
         )
-        if pairs is not None:
-            text = " ".join(translated for _source, translated in pairs).strip()
-            out[unit.id] = text
-            if pairs:
-                fields[unit.id] = pairs
+        if mapped is None:
             continue
-        text = _translatable_segment(line, preserve_heuristic_text=preserve_heuristic_text)
-        if (
-            text
-            and preserve_unchanged_text
-            and _is_effectively_unchanged(
-                hint_units[index],
-                line,
-                preserve_heuristic_text=preserve_heuristic_text,
-            )
-        ):
-            out[unit.id] = ""
-            continue
-        if text:
-            out[unit.id] = text
+        text, pairs = mapped
+        out[unit.id] = text
+        if pairs:
+            fields[unit.id] = pairs
     for (unit_id, _source), line in zip(leftovers, leftover_aligned):
         if line is None:
             continue
@@ -548,17 +642,58 @@ def _parse_blocks(text: str) -> list[list[str]]:
             seen_category = True
             continue
         compact = line.replace(" ", "")
-        if len(compact) >= 3 and set(compact) <= {"#", "-", "=", "*", ":"}:  # separator -> block break
-            if current:
-                blocks.append(current)
-                current = []
+        if len(compact) >= 3 and set(compact) <= {"#", "-", "=", "*", ":"}:
+            # Only a '#'-bearing rule is a block break — the prompt's separator is "###". A
+            # ---/===/*** line is the model's decoration: breaking on it would shift the block
+            # count and discard an otherwise good structured reply; dropping it keeps the counts.
+            if "#" in compact:
+                if current:
+                    blocks.append(current)
+                    current = []
             continue
-        cleaned = line.lstrip("-*#").strip().strip("*").strip()
+        # Strip leading markdown only when whitespace follows: the "-" of "-25% KORTING" is the
+        # amount's sign, not a bullet (same rule as the hint parser's _MARKDOWN_LEAD).
+        cleaned = re.sub(r"^[-*#]+(?=\s|$)", "", line).strip().strip("*").strip()
         if cleaned:
             current.append(cleaned)
     if current:
         blocks.append(current)
     return blocks
+
+
+def _mapped_hint_line(
+    source_line: str,
+    translated_line: str,
+    *,
+    preserve_heuristic_text: bool = True,
+    preserve_unchanged_text: bool = False,
+) -> tuple[str, list[tuple[str, str]] | None] | None:
+    """The unit-facing ``(text, field_pairs)`` of ONE translated hint line — the single mapping
+    both the structured path and the per-line fallback use, so a unit gets the same text for the
+    same line whichever route delivered it. ``None`` when the line yields nothing usable."""
+    pairs = _field_pairs(
+        source_line,
+        translated_line,
+        preserve_heuristic_text=preserve_heuristic_text,
+        preserve_unchanged_text=preserve_unchanged_text,
+    )
+    if pairs is not None:
+        text = " ".join(translated for _source, translated in pairs).strip()
+        return text, (pairs if pairs else None)
+    text = _translatable_segment(translated_line, preserve_heuristic_text=preserve_heuristic_text)
+    if (
+        text
+        and preserve_unchanged_text
+        and _is_effectively_unchanged(
+            source_line,
+            translated_line,
+            preserve_heuristic_text=preserve_heuristic_text,
+        )
+    ):
+        return "", None
+    if text:
+        return text, None
+    return None
 
 
 def _is_noise(text: str) -> bool:

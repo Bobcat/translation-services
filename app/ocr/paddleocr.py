@@ -39,8 +39,14 @@ _SERVER_PAIR_MODELS = ("PP-OCRv5_server_det", "PP-OCRv5_server_rec")
 _CJK_ROUTING_MIN_GLYPHS = 2
 
 
-_PADDLEOCR_LOCK = threading.Lock()
+# One lock PER ENGINE: Paddle predictors are not assumed thread-safe, so prediction on one
+# engine stays serialized — but two runner slots on different engines (en vs the server pair)
+# must not block each other, and building an engine (first server-pair init downloads and
+# compiles for seconds to minutes) must not stall a warm engine's prediction. The module lock
+# only guards the two dicts and is never held during predict or engine construction.
+_PADDLEOCR_DICTS_LOCK = threading.Lock()
 _PADDLEOCR_CACHE: dict[tuple[Any, ...], Any] = {}
+_PADDLEOCR_ENGINE_LOCKS: dict[tuple[Any, ...], threading.Lock] = {}
 
 
 def resolve_paddleocr_language(settings: OcrSettings, hint_texts: list[str]) -> str:
@@ -60,7 +66,14 @@ def resolve_paddleocr_language(settings: OcrSettings, hint_texts: list[str]) -> 
 
 
 def _count_cjk_glyphs(text: Any) -> int:
-    return sum(1 for ch in str(text or "") if "一" <= ch <= "鿿" or "぀" <= ch <= "ヿ")
+    # Han (incl. Extension A) + Kana + HALFWIDTH katakana (U+FF66-FF9F, common on Japanese
+    # receipts and a plausible verbatim VLM transcription — without it such an image routes to
+    # the en recognizer and the whole read is mangled).
+    return sum(
+        1
+        for ch in str(text or "")
+        if "一" <= ch <= "鿿" or "぀" <= ch <= "ヿ" or "㐀" <= ch <= "䶿" or "ｦ" <= ch <= "ﾟ"
+    )
 
 
 def run_paddleocr(
@@ -71,10 +84,10 @@ def run_paddleocr(
     merge_lines: bool = True,
 ) -> list[OcrSegment]:
     resolved_language = str(language or settings.language or "").strip() or "en"
-    engine = _get_paddleocr_engine(settings, resolved_language)
+    engine, engine_lock = _get_paddleocr_engine(settings, resolved_language)
 
     segments: list[OcrSegment] = []
-    with _PADDLEOCR_LOCK:
+    with engine_lock:
         try:
             results = engine.predict(str(input_path))
         except Exception as exc:
@@ -95,7 +108,11 @@ def run_paddleocr(
                 text = str(raw_text or "").strip()
                 confidence = _parse_paddleocr_confidence(_list_item(scores, idx))
                 if confidence is None:
-                    confidence = 1.0
+                    # PaddleX 3.6 always emits rec_scores; a missing one means result-shape
+                    # drift. Fail SAFE: 0.0 drops the segment at min_confidence rather than
+                    # waving unknown-quality text past every filter (1.0 would also make the
+                    # upright rescue unreachable).
+                    confidence = 0.0
                 polygon = _paddleocr_polygon(_list_item(polys, idx))
                 bbox = _paddleocr_bbox(_list_item(boxes, idx))
                 if bbox is None:
@@ -104,12 +121,28 @@ def run_paddleocr(
                     continue
                 if polygon is None:
                     polygon = bbox_polygon(bbox)
-                if _polygon_is_rotated_tall(polygon):
+                # The upright rescue exists for one case: an ISOLATED tall glyph (a receipt
+                # quantity digit) that PaddleX rotated 90° and mangled. It must not run on
+                # genuine vertical text, judged by the READ itself: a rotated read longer than
+                # 2 chars, or one carrying CJK glyphs (a vertical CJK column — its rotated read
+                # is the correct one), keeps its result. Gating on content rather than on the
+                # routed engine keeps the digit rescue alive on CJK-routed receipts, whose
+                # quantity columns are the original motivating case.
+                if (
+                    len(text) <= 2
+                    and not _count_cjk_glyphs(text)
+                    and _polygon_is_rotated_tall(polygon)
+                ):
                     if rec_model is None:
                         rec_model = engine.paddlex_pipeline.text_rec_model
                         image_bgr = _load_bgr(input_path)
-                    upright = _recognize_upright(rec_model, image_bgr, bbox)
-                    if upright is not None and upright[1] >= confidence:
+                    try:
+                        upright = _recognize_upright(rec_model, image_bgr, bbox)
+                    except Exception:
+                        upright = None  # a degenerate (sub-pixel) crop must not fail the request
+                    # Only a NON-EMPTY upright read may replace the rotated one: an empty read
+                    # with a >= score would otherwise delete a valid segment.
+                    if upright is not None and upright[0] and upright[1] >= confidence:
                         text, confidence = upright
                 if not text:
                     continue
@@ -131,8 +164,11 @@ def _polygon_is_rotated_tall(polygon: list[dict[str, int]] | None) -> bool:
     if not polygon or len(polygon) < 4:
         return False
     pts = [(float(p["x"]), float(p["y"])) for p in polygon[:4]]
-    width = max(_distance(pts[0], pts[1]), _distance(pts[3], pts[2]))
-    height = max(_distance(pts[0], pts[3]), _distance(pts[1], pts[2]))
+    # PaddleX TRUNCATES the edge norms to int before comparing (get_rotate_crop_image:
+    # ``int(max(norm(...)))``); mirror that, or a crop in the ~1.40-1.60 band rotates in
+    # PaddleX while this predicate says it did not — and the mangled read is never rescued.
+    width = int(max(_distance(pts[0], pts[1]), _distance(pts[3], pts[2])))
+    height = int(max(_distance(pts[0], pts[3]), _distance(pts[1], pts[2])))
     if width <= 0:
         return False
     return (height / width) >= _ROTATED_TALL_RATIO
@@ -164,7 +200,10 @@ def _distance(a: tuple[float, float], b: tuple[float, float]) -> float:
     return math.hypot(a[0] - b[0], a[1] - b[1])
 
 
-def _get_paddleocr_engine(settings: OcrSettings, language: str) -> Any:
+def _get_paddleocr_engine(settings: OcrSettings, language: str) -> tuple[Any, threading.Lock]:
+    """The engine for this language/config plus ITS lock — the caller must hold that lock for
+    every ``predict`` (see the note at ``_PADDLEOCR_DICTS_LOCK``). Construction happens under
+    the engine's own lock (double-checked), so a slow first build never blocks other engines."""
     det_model = str(settings.det_model or "").strip()
     rec_model = str(settings.rec_model or "").strip()
     lang = str(language or "en")
@@ -183,10 +222,16 @@ def _get_paddleocr_engine(settings: OcrSettings, language: str) -> Any:
         int(settings.text_det_limit_side_len),
         str(settings.text_det_limit_type),
     )
-    with _PADDLEOCR_LOCK:
+    with _PADDLEOCR_DICTS_LOCK:
         cached = _PADDLEOCR_CACHE.get(key)
+        engine_lock = _PADDLEOCR_ENGINE_LOCKS.setdefault(key, threading.Lock())
+    if cached is not None:
+        return cached, engine_lock
+
+    with engine_lock:
+        cached = _PADDLEOCR_CACHE.get(key)  # double-check: a racing caller may have built it
         if cached is not None:
-            return cached
+            return cached, engine_lock
         try:
             from paddleocr import PaddleOCR
         except ImportError as exc:
@@ -207,8 +252,9 @@ def _get_paddleocr_engine(settings: OcrSettings, language: str) -> Any:
             )
         except Exception as exc:
             raise RuntimeError(f"failed to initialize paddleocr: {exc}") from exc
-        _PADDLEOCR_CACHE[key] = engine
-        return engine
+        with _PADDLEOCR_DICTS_LOCK:
+            _PADDLEOCR_CACHE[key] = engine
+        return engine, engine_lock
 
 
 def _paddleocr_result_payload(result: Any) -> dict[str, Any]:

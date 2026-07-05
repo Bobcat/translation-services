@@ -20,6 +20,7 @@ from io import BytesIO
 from pathlib import Path
 import time
 from typing import Any
+from typing import Callable
 
 from app.core.config import AppSettings
 from app.grouping import group_cells_into_units
@@ -65,7 +66,10 @@ def run_translate_image_pipeline(
     input_path: Path,
     input_mime_type: str,
     request: dict[str, Any],
+    checkpoint: Callable[[], None] = lambda: None,
 ) -> TranslateImageResult:
+    """``checkpoint`` is called between stages; the runtime passes one that raises when the
+    request was cancelled, so the run stops before the next expensive stage."""
     del input_mime_type
     started_at = time.perf_counter()
     source_lang = str(request.get("source_lang_code") or "").strip()
@@ -87,6 +91,7 @@ def run_translate_image_pipeline(
     )
     grouping_wall_ms = _elapsed_ms(grouping_started_at)
 
+    checkpoint()
     ocr_language = resolve_ocr_language(settings.ocr, hint.units)
 
     ocr_started_at = time.perf_counter()
@@ -107,8 +112,8 @@ def run_translate_image_pipeline(
     )
     align_wall_ms = _elapsed_ms(align_started_at)
 
-    # Observe-only: geometry spots rule-3/4 column `|`s the VLM missed (a separated label/amount).
-    # Computed and surfaced for inspection; NOT yet fed to translation.
+    # Geometry spots rule-3/4 column `|`s the VLM missed (a separated label/amount). Fed to
+    # translation by default (``use_geometry_columns``, below); also surfaced for inspection.
     hint_units_adjusted, field_geometry_changes = geometry_adjusted_hints(
         grouping.units, grouping.hint_units
     )
@@ -143,6 +148,7 @@ def run_translate_image_pipeline(
     preserve_heuristic_text = _bool_request_flag(request, "preserve_heuristic_text", default=True)
     preserve_unchanged_text = _bool_request_flag(request, "preserve_unchanged_text", default=False)
     use_geometry_columns = _bool_request_flag(request, "use_geometry_columns", default=True)
+    render_size_mode = str(request.get("render_size_mode") or "min").strip() or "min"
     # Opt-in: feed the geometry-adjusted hints (a `|` injected where a column gap shows the VLM
     # missed a rule-3/4 boundary) instead of the raw VLM hints. Same translation path, different input.
     hint_units_for_translation = hint_units_adjusted if use_geometry_columns else grouping.hint_units
@@ -150,6 +156,7 @@ def run_translate_image_pipeline(
         grouping.units,
         preserve_heuristic_text=preserve_heuristic_text,
     )
+    checkpoint()
     translation_started = time.perf_counter()
     prompt = resolve_structured_prompt(
         store_for(settings.service.prompts_root),
@@ -202,8 +209,9 @@ def run_translate_image_pipeline(
     full_translated_text = "\n".join(item.translated_text for item in translations if item.translated_text)
     sent_input, sent_instructions = _translation_call_io(llm_calls)
 
+    checkpoint()
     replacement_started = time.perf_counter()
-    rendered_image = render_translated_image(input_path, translation_units)
+    rendered_image = render_translated_image(input_path, translation_units, render_size_mode=render_size_mode)
     replacement_wall_ms = _elapsed_ms(replacement_started)
 
     debug = {
@@ -265,6 +273,7 @@ def run_translate_image_pipeline(
         "preserve_heuristic_text": preserve_heuristic_text,
         "preserve_unchanged_text": preserve_unchanged_text,
         "use_geometry_columns": use_geometry_columns,
+        "render_size_mode": render_size_mode,
         "translation_source": "llm_pool",
         "translation_input": sent_input,
         "translation_instructions": sent_instructions,

@@ -25,6 +25,7 @@ import anyio
 
 from fastapi import Body
 from fastapi import FastAPI
+from fastapi.exceptions import RequestValidationError
 from fastapi import File
 from fastapi import Form
 from fastapi import Query
@@ -52,6 +53,9 @@ from app.translation.prompts.templates import DEFAULT_USER_TEMPLATE
 
 
 SUPPORTED_IMAGE_MIME_TYPES = {"image/jpeg", "image/png", "image/webp"}
+# Upload ceiling: a phone photo tops out around 10-15 MB; anything past this is not a
+# translation job and would otherwise be read into memory whole (plus a canonical re-encode).
+_MAX_UPLOAD_BYTES = 32 * 1024 * 1024
 
 
 class PromptBody(BaseModel):
@@ -86,6 +90,22 @@ def create_app(settings_path: str | Path | None = None) -> FastAPI:
             await runtime.stop()
 
     app = FastAPI(title="Translation Services API", lifespan=lifespan)
+
+    @app.exception_handler(RequestValidationError)
+    async def _framework_validation_error(_request, exc: RequestValidationError) -> JSONResponse:
+        # One error dialect for the whole API: without this, form/query validation (a missing
+        # image_file, ``since_seq=abc``) speaks FastAPI's 422 ``{"detail": [...]}`` while every
+        # service-side rejection speaks ``{code, message, retryable}`` — clients need two parsers.
+        details = "; ".join(
+            f"{'.'.join(str(loc) for loc in err.get('loc') or ())}: {err.get('msg')}"
+            for err in exc.errors()
+        )
+        return _error(
+            400,
+            code="REQUEST_INVALID",
+            message=details or "request validation failed",
+            retryable=False,
+        )
 
     @app.post("/v1/requests", response_model=RequestSubmitEnvelope)
     async def submit_request(
@@ -132,8 +152,19 @@ def create_app(settings_path: str | Path | None = None) -> FastAPI:
                 message="uploaded image_file is empty",
                 retryable=False,
             )
+        if len(image_bytes) > _MAX_UPLOAD_BYTES:
+            return _error(
+                413,
+                code="REQUEST_INPUT_TOO_LARGE",
+                message=f"uploaded image_file exceeds {_MAX_UPLOAD_BYTES} bytes",
+                retryable=False,
+            )
         try:
-            canonical_image_bytes = _canonical_image_bytes(image_bytes, mime_type)
+            # PIL decode + re-encode of a full upload takes 100s of ms — off the event loop, or
+            # every concurrent user's polls stall behind it.
+            canonical_image_bytes = await anyio.to_thread.run_sync(
+                _canonical_image_bytes, image_bytes, mime_type
+            )
         except ValueError as exc:
             return _error(
                 400,
@@ -153,7 +184,10 @@ def create_app(settings_path: str | Path | None = None) -> FastAPI:
                 retryable=False,
             )
         upload_dir.mkdir(parents=True, exist_ok=True)
-        input_path = (upload_dir / f"input{_suffix_for_mime(mime_type)}").resolve()
+        # A UNIQUE filename per submission: the upload is written before ``runtime.submit``
+        # decides, so a conflicting/duplicate resubmission with the same request_id must not
+        # overwrite the file an accepted record's ``image.local_path`` already points at.
+        input_path = (upload_dir / f"input-{uuid.uuid4().hex[:8]}{_suffix_for_mime(mime_type)}").resolve()
         input_path.write_bytes(canonical_image_bytes)
 
         parsed["image"] = {
@@ -163,6 +197,8 @@ def create_app(settings_path: str | Path | None = None) -> FastAPI:
             "size_bytes": int(len(canonical_image_bytes)),
         }
         status_code, body = await runtime.submit(parsed)
+        if int(status_code) != 202:  # rejected or deduped -> this submission's file is unowned
+            await anyio.to_thread.run_sync(lambda: input_path.unlink(missing_ok=True))
         return JSONResponse(status_code=int(status_code), content=body)
 
     @app.post("/v1/requests/{source_request_id}/retranslate", response_model=RequestSubmitEnvelope)
@@ -239,6 +275,14 @@ def create_app(settings_path: str | Path | None = None) -> FastAPI:
         name = str(body.get("name") or "").strip()
         if not request_id or not name:
             return _error(400, code="REGRESSION_BAD_REQUEST", message="request_id and name are required", retryable=False)
+        # ``name`` lands in a filesystem path — same resolve/relative_to guard as every sibling
+        # regression endpoint, so "../" or an absolute name cannot write outside the testset.
+        testset_root = regression_capture.TESTSET_ROOT.resolve()
+        dest = (regression_capture.TESTSET_ROOT / f"{name}.x").resolve()
+        try:
+            dest.relative_to(testset_root)
+        except ValueError:
+            return _error(400, code="REGRESSION_BAD_NAME", message="name must stay inside the testset", retryable=False)
         status_code, lifecycle = await runtime.get_request(request_id)
         if int(status_code) != 200:
             return JSONResponse(status_code=int(status_code), content=lifecycle)
@@ -247,8 +291,12 @@ def create_app(settings_path: str | Path | None = None) -> FastAPI:
         if not input_path.exists():
             return _error(404, code="REGRESSION_INPUT_MISSING", message="input artifact not available", retryable=False)
         dest = regression_capture.TESTSET_ROOT / f"{name}{input_path.suffix or '.png'}"
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.write_bytes(input_path.read_bytes())
+
+        def _copy_input() -> None:
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_bytes(input_path.read_bytes())
+
+        await anyio.to_thread.run_sync(_copy_input)
         return JSONResponse(status_code=200, content={"path": str(dest), **regression_capture.status(name)})
 
     @app.post("/v1/regression/fixtures")
@@ -472,6 +520,10 @@ def _canonical_image_bytes(image_bytes: bytes, mime_type: str) -> bytes:
             return out.getvalue()
     except UnidentifiedImageError as exc:
         raise ValueError("uploaded image_file could not be decoded") from exc
+    except Image.DecompressionBombError as exc:
+        # Subclasses Exception directly (not OSError): without this arm a small file declaring
+        # huge dimensions escapes as a 500 instead of the 400 invalid-input envelope.
+        raise ValueError("uploaded image_file dimensions exceed the safety limit") from exc
     except OSError as exc:
         raise ValueError("uploaded image_file could not be normalized") from exc
 

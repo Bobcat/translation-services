@@ -80,7 +80,12 @@ class PromptStore:
         return self._write(normalized, entry)
 
     def update(self, prompt_id: str, entry: PromptEntry) -> PromptEntry:
-        return self._write(normalize_prompt_id(prompt_id), entry)
+        normalized = normalize_prompt_id(prompt_id)
+        # Update is not an upsert: a typo'd id must 404, not silently create a new prompt.
+        # A builtin id is updatable — the disk entry it writes is the deliberate override.
+        if not self._dir_for(normalized).exists() and normalized not in BUILTIN_PROMPTS:
+            raise PromptNotFoundError(f"prompt not found: {normalized}")
+        return self._write(normalized, entry)
 
     def delete(self, prompt_id: str) -> None:
         normalized = normalize_prompt_id(prompt_id)
@@ -103,9 +108,18 @@ class PromptStore:
         )
         entry_dir = self._dir_for(normalized)
         entry_dir.mkdir(parents=True, exist_ok=True)
+        # The API round-trips only ``tags``, but hand-written meta.toml files carry keys the code
+        # does not model (title, notes). Carry those through the rewrite instead of wiping them.
+        extra_meta: dict = {}
+        meta_path = entry_dir / "meta.toml"
+        if meta_path.exists():
+            try:
+                extra_meta = tomllib.loads(meta_path.read_text(encoding="utf-8"))
+            except (OSError, tomllib.TOMLDecodeError):
+                extra_meta = {}
         (entry_dir / "system.md").write_text(record.system, encoding="utf-8")
         (entry_dir / "user.md").write_text(record.user, encoding="utf-8")
-        (entry_dir / "meta.toml").write_text(_render_meta_toml(record), encoding="utf-8")
+        meta_path.write_text(_render_meta_toml(record, extra=extra_meta), encoding="utf-8")
         return record
 
     def _dir_for(self, normalized: str) -> Path:
@@ -149,9 +163,15 @@ def _toml_str(value: str) -> str:
     return f'"{escaped}"'
 
 
-def _render_meta_toml(entry: PromptEntry) -> str:
+def _render_meta_toml(entry: PromptEntry, extra: dict | None = None) -> str:
+    lines = [
+        f"{key} = {_toml_str(value)}"
+        for key, value in (extra or {}).items()
+        if key != "tags" and isinstance(value, str)
+    ]
     tags = ", ".join(_toml_str(tag) for tag in entry.tags)
-    return f"tags = [{tags}]\n"
+    lines.append(f"tags = [{tags}]")
+    return "\n".join(lines) + "\n"
 
 
 @lru_cache(maxsize=8)

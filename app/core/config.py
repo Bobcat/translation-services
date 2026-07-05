@@ -45,7 +45,9 @@ class OcrSettings:
     backend: str = "paddleocr"
     # Empty = route per image on the VLM grouping hint (Han/Kana glyphs -> the
     # multilingual server models, everything else -> the en recognizer). Non-empty
-    # pins one PaddleOCR language code; PaddleOCR's own lookup then picks the models.
+    # pins one PaddleOCR language code — note the CJK codes (japan/ch/chinese_cht)
+    # still map to the server det/rec pair unless explicit det_model/rec_model are
+    # set; other codes use PaddleOCR's own lookup.
     language: str = ""
     min_confidence: float = 0.35
     device: str = "cpu"

@@ -4,6 +4,7 @@ from app.grouping.align import _build_hint_index
 from app.grouping.align import _candidate_hints
 from app.grouping.align import _line_anchor
 from app.grouping.align import _match_scores
+from app.grouping.align import _resolve_claim_clusters
 from app.grouping.align import build_units_from_hint
 from app.grouping.hint_parser import parse_grouping_output
 from app.grouping.tokens import _tokens
@@ -36,6 +37,55 @@ def test_match_scores_indexed_equals_full_scan() -> None:
             indexed.full,
             indexed.full_alpha,
         ), text
+
+
+def test_mixed_garble_cell_falls_back_to_the_fuzzy_full_scan() -> None:
+    # One clean token ("pas") sits in the WRONG line, the rest is OCR garble of the right line.
+    # The exact index alone would score only line 0 (1/3 < threshold) and drop the cell as a
+    # leftover; the below-threshold full-scan fallback lets the fuzzy match bind line 1.
+    hint_sets = [set(_tokens("totaal pas")), set(_tokens("Kaarthouder betaling"))]
+    index = _build_hint_index(hint_sets)
+    cell = {"text": "Kaarthuder betallng pas"}
+    assert _candidate_hints(cell, index) == {0}
+    match = _match_scores(cell, hint_sets, _candidate_hints(cell, index))
+    assert match.candidates == [1]
+    assert match.score >= 0.4
+
+
+def test_garbled_continuation_claim_merges_instead_of_dropping() -> None:
+    # Claim [1] bound its line purely by fuzzy garble ("kortlng" ~ "korting"): exact-token dedup
+    # would see it as token-free and drop it — its original pixels would then double next to the
+    # translated line. Counting fuzzy-covered line tokens lets it merge as new-content continuation.
+    cells = [
+        {"id": 1, "text": "AHNEDAARBEI extra", "bbox": {"left": 0, "top": 0, "width": 200, "height": 20}},
+        {"id": 2, "text": "kortlng", "bbox": {"left": 205, "top": 0, "width": 70, "height": 20}},
+    ]
+    kept, dropped = _resolve_claim_clusters(0, [[0], [1]], cells, ["AHNEDAARBEI extra korting"])
+    assert dropped == []
+    assert sorted(kept[0]) == [0, 1]
+
+
+def test_redundant_garbled_stray_still_drops() -> None:
+    # A second garbled read of an ALREADY covered word adds nothing — it stays dropped
+    # (the dedup's whole point); fuzzy coverage must not turn strays into content.
+    cells = [
+        {"id": 1, "text": "AHNEDAARBEI extra korting", "bbox": {"left": 0, "top": 0, "width": 260, "height": 20}},
+        {"id": 2, "text": "AHNEDAARBEl", "bbox": {"left": 0, "top": 25, "width": 120, "height": 20}},
+    ]
+    kept, dropped = _resolve_claim_clusters(0, [[0], [1]], cells, ["AHNEDAARBEI extra korting"])
+    assert kept == [[0]]
+    assert dropped == [1]
+
+
+def test_repeated_tokens_do_not_inflate_a_full_match() -> None:
+    # Per-character CJK tokens repeat: 小心小心 has token mass 4 but covers only 小+心 of a
+    # 4-token line — that is NOT a full match. A cell that truly carries every token of the
+    # line (in any order, duplicates or not) still is.
+    hint_sets = [set(_tokens("小心地滑")), set(_tokens("小心"))]
+    half_covering = _match_scores({"text": "小心小心"}, hint_sets, None)
+    assert half_covering.full == (1,)
+    truly_full = _match_scores({"text": "地滑小心"}, hint_sets, None)
+    assert 0 in truly_full.full
 
 
 def _cells() -> list[dict]:
@@ -532,6 +582,53 @@ def test_parse_field_row_without_typography_label_is_kept_verbatim() -> None:
     hint = parse_grouping_output(raw)
     assert hint.units == ["8 jun | Vandaag | 11° / 21°"]
     assert hint.levels == ["body"]
+
+
+def test_bold_text_word_is_not_taken_for_a_label() -> None:
+    # "**Menu**" is image text the model bolded, not a label: 'm' happens to be a level code,
+    # but a real label carries |-fields. The heading must survive as a unit instead of becoming
+    # a standalone footer label that deletes itself and relabels the lines below.
+    raw = "**Menu**\nb|Serif|16pt|400|l: Franse vissoep | 8,50\n"
+    hint = parse_grouping_output(raw)
+    assert hint.units == ["Menu", "Franse vissoep | 8,50"]
+    assert hint.levels == [None, "body"]
+
+
+def test_text_row_starting_with_a_level_word_is_not_a_standalone_label() -> None:
+    # A receipt tax row "B | 1,69" (or a table row "Title | Mr") starts with a level code/word
+    # but is content: a genuine standalone label shows >= 2 pipes, a "<n>pt" field, or a
+    # trailing ':'. The row must stay text; a real standalone label above it still labels it.
+    raw = "b|Mono|12pt|400|l:\nB | 1,69\nTitle | Mr\n"
+    hint = parse_grouping_output(raw)
+    assert hint.units == ["B | 1,69", "Title | Mr"]
+    assert hint.levels == ["body", "body"]
+
+
+def test_footer_word_label_maps_to_footer_level() -> None:
+    # The spelled-out "footer|..." first field parses as a label AND keeps its level ('f' is
+    # not a code letter, so the first-letter fallback cannot map it).
+    raw = "footer|Mono|10pt|400|l: Alle bedragen in euro\n"
+    hint = parse_grouping_output(raw)
+    assert hint.units == ["Alle bedragen in euro"]
+    assert hint.levels == ["footer"]
+
+
+def test_leading_minus_of_an_amount_survives() -> None:
+    # "-2,00 korting": the '-' is the amount's sign, not a markdown bullet — only a marker
+    # followed by whitespace ("- Alpha") is decoration.
+    raw = "b|Mono|12pt|400|l: -2,00 korting\n- Alpha\n"
+    hint = parse_grouping_output(raw)
+    assert hint.units == ["-2,00 korting", "Alpha"]
+
+
+def test_bullet_marker_does_not_eat_a_long_first_field() -> None:
+    # In "|@blt|Prijs | 12,50" the field after the sentinel is row content, not a substituted
+    # glyph: only a short field (or an explicit "@glyph") counts as the marker.
+    raw = "b|CM|12pt|400|l:|@blt|Prijs | 12,50\n"
+    hint = parse_grouping_output(raw)
+    assert hint.units == ["Prijs | 12,50"]
+    assert hint.bullets == [True]
+    assert hint.bullet_markers == [None]
 
 
 def test_parse_labeled_separator_content_is_dropped() -> None:

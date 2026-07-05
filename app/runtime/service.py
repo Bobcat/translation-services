@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import time
 import uuid
 from pathlib import Path
@@ -18,7 +19,16 @@ from app.core.util import safe_token
 
 from .records import RequestRecord
 from .records import RequestStore
+from .records import remove_dirs
 from .scheduler import RequestScheduler
+
+_log = logging.getLogger("translation_services.runtime")
+
+
+class PipelineCancelled(Exception):
+    """Raised from a stage checkpoint when the request was cancelled mid-run: the pipeline stops
+    at the next stage boundary and frees the runner slot instead of computing (and persisting) a
+    result that would be discarded anyway."""
 
 
 def _repo_root() -> Path:
@@ -50,12 +60,23 @@ class RequestRuntime:
         self._stopping = False
         self._events: list[dict[str, Any]] = []
         self._next_event_seq = 1
+        # Event sequence numbers restart at 1 per process; a poller holding a cursor across a
+        # restart would otherwise wait forever on seq numbers that never come. The instance id
+        # in the completions envelope lets a client detect the restart and reset its cursor.
+        self._instance_id = uuid.uuid4().hex
 
     async def start(self) -> None:
         async with self._lock:
             if self._tasks:
                 return
             self._stopping = False
+            # Records live in memory only, so after a restart every existing work dir is
+            # unreferenced: no record can serve or retranslate it. Sweep them (off-loop), or
+            # work_root grows without bound across the routine restarts of this service.
+            if self.work_root.is_dir():
+                stale = [path for path in self.work_root.iterdir() if path.is_dir()]
+                if stale:
+                    asyncio.get_running_loop().run_in_executor(None, remove_dirs, stale)
             for idx in range(self._settings.scheduler.runner_slots):
                 task = asyncio.create_task(self._runner_loop(idx), name=f"request-runtime-runner-{idx}")
                 self._tasks.append(task)
@@ -70,6 +91,15 @@ class RequestRuntime:
             task.cancel()
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
+
+    def _prune_records(self) -> None:
+        """Prune expired records (caller holds the lock) and delete their artifact dirs in a
+        worker thread, fire-and-forget: ``rmtree`` must not run on the event loop or under the
+        lock — a TTL boundary expiring many debug-heavy records would stall every concurrent
+        request. Deletion uses ``ignore_errors``, so a dropped future has nothing to report."""
+        stale_dirs = self._record_store.prune()
+        if stale_dirs:
+            asyncio.get_running_loop().run_in_executor(None, remove_dirs, stale_dirs)
 
     async def submit(self, raw_payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:
         raw_payload = dict(raw_payload or {})
@@ -100,7 +130,7 @@ class RequestRuntime:
         payload_hash = _json_hash(prepared)
 
         async with self._lock:
-            self._record_store.prune()
+            self._prune_records()
             existing = self._record_store.get(request_id)
             if existing is not None:
                 if existing.payload_hash != payload_hash:
@@ -142,7 +172,7 @@ class RequestRuntime:
     async def get_request(self, request_id: str) -> tuple[int, dict[str, Any]]:
         rid = str(request_id or "").strip()
         async with self._lock:
-            self._record_store.prune()
+            self._prune_records()
             rec = self._record_store.get(rid)
             if rec is None:
                 return 404, {
@@ -180,7 +210,7 @@ class RequestRuntime:
             events = [event for event in self._events if int(event["seq"]) > safe_since]
             events = events[:safe_limit]
             next_seq = max([safe_since] + [int(event["seq"]) for event in events])
-            return 200, {"events": events, "next_seq": next_seq}
+            return 200, {"events": events, "next_seq": next_seq, "instance_id": self._instance_id}
 
     async def status(self) -> dict[str, Any]:
         async with self._lock:
@@ -274,13 +304,26 @@ class RequestRuntime:
                 rec = self._record_store.get(request_id)
                 if rec is None:
                     return
+                # A checkpoint stop — or any failure after cancel was requested — resolves to
+                # ``cancelled``: the client asked for that outcome, a coincidental pipeline error
+                # must not overwrite it with ``failed``.
+                if isinstance(exc, PipelineCancelled) or rec.state == "cancel_requested":
+                    self._record_store.mark_terminal(rec, state="cancelled", stage="cancelled")
+                    self._emit_completion(rec, event="request_cancelled")
+                    self._cond.notify_all()
+                    return
+                # The record keeps only a string; the traceback would be gone entirely — log it
+                # server-side, and name the exception class (a bare KeyError's message is just
+                # the key, useless without its type).
+                _log.exception("request %s failed", request_id)
+                message = str(exc).strip()
                 self._record_store.mark_terminal(
                     rec,
                     state="failed",
                     stage="failed",
                     error={
                         "code": "REQUEST_FAILED",
-                        "message": str(exc).strip() or exc.__class__.__name__,
+                        "message": f"{exc.__class__.__name__}: {message}" if message else exc.__class__.__name__,
                     },
                 )
                 self._emit_completion(rec, event="request_failed")
@@ -335,11 +378,36 @@ class RequestRuntime:
             "translator_mode": source_request.get("translator_mode"),
             "translation_prompt": str(body.get("translation_prompt") or ""),
             "translation_prompt_id": str(body.get("translation_prompt_id") or ""),
+            # Render-size mode is part of the A/B surface: the body may override, else the
+            # source run's choice carries over (a schema default would silently reset it).
+            "render_size_mode": str(body.get("render_size_mode") or "").strip()
+            or source_request.get("render_size_mode")
+            or "min",
         }
+        # Same for the boolean flags: body overrides, else the source run's value carries over —
+        # letting the schema default refill them would silently change the retranslate's inputs
+        # beyond the prompt/language the caller asked to vary. ``in body`` (not ``or``) so an
+        # explicit ``false`` override survives.
+        for flag in ("preserve_heuristic_text", "preserve_unchanged_text", "use_geometry_columns"):
+            if flag in body:
+                payload[flag] = bool(body[flag])
+            elif flag in source_request:
+                payload[flag] = bool(source_request[flag])
         request_id = str(body.get("request_id") or "").strip()
         if request_id:
             payload["request_id"] = request_id
         return await self.submit(payload)
+
+    def _cancel_checkpoint_for(self, request_id: str):
+        """A callable the pipeline invokes between stages (from the worker thread — a GIL-atomic
+        dict/attribute read, no lock needed): raises ``PipelineCancelled`` once cancel was
+        requested, so a cancelled request frees its runner slot at the next stage boundary
+        instead of running OCR + LLM calls + render to completion for a discarded result."""
+        def checkpoint() -> None:
+            rec = self._record_store.get(request_id)
+            if rec is not None and rec.state == "cancel_requested":
+                raise PipelineCancelled()
+        return checkpoint
 
     def _process_request(self, request_id: str, request: dict[str, Any]) -> dict[str, Any]:
         if str(request.get("task")) == "retranslate_image":
@@ -362,6 +430,7 @@ class RequestRuntime:
             input_path=input_path,
             source_grouping=source_grouping,
             request=request,
+            checkpoint=self._cancel_checkpoint_for(request_id),
         )
         return self._persist_result(request_id, request, input_path, str(image.get("mime_type") or "image/png"), result)
 
@@ -377,6 +446,7 @@ class RequestRuntime:
             input_path=input_path,
             input_mime_type=input_mime_type,
             request=request,
+            checkpoint=self._cancel_checkpoint_for(request_id),
         )
         return self._persist_result(request_id, request, input_path, input_mime_type, result)
 
@@ -487,6 +557,9 @@ class RequestRuntime:
         return self._record_store.to_lifecycle(rec, queue_position=self._scheduler.queue_position(rec))
 
     def _emit_completion(self, rec: RequestRecord, *, event: str) -> None:
+        # A NOTIFICATION, not the result: embedding ``rec.response`` would pin up to 1000 full
+        # responses (incl. the multi-MB ``llm_calls`` log) in this deque long past the record
+        # TTL. A consumer that wants the payload polls GET /v1/requests/{id} on the event.
         item = {
             "seq": int(self._next_event_seq),
             "event": str(event),
@@ -495,7 +568,7 @@ class RequestRuntime:
             "task": rec.task,
             "submitted_at_utc": rec.submitted_at_utc,
             "finished_at_utc": rec.finished_at_utc,
-            "response": rec.response,
+            "response": None,
             "error": rec.error,
         }
         self._next_event_seq += 1
