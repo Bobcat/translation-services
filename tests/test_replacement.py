@@ -191,6 +191,102 @@ def test_split_table_row_fires_for_cyrillic_fields() -> None:
     assert {c["translated_text"] for c in cells} == {"MILK", "1,69"}
 
 
+def test_slot_sweep_erases_ink_the_ocr_box_undershot(tmp_path) -> None:
+    # The OCR box can undershoot the glyphs by a few px; the digit bottoms then survive the
+    # member erase as dash-like remnants. A superseded (erase-only) line owns its whole slot,
+    # so the sweep must leave it fully background.
+    input_path = tmp_path / "in.png"
+    img = Image.new("RGB", (300, 120), (255, 255, 255))
+    draw = ImageDraw.Draw(img)
+    for x in range(44, 196, 14):    # glyph-like strokes, line 1: ink matches its box
+        draw.rectangle((x, 24, x + 6, 38), fill=(0, 0, 0))
+    for x in range(44, 136, 14):    # line 2: strokes stick 6px below the box (y 62..86)
+        draw.rectangle((x, 62, x + 6, 86), fill=(0, 0, 0))
+    img.save(input_path)
+    units = [{
+        "translated_text": "Hi",
+        # hint-side source carries a token no member accounts for -> the sweep gate opens
+        "field_translations": [("HELLO WORLD in", "Hi")],
+        "members": [
+            {"cell_id": 1, "text": "HELLO", "translate": True,
+             "bbox": {"left": 40, "top": 20, "width": 160, "height": 20}},
+            {"cell_id": 2, "text": "WORLD", "translate": True,
+             "bbox": {"left": 40, "top": 60, "width": 100, "height": 22}},  # ink ends at y=86
+        ],
+    }]
+    png = render_translated_image(input_path, units)
+    out = np.asarray(Image.open(BytesIO(png)).convert("RGB"))
+    line2_band = out[56:92, 30:220]
+    assert line2_band.min() > 200  # no ink remnants below the undershot box
+
+
+def test_sweep_erases_unclaimed_ink_but_keeps_other_units_pixels(tmp_path) -> None:
+    # adv-budgets anatomy: OCR detected '2025' but missed the 'in' before it. The unclaimed ink
+    # inside the group's own line band is leftover source text -> swept. The same ink, when it
+    # belongs to ANOTHER unit's member (a preserved/skipped cell), is protected ground.
+    def make_input(path):
+        img = Image.new("RGB", (300, 120), (255, 255, 255))
+        draw = ImageDraw.Draw(img)
+        for x in range(44, 236, 14):   # line 1 glyph strokes (wide -> group span)
+            draw.rectangle((x, 24, x + 6, 38), fill=(0, 0, 0))
+        draw.rectangle((62, 64, 68, 78), fill=(0, 0, 0))     # the OCR-missed "in" ink
+        draw.rectangle((74, 64, 80, 78), fill=(0, 0, 0))
+        for x in range(102, 156, 14):  # the detected '2025' strokes
+            draw.rectangle((x, 64, x + 6, 78), fill=(0, 0, 0))
+        img.save(path)
+
+    base_unit = {
+        "translated_text": "Hi",
+        # The hint-side source carries "in", which no member accounts for — the gate that
+        # allows sweeping: the translation covers the undetected word.
+        "field_translations": [("HELLO WORLD AGAIN in 2025", "Hi")],
+        "members": [
+            {"cell_id": 1, "text": "HELLO WORLD AGAIN", "translate": True,
+             "bbox": {"left": 40, "top": 20, "width": 200, "height": 20}},
+            {"cell_id": 2, "text": "2025", "translate": True,
+             "bbox": {"left": 100, "top": 60, "width": 60, "height": 22}},
+        ],
+    }
+
+    unclaimed = tmp_path / "unclaimed.png"
+    make_input(unclaimed)
+    out = np.asarray(Image.open(BytesIO(render_translated_image(unclaimed, [base_unit]))).convert("RGB"))
+    assert out[64:78, 60:84].min() > 200  # unclaimed "in" ink swept with the band
+
+    protected = tmp_path / "protected.png"
+    make_input(protected)
+    other_unit = {  # same ink, but now claimed by a skipped unit (empty translation)
+        "translated_text": "",
+        "members": [{"cell_id": 3, "text": "in", "translate": False,
+                     "bbox": {"left": 60, "top": 62, "width": 24, "height": 18}}],
+    }
+    out = np.asarray(Image.open(BytesIO(render_translated_image(protected, [base_unit, other_unit]))).convert("RGB"))
+    assert out[66:76, 62:82].min() < 100  # protected member ink survives
+
+
+def test_company_member_with_preserve_dropped_field_stays_out_of_the_spend_cell() -> None:
+    # When the company field is preserve-dropped from the pairs ("Amazon" -> "Amazon", unchanged),
+    # the company member's best remaining match is the LONG spend field — on scattered 1-2 char
+    # noise it reached 0.67 and joined the spend cell: the row erase then swallowed the company
+    # name and the spend text rendered at the company's column. First/last table rows (short
+    # names: Amazon 0.67, Unilever 0.62) hit this; the middle rows stayed under the threshold.
+    unit = {
+        "field_translations": [("$23,5 miljard aan advertising & promotional costs in 2025",
+                                "$23,5 miljard aan reclame- & promotiekosten in 2025")],
+        "members": [
+            {"text": "Amazon", "translate": True, "bbox": {"left": 50, "top": 388, "width": 160, "height": 58}},
+            {"text": "$23,5 miljard a", "translate": True, "bbox": {"left": 656, "top": 385, "width": 300, "height": 58}},
+            {"text": "advertising &", "translate": True, "bbox": {"left": 655, "top": 470, "width": 300, "height": 56}},
+            {"text": "promotional co", "translate": True, "bbox": {"left": 656, "top": 554, "width": 300, "height": 51}},
+        ],
+    }
+    cells = _split_table_row(unit)
+    assert cells is not None and len(cells) == 1
+    member_texts = [m["text"] for m in cells[0]["members"]]
+    assert "Amazon" not in member_texts  # unplaced -> original pixels stay at column 1
+    assert "$23,5 miljard a" in member_texts  # the true wrapped fragments still bind
+
+
 def test_baseline_angle_is_exact_for_parallel_lines_of_unequal_length() -> None:
     # A long line above a short last line, both at a true 6°: with only y de-meaned the shared
     # intercept dragged the fit shallow (~4.5°); de-meaning x per cluster makes it exact.

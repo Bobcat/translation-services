@@ -429,3 +429,23 @@ text contains a descender letter (g/j/p/q/y), by one font ``descent``. All-caps 
 WARNING title, "2025") have none → stay tight → tight bands stay safe. A descender line that does
 sit in a band stays within it (a band is built on the line height, which already includes the
 descent). Parked for the eventual erase rebuild — text-based, self-discriminating, no margin tuning.
+
+**Follow-up (2026-07-05): built and measured — parked stays right.** Implemented in three
+variants against the 46-fixture harness. (a) As written (per-word, text-only): 15/46 fixtures
+change — per-word bottoms NOTCH the erase bands on textured paper (nike body), and the extension
+eats undetected content sitting below a line (kassabon's un-OCR'd "13"/"4397" digits: hidden-miss
+class). (b) Per-LINE extension (straight band edge) + flat-group gate + an ink-fraction guard on
+the strip below: still 11/46 — nearly every flat body line carries a descender, so the mechanism
+inherently retouches most renders, and the guard is untunable (real tails are sparse, but dense
+neighbours and texture sit in the same fraction range). (c) The user's sharper
+criterion — "extending is free as long as the bite is the same background" — implemented as three
+pixel gates (foreign colour outside own glyph columns forbids; DENSE ink under own columns forbids;
+only sparse tails erased): still 12/46, and the killer stands: thin real content directly below a
+line (the receipt's handwritten "4397", a weather value losing its top) is OPTICALLY IDENTICAL to
+descender tails within a descent-deep strip — no local pixel rule separates them, and re-OCR
+segmentation churns broadly (nike) whenever bands grow. Conclusion after three variants: the
+discriminator is right but the pay-off needs an erase that can afford to grow — with an
+inpaint-grade fill (Tier-2/LaMa) the extension becomes visually free and this text-based rule is
+the correct scope for it. Until then the slot sweep covers superseded lines (ghost words +
+box-undershoot remnants there); streaks under TILED lines remain a named limit of the flat-fill
+erase. Do not attempt a fourth local-heuristic variant.

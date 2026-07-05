@@ -102,6 +102,13 @@ _BG_SNAP_DELTA = 24
 # line (a coloured header band a few px away) and erase it; a tight vertical margin keeps the
 # fill on the text. The sides keep ``pad`` (and grow with the tile) for horizontal blending.
 _ERASE_MARGIN = 2.0
+# Stray-ink cleanup (flat, angle-snapped images only). A pixel counts as ink when any channel
+# deviates this much from the plane's sampled background. Both mechanisms are self-limiting on
+# unreliable ground: the band sweep runs only when the un-claimed part of the band is
+# overwhelmingly background (texture fails the fraction guard and nothing happens), and quad
+# growth only sticks when it reaches a CLEAN row within its cap (texture never does).
+_INK_DELTA = 48
+_SWEEP_MAX_INK_FRACTION = 0.35
 
 
 @dataclass(frozen=True)
@@ -130,8 +137,24 @@ def render_translated_image(
     jobs: list[_Job] = []
     groups = _groups(translation_units)
     snap_horizontal = _image_is_flat(translation_units)
+    # Every member box of EVERY unit — rendered, preserved or skipped — is protected ground for
+    # the stray-ink sweep: only ink no unit accounts for may be treated as leftover source text.
+    protected_boxes = [
+        dict(member["bbox"])
+        for unit in translation_units
+        for member in (unit.get("members") or [])
+        if member.get("bbox")
+    ]
     for group in groups:
-        jobs.extend(_plan_group(base, group, snap_horizontal=snap_horizontal, render_size_mode=render_size_mode))
+        jobs.extend(
+            _plan_group(
+                base,
+                group,
+                snap_horizontal=snap_horizontal,
+                render_size_mode=render_size_mode,
+                protected_boxes=protected_boxes,
+            )
+        )
 
     # Pass 1: cover every original (along the slant) so no source text peeks through.
     erase = ImageDraw.Draw(base)
@@ -204,8 +227,10 @@ def _split_table_row(unit: dict[str, Any]) -> list[dict[str, Any]] | None:
     does not always list fields left-to-right). A field may own SEVERAL members: a column OCR
     split into wrapped lines (a long spend description) then renders its one translation reflowed
     over those lines. Conversely several fields may share one column: a 'PRIJS | BEDRAG' hint that
-    OCR read as a single box renders both translations in field order. Returns None when the unit
-    is not such a row, or no requested field can be placed."""
+    OCR read as a single box renders both translations in field order. A translatable member that
+    matches NO field stays out of every cell — its original pixels are left standing (its field
+    was preserve-dropped from the pairs, e.g. an unchanged company name). Returns None when the
+    unit is not such a row, or no requested field can be placed."""
     pairs = unit.get("field_translations")
     if not pairs:
         return None
@@ -325,12 +350,25 @@ def _field_overlap(a: str, b: str) -> float:
     """Overlap of a row member against a field source: matched run length over the SHORTER of the
     two (letters+digits only, tolerant to OCR garble like AHNEDAARBEI vs AHNEDAARDBEI). 1.0 when one
     contains the other, so a column OCR split into wrapped fragments ('advertising &') still binds
-    to its full field source — which a symmetric ratio scores too low to clear _FIELD_MATCH_MIN."""
+    to its full field source — which a symmetric ratio scores too low to clear _FIELD_MATCH_MIN.
+
+    Only CONTIGUOUS runs of 3+ characters count (capped at the shorter key's length, so a 1-2 char
+    member can still match by containment). A short member against a LONG field otherwise reaches
+    the placement threshold on scattered 1-2 char noise — "Amazon" collects 4 stray characters in
+    "$23,5 miljard aan advertising ... 2025" (4/6 = 0.67) and a company-name cell whose own field
+    was preserve-dropped from the pairs then lands in the SPEND cell: the row erase swallows the
+    company name and the spend text renders at the company's column. Genuine fragments match in
+    one full-length run, garble in a few long runs; both are untouched by the filter."""
     na = _field_key(a)
     nb = _field_key(b)
     if not na or not nb:
         return 0.0
-    matched = sum(block.size for block in difflib.SequenceMatcher(None, na, nb).get_matching_blocks())
+    min_block = min(3, len(na), len(nb))
+    matched = sum(
+        block.size
+        for block in difflib.SequenceMatcher(None, na, nb).get_matching_blocks()
+        if block.size >= min_block
+    )
     return matched / min(len(na), len(nb))
 
 
@@ -441,7 +479,13 @@ def _plan_group(
     *,
     snap_horizontal: bool = False,
     render_size_mode: str = "min",
+    protected_boxes: list[dict[str, Any]] | None = None,
+    sweep_ok: bool | None = None,
 ) -> list[_Job]:
+    # Decide BEFORE a table split whether this group may sweep stray ink: the split nulls the
+    # field pairs on its cells, and the pairs' source texts are the hint-side evidence.
+    if sweep_ok is None:
+        sweep_ok = _hint_covers_undetected_text(units)
     if len(units) == 1:
         cells = _split_table_row(units[0])
         if cells is not None:
@@ -449,7 +493,12 @@ def _plan_group(
                 job
                 for cell in cells
                 for job in _plan_group(
-                    base, [cell], snap_horizontal=snap_horizontal, render_size_mode=render_size_mode
+                    base,
+                    [cell],
+                    snap_horizontal=snap_horizontal,
+                    render_size_mode=render_size_mode,
+                    protected_boxes=protected_boxes,
+                    sweep_ok=sweep_ok,
                 )
             ]
 
@@ -468,6 +517,7 @@ def _plan_group(
     texts: list[str] = []
     group_quads: list = []
     quad_tokens: list[set[str]] = []  # source words of each quad's member, parallel to group_quads
+    own_boxes: list[dict[str, Any]] = []  # members this group ERASES — sweep-eligible ground
     for unit in units:
         translated = fold_lone_fullwidth_punctuation(str(unit.get("translated_text") or "").strip())
         # Empty or an OCR-noise single char -> leave the original alone. A single CJK character
@@ -485,6 +535,7 @@ def _plan_group(
         for member, quad in placed:
             group_quads.append(quad)
             quad_tokens.append(set(re.findall(r"[^\W\d_]+", str(member.get("text") or "").lower())))
+            own_boxes.append(dict(member["bbox"]))
     if not texts:
         return []
 
@@ -577,6 +628,12 @@ def _plan_group(
         if all(max(abs(bg[c] - median_bg[c]) for c in range(3)) <= _BG_SNAP_DELTA for bg, _ in colors):
             colors = [(median_bg, contrasting_fg(median_bg))] * len(colors)
 
+    # Flat, angle-snapped groups get the pixel-evidence cleanups: the descender bottom
+    # extension per line, and — gated separately on hint coverage — the stray-ink slot sweep
+    # after the jobs are built. Tilted groups skip both: the axis-aligned measurement is
+    # unreliable there (honest limit).
+    base_np = np.asarray(base) if angle == 0.0 else None
+
     jobs: list[_Job] = []
     for index, plane in enumerate(planes):
         x_axis, y_axis, xmin, xmax, ymin, ymax = plane["frame"]
@@ -631,7 +688,137 @@ def _plan_group(
             clip_x = int(round(xmin))
             erase_quads = [[(max(x, clip_x), y) for x, y in quad] for quad in erase_quads]
         jobs.append(_Job(erase_quads=erase_quads, bg_color=bg, tile=tile, dst_quad=dst_quad))
+    if base_np is not None and sweep_ok:
+        _sweep_stray_ink(base_np, planes, jobs, protected_boxes or [], own_boxes)
     return jobs
+
+
+def _hint_covers_undetected_text(units: list[dict[str, Any]]) -> bool:
+    """Whether the group's HINT-side source (the field pairs' source texts) carries tokens its
+    detected members do not account for — the signal that this line holds text OCR never boxed
+    but the translation DOES cover (the VLM read it). Only then may unclaimed ink be treated as
+    superseded source text; where hint and OCR both missed it (a receipt's time or card digits),
+    the translation does not cover it and the pixels must stay: a visible miss beats a hidden
+    one."""
+    source = " ".join(
+        str(source_text)
+        for unit in units
+        for source_text, _translated in (unit.get("field_translations") or [])
+    )
+    if not source:
+        return False
+    member_tokens = {
+        token
+        for unit in units
+        for member in (unit.get("members") or [])
+        for token in re.findall(r"\w+", str(member.get("text") or "").lower())
+    }
+    return any(token not in member_tokens for token in re.findall(r"\w+", source.lower()))
+
+
+def _column_mask(
+    boxes: list[dict[str, Any]], band0: int, band1: int, x0: int, x1: int
+) -> np.ndarray:
+    """Columns of the ``x0..x1`` window covered by any box that vertically overlaps the band."""
+    mask = np.zeros(max(0, x1 - x0), dtype=bool)
+    for box in boxes:
+        b_top = int(box.get("top", 0))
+        if b_top + int(box.get("height", 0)) < band0 or b_top > band1:
+            continue
+        b_x0 = max(0, int(box.get("left", 0)) - int(_ERASE_MARGIN) - x0)
+        b_x1 = min(x1 - x0, int(box.get("left", 0)) + int(box.get("width", 0)) + int(_ERASE_MARGIN) - x0)
+        if b_x1 > b_x0:
+            mask[b_x0:b_x1] = True
+    return mask
+
+
+def _sweep_stray_ink(
+    base_np: np.ndarray,
+    planes: list[dict[str, Any]],
+    jobs: list[_Job],
+    protected_boxes: list[dict[str, Any]],
+    own_boxes: list[dict[str, Any]],
+) -> None:
+    """Erase the LINE SLOT of the group's erase-only planes — lines whose content the reflow
+    moved into the lines above (the translation needed fewer lines than the original, and the
+    hint-coverage gate already established that this line's text lives on in the translation).
+    A superseded line's slot may hold ink the member erase cannot reach: words OCR never
+    detected (they double under the translation) and glyph edges the OCR box undershot (digit
+    bottoms survive as dash-like remnants). The slot runs to halfway the neighbouring planes —
+    ink past that midline belongs to the neighbour. Planes that still receive a tile are left
+    alone: unclaimed ink next to still-standing content can be REAL content the pipeline
+    missed (a receipt's time or card digits), and hiding a miss is worse than showing it.
+
+    Members of OTHER units (preserved fields, skipped units, interleaved leftovers) are
+    protected ground: when one touches the slot, only the un-protected ink runs are erased
+    instead of the full slot. The group's own erased members are not protected — their
+    leftovers are exactly what the slot erase is for. A slot whose unclaimed part is not
+    overwhelmingly background is skipped entirely (texture: the measurement means nothing)."""
+    height, width = base_np.shape[:2]
+    group_x0 = int(max(0, min(plane["frame"][2] for plane in planes)))
+    group_x1 = int(min(width, max(plane["frame"][3] for plane in planes)))
+    own_keys = {
+        (int(b.get("left", 0)), int(b.get("top", 0)), int(b.get("width", 0)), int(b.get("height", 0)))
+        for b in own_boxes
+    }
+    other_boxes = [
+        b for b in protected_boxes
+        if (int(b.get("left", 0)), int(b.get("top", 0)), int(b.get("width", 0)), int(b.get("height", 0)))
+        not in own_keys
+    ]
+    for index, plane in enumerate(planes):
+        if jobs[index].tile is not None:
+            continue  # a drawn line: unclaimed neighbours may be missed content, keep them
+        frame = plane["frame"]
+        ymin, ymax = float(frame[4]), float(frame[5])
+        line_h = max(1.0, ymax - ymin)
+        # The line's slot: to halfway the neighbouring plane, or — at the block's edge — far
+        # enough to cover under/overshooting glyph edges (descender depth scales with size).
+        edge_ext = max(_ERASE_MARGIN, 0.35 * line_h)
+        top_ext = (ymin - float(planes[index - 1]["frame"][5])) / 2 if index else edge_ext
+        bottom_ext = (float(planes[index + 1]["frame"][4]) - ymax) / 2 if index + 1 < len(planes) else edge_ext
+        band0 = max(0, int(ymin - max(_ERASE_MARGIN, min(top_ext, line_h))))
+        band1 = min(height, int(ymax + max(_ERASE_MARGIN, min(bottom_ext, line_h))))
+        x0 = group_x0 if plane.get("bullet_y") is None else max(group_x0, int(frame[2]))
+        x1 = group_x1
+        if band1 <= band0 or x1 <= x0:
+            continue
+        band = base_np[band0:band1, x0:x1].astype(int)
+        bg = np.array(jobs[index].bg_color)
+        inked = (np.abs(band - bg).max(axis=2) > _INK_DELTA).any(axis=0)
+        own_cols = _column_mask(own_boxes, band0, band1, x0, x1)
+        outside_own = ~own_cols
+        if outside_own.any() and inked[outside_own].mean() > _SWEEP_MAX_INK_FRACTION:
+            continue  # unclaimed part is mostly ink: not a flat background, do not touch it
+        protected_cols = _column_mask(other_boxes, band0, band1, x0, x1)
+        if not protected_cols.any():
+            jobs[index].erase_quads.append([(x0, band0), (x1, band0), (x1, band1), (x0, band1)])
+            continue
+        # A protected member shares the slot: erase only the un-protected ink runs.
+        candidate = inked & ~protected_cols
+        run_start = None
+        gap = 0
+        runs: list[tuple[int, int]] = []
+        for col in range(len(candidate) + 1):
+            on = col < len(candidate) and candidate[col]
+            if on:
+                if run_start is None:
+                    run_start = col
+                gap = 0
+            elif run_start is not None:
+                gap += 1
+                if gap > 3 or col == len(candidate):
+                    runs.append((run_start, col - gap + 1))
+                    run_start = None
+                    gap = 0
+        for r0, r1 in runs:
+            if r1 - r0 < 2:
+                continue  # single-pixel specks: dust/JPEG noise, not glyphs
+            e_x0 = max(0, x0 + r0 - 2)
+            e_x1 = min(width, x0 + r1 + 2)
+            jobs[index].erase_quads.append(
+                [(e_x0, band0), (e_x1, band0), (e_x1, band1), (e_x0, band1)]
+            )
 
 
 def _bullet_geometry(base: Image.Image, frame: tuple, angle: float) -> tuple[float, float] | None:
