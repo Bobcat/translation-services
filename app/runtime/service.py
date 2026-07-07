@@ -12,6 +12,7 @@ from pydantic import ValidationError
 
 from app.core.config import AppSettings
 from app.core.schemas import RequestPayload
+from app.tasks.rerender_image import run_rerender_image_pipeline
 from app.tasks.retranslate_image import run_retranslate_image_pipeline
 from app.tasks.translate_image import run_translate_image_pipeline
 from app.core.util import iso_utc
@@ -382,7 +383,10 @@ class RequestRuntime:
             # source run's choice carries over (a schema default would silently reset it).
             "render_size_mode": str(body.get("render_size_mode") or "").strip()
             or source_request.get("render_size_mode")
-            or "min",
+            or "median",
+            "erase_fill_mode": str(body.get("erase_fill_mode") or "").strip()
+            or source_request.get("erase_fill_mode")
+            or "flat",
         }
         # Same for the boolean flags: body overrides, else the source run's value carries over —
         # letting the schema default refill them would silently change the retranslate's inputs
@@ -392,6 +396,56 @@ class RequestRuntime:
             if flag in body:
                 payload[flag] = bool(body[flag])
             elif flag in source_request:
+                payload[flag] = bool(source_request[flag])
+        request_id = str(body.get("request_id") or "").strip()
+        if request_id:
+            payload["request_id"] = request_id
+        return await self.submit(payload)
+
+    async def submit_rerender(
+        self, *, source_request_id: str, body: dict[str, Any]
+    ) -> tuple[int, dict[str, Any]]:
+        """Queue a ``rerender_image`` run that re-renders the source run's cached translations
+        with new render flags (``render_size_mode``/``erase_fill_mode``) — no LLM call, so a
+        render-flag A/B compares exactly the render, with zero translation run-variance."""
+        sid = str(source_request_id or "").strip()
+        async with self._lock:
+            source = self._record_store.get(sid)
+            if source is None:
+                return 404, {
+                    "code": "REQUEST_NOT_FOUND",
+                    "message": "source request_id not found",
+                    "retryable": False,
+                    "details": {"request_id": sid},
+                }
+            source_request = dict(source.request)
+        job_root = (self.work_root / safe_token(sid)).resolve()
+        if not (job_root / "grouping.json").exists() or not (job_root / "translation.json").exists():
+            return 409, {
+                "code": "REQUEST_SOURCE_TRANSLATION_MISSING",
+                "message": "source run has no cached translations to re-render (it may have been pruned)",
+                "retryable": False,
+                "details": {"request_id": sid},
+            }
+        # Only the two render flags are caller-controlled; everything else carries over verbatim
+        # from the source run — a re-render by definition changes nothing upstream of render.
+        payload: dict[str, Any] = {
+            "task": "rerender_image",
+            "source_request_id": sid,
+            "image": dict(source_request.get("image") or {}),
+            "source_lang_code": source_request.get("source_lang_code"),
+            "target_lang_code": source_request.get("target_lang_code"),
+            "translator_model": source_request.get("translator_model"),
+            "translator_mode": source_request.get("translator_mode"),
+            "render_size_mode": str(body.get("render_size_mode") or "").strip()
+            or source_request.get("render_size_mode")
+            or "median",
+            "erase_fill_mode": str(body.get("erase_fill_mode") or "").strip()
+            or source_request.get("erase_fill_mode")
+            or "flat",
+        }
+        for flag in ("preserve_heuristic_text", "preserve_unchanged_text", "use_geometry_columns"):
+            if flag in source_request:
                 payload[flag] = bool(source_request[flag])
         request_id = str(body.get("request_id") or "").strip()
         if request_id:
@@ -412,7 +466,33 @@ class RequestRuntime:
     def _process_request(self, request_id: str, request: dict[str, Any]) -> dict[str, Any]:
         if str(request.get("task")) == "retranslate_image":
             return self._process_retranslate_image_request(request_id, request)
+        if str(request.get("task")) == "rerender_image":
+            return self._process_rerender_image_request(request_id, request)
         return self._process_translate_image_request(request_id, request)
+
+    def _process_rerender_image_request(self, request_id: str, request: dict[str, Any]) -> dict[str, Any]:
+        image = dict(request.get("image") or {})
+        input_path = Path(str(image.get("local_path") or "")).resolve()
+        if not input_path.exists() or not input_path.is_file():
+            raise RuntimeError("source input image file is missing")
+        source_request_id = str(request.get("source_request_id") or "").strip()
+        source_root = (self.work_root / safe_token(source_request_id)).resolve()
+        grouping_path = source_root / "grouping.json"
+        translation_path = source_root / "translation.json"
+        if not grouping_path.exists() or not translation_path.exists():
+            raise RuntimeError("source run translations are missing (they may have been pruned)")
+        source_grouping = json.loads(grouping_path.read_text(encoding="utf-8"))
+        source_translation = json.loads(translation_path.read_text(encoding="utf-8"))
+
+        result = run_rerender_image_pipeline(
+            settings=self._settings,
+            input_path=input_path,
+            source_grouping=source_grouping,
+            source_translation=source_translation,
+            request=request,
+            checkpoint=self._cancel_checkpoint_for(request_id),
+        )
+        return self._persist_result(request_id, request, input_path, str(image.get("mime_type") or "image/png"), result)
 
     def _process_retranslate_image_request(self, request_id: str, request: dict[str, Any]) -> dict[str, Any]:
         image = dict(request.get("image") or {})

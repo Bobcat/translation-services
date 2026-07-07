@@ -97,6 +97,7 @@ def build_units_from_hint(
             indices=indices,
             unit_id=order,
             hint_index=label,
+            hint_line=hint_units[label] if label is not None else None,
             level=_hint_meta(label, hint_levels),
             block_id=_hint_meta(label, hint_block_ids),
             alignment=_hint_meta(label, hint_alignments),
@@ -273,6 +274,47 @@ def _drop_icon_fragments(
         if kept:
             dropped.extend(i for i in indices if i not in kept)
     return out, dropped
+
+
+def _member_translate_flags(texts: list[str], hint_line: str | None) -> list[bool]:
+    """Base rule: a member translates unless its own text is nontranslatable (a bare number,
+    URL, price). Field inheritance on top: OCR often splits a phrase's number into its own
+    cell ("8 jun" -> cells "8" + "jun") while the hint keeps one field whose translation
+    carries the number ("8 jun" -> "6月8日") — preserving the bare digit would render the
+    date twice next to a half-erased original. So a nontranslatable member joins the
+    translation when the hint FIELD covering it is a translatable phrase. The covering field
+    is the unique field containing the member's tokens; when several fields share the token
+    ("9 jun" and "9°/16°" both carry "9"), the unique field of an ADJACENT member decides,
+    provided it covers this member too. A field that is itself nontranslatable ("11°/21°",
+    a "1,69 B" price) keeps its numerics preserved, and no resolution means no flip."""
+    flags = [not _is_nontranslatable(text) for text in texts]
+    if not hint_line:
+        return flags
+    fields = [
+        (set(_tokens(part)), not _is_nontranslatable(part))
+        for part in str(hint_line).split("|")
+    ]
+    token_sets = [set(_tokens(text)) for text in texts]
+
+    def covering(tokens: set[str]) -> list[int]:
+        return [i for i, (field_tokens, _) in enumerate(fields) if tokens and tokens <= field_tokens]
+
+    for index, (flag, tokens) in enumerate(zip(flags, token_sets)):
+        if flag or not tokens:
+            continue
+        candidates = covering(tokens)
+        if len(candidates) > 1:
+            resolved = None
+            for neighbour in (index - 1, index + 1):
+                if 0 <= neighbour < len(texts):
+                    neighbour_fields = covering(token_sets[neighbour])
+                    if len(neighbour_fields) == 1 and neighbour_fields[0] in candidates:
+                        resolved = neighbour_fields[0]
+                        break
+            candidates = [resolved] if resolved is not None else []
+        if len(candidates) == 1 and fields[candidates[0]][1]:
+            flags[index] = True
+    return flags
 
 
 def _hint_fields(hint_line: str) -> list[set[str]]:
@@ -591,6 +633,7 @@ def _build_unit(
     indices: list[int],
     unit_id: int,
     hint_index: int | None = None,
+    hint_line: str | None = None,
     level: str | None = None,
     block_id: int | None = None,
     alignment: str | None = None,
@@ -599,16 +642,19 @@ def _build_unit(
     bullet: bool = False,
     bullet_marker: str | None = None,
 ) -> TranslationUnit:
+    texts = [str(cells[cell_index].get("text") or "") for cell_index in indices]
+    translate_flags = _member_translate_flags(texts, hint_line)
     members: list[UnitMember] = []
-    for order, cell_index in enumerate(indices, start=1):
+    for order, (cell_index, text, translate) in enumerate(
+        zip(indices, texts, translate_flags), start=1
+    ):
         cell = cells[cell_index]
-        text = str(cell.get("text") or "")
         polygon = cell.get("polygon")
         members.append(
             UnitMember(
                 cell_id=int(cell["id"]),
                 text=text,
-                translate=not _is_nontranslatable(text),
+                translate=translate,
                 bbox=dict(cell.get("bbox") or {}),
                 order=order,
                 polygon=[dict(point) for point in polygon] if polygon else None,

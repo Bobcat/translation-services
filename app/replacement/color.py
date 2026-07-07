@@ -3,8 +3,10 @@
 Text concentrates in the centre of a region, so the per-channel **median of a thin
 border ring** (the box edges) is a cleaner background estimate than the median of
 the whole box, which mixes in the text strokes and comes out muddy. The foreground
-is taken as black or white, whichever contrasts with the background luminance. Real
-text-colour sampling is a later refinement (see docs/re-placement.md).
+is black or white, decided by the region's own glyph ink (pixels deviating from the
+background): a fixed background-luminance threshold misfires on both sides — light
+text on a mid-light panel came out black, shadowed black receipt text came out
+white. True text-COLOUR sampling is a later refinement (see docs/re-placement.md).
 """
 from __future__ import annotations
 
@@ -17,6 +19,13 @@ from PIL import Image
 
 Color = tuple[int, int, int]
 Point = tuple[float, float]
+
+# A pixel deviating this much from the background (any channel) is glyph ink — the same
+# delta the render's stray-ink machinery uses (render._INK_DELTA).
+_INK_DELTA = 48
+# Below this many ink pixels the region carries no readable evidence (an erase-only sliver)
+# and the foreground falls back to contrasting with the background.
+_MIN_INK_PIXELS = 24
 
 
 def sample_oriented_colors(image: Image.Image, corners: list[Point]) -> tuple[Color, Color]:
@@ -38,7 +47,7 @@ def sample_oriented_colors(image: Image.Image, corners: list[Point]) -> tuple[Co
     if crop.size == 0:
         return (255, 255, 255), (0, 0, 0)
     bg = tuple(int(channel) for channel in np.median(_border_pixels(crop), axis=0))
-    return bg, contrasting_fg(bg)
+    return bg, _ink_polarity_fg(crop, bg)
 
 
 def sample_region_colors(image: Image.Image, bbox: dict[str, Any]) -> tuple[Color, Color]:
@@ -54,7 +63,20 @@ def sample_region_colors(image: Image.Image, bbox: dict[str, Any]) -> tuple[Colo
         return (255, 255, 255), (0, 0, 0)
 
     bg = tuple(int(channel) for channel in np.median(_border_pixels(crop), axis=0))
-    return bg, contrasting_fg(bg)
+    return bg, _ink_polarity_fg(crop, bg)
+
+
+def _ink_polarity_fg(crop: np.ndarray, bg: Color) -> Color:
+    """Black or white, whichever matches the region's own glyph ink: the median colour of
+    the pixels deviating ``_INK_DELTA`` from the background, compared with the background by
+    luminance. Binary — not the sampled colour itself — so rendered text stays crisp; with
+    too little ink to judge, fall back to contrasting with the background."""
+    deviation = np.abs(crop.astype(np.int16) - np.asarray(bg, dtype=np.int16)).max(axis=2)
+    ink = crop[deviation >= _INK_DELTA]
+    if len(ink) < _MIN_INK_PIXELS:
+        return contrasting_fg(bg)
+    ink_median = np.median(ink, axis=0)
+    return (0, 0, 0) if _luminance(ink_median) < _luminance(bg) else (255, 255, 255)
 
 
 def _border_pixels(crop: np.ndarray) -> np.ndarray:
@@ -69,8 +91,11 @@ def _border_pixels(crop: np.ndarray) -> np.ndarray:
 
 
 def contrasting_fg(bg: Color) -> Color:
-    luminance = 0.2126 * bg[0] + 0.7152 * bg[1] + 0.0722 * bg[2]
-    return (0, 0, 0) if luminance >= 140 else (255, 255, 255)
+    return (0, 0, 0) if _luminance(bg) >= 140 else (255, 255, 255)
+
+
+def _luminance(color: Any) -> float:
+    return float(0.2126 * color[0] + 0.7152 * color[1] + 0.0722 * color[2])
 
 
 def _dist(a: Point, b: Point) -> float:

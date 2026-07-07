@@ -45,8 +45,16 @@ class Fixture:
     @property
     def render_size_mode(self) -> str:
         # Also re-applied at replay: it changes the render itself, so a fixture approved under
-        # "median" must replay under "median" or it is born-failing.
+        # "median" must replay under "median" or it is born-failing. The "min" fallback is the
+        # HISTORIC capture default, not the current one (schemas default became "median"
+        # 2026-07-06): fixtures captured before the flag existed were rendered with "min" and
+        # must keep replaying that way. Do not sync this literal with the schema default.
         return str(self.request_flags.get("render_size_mode") or "min")
+
+    @property
+    def erase_fill_mode(self) -> str:
+        # Same rule: the fill mode changes the render, so replay must reproduce it.
+        return str(self.request_flags.get("erase_fill_mode") or "flat")
 
     def to_dict(self) -> dict[str, Any]:
         return {

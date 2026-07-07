@@ -264,6 +264,51 @@ def test_sweep_erases_unclaimed_ink_but_keeps_other_units_pixels(tmp_path) -> No
     assert out[66:76, 62:82].min() < 100  # protected member ink survives
 
 
+def test_flat_erase_swallows_residue_of_the_erased_text_but_not_neighbours(tmp_path) -> None:
+    # A descender poking below the tight erase quad belongs to the text being erased: its ink
+    # component lies mostly INSIDE the quads and is painted over with the background colour
+    # too. A neighbouring object grazing the quad edge (an icon) lies mostly OUTSIDE and
+    # must survive untouched.
+    input_path = tmp_path / "in.png"
+    img = Image.new("RGB", (300, 160), (255, 255, 255))
+    draw = ImageDraw.Draw(img)
+    for x in range(64, 148, 14):  # glyph strokes inside the quad
+        draw.rectangle((x, 62, x + 6, 88), fill=(0, 0, 0))
+    draw.rectangle((156, 62, 162, 100), fill=(0, 0, 0))  # stroke with a descender past y~94
+    draw.rectangle((196, 60, 226, 90), fill=(0, 0, 0))   # icon: overlaps the quad edge only
+    img.save(input_path)
+    unit = {"translated_text": "aa",  # narrow, anchored left: x>150 keeps no tile
+            "members": [{"cell_id": 1, "text": "WARNING", "translate": True,
+                         "bbox": {"left": 40, "top": 58, "width": 150, "height": 34}}]}
+    out = np.asarray(Image.open(BytesIO(
+        render_translated_image(input_path, [unit])
+    )).convert("RGB"))
+    assert out[95:100, 156:163].min() > 200  # descender residue below the quad: swallowed
+    assert out[62:88, 212:226].min() < 100   # the icon's outside part survives
+
+
+def test_inpaint_mode_is_a_noop_that_renders_identical_to_flat(tmp_path) -> None:
+    # "inpaint" stays an accepted erase_fill_mode (API clients and pinned fixtures keep
+    # working) but renders byte-identical to flat: the Telea diffusion and the plane-fit
+    # fills were both tried and removed (2026-07-06) — see the pass-1 comment in render.py.
+    input_path = tmp_path / "in.png"
+    img = Image.new("RGB", (300, 160), (255, 255, 255))
+    draw = ImageDraw.Draw(img)
+    for y in range(160):  # a gradient, where the removed fills diverged from flat the most
+        shade = 60 + y
+        draw.line([(0, y), (300, y)], fill=(shade, shade, shade))
+    for x in range(44, 196, 14):
+        draw.rectangle((x, 60, x + 6, 90), fill=(255, 255, 255))
+    img.save(input_path)
+    unit = {"translated_text": "aa",
+            "members": [{"cell_id": 1, "text": "WARNING", "translate": True,
+                         "bbox": {"left": 40, "top": 58, "width": 160, "height": 34}}]}
+
+    flat = render_translated_image(input_path, [dict(unit)], erase_fill_mode="flat")
+    inpaint = render_translated_image(input_path, [dict(unit)], erase_fill_mode="inpaint")
+    assert flat == inpaint
+
+
 def test_company_member_with_preserve_dropped_field_stays_out_of_the_spend_cell() -> None:
     # When the company field is preserve-dropped from the pairs ("Amazon" -> "Amazon", unchanged),
     # the company member's best remaining match is the LONG spend field — on scattered 1-2 char

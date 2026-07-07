@@ -7,7 +7,7 @@ from pydantic import BaseModel
 from pydantic import Field
 
 
-TaskName = Literal["translate_image", "retranslate_image"]
+TaskName = Literal["translate_image", "retranslate_image", "rerender_image"]
 RequestState = Literal["queued", "running", "completed", "failed", "cancelled", "cancel_requested"]
 TranslatorMode = Literal["translategemma", "generic"]
 
@@ -44,8 +44,14 @@ class RequestPayload(BaseModel):
     use_geometry_columns: bool = True
     # How a render group's single font size is chosen from its lines' measured heights: "min"
     # never overflows the smallest line's band; "median" resists one under-measured (lowercase)
-    # line dragging the whole block down. A/B toggle while the trade-off is being evaluated.
-    render_size_mode: Literal["min", "median"] = "min"
+    # line dragging the whole block down. Default "median" since 2026-07-06: evaluated across
+    # the testset — clearly better renders, no regressions seen.
+    render_size_mode: Literal["min", "median"] = "median"
+    # How erased source text is filled. Currently a NO-OP: "inpaint" renders exactly like
+    # "flat" (Telea diffusion and a plane-fit fill were both tried and removed 2026-07-06 —
+    # see the pass-1 comment in app/replacement/render.py); the value stays accepted so
+    # clients and pinned fixtures keep working until a fill that beats flat lands.
+    erase_fill_mode: Literal["flat", "inpaint"] = "flat"
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 

@@ -43,7 +43,6 @@ from PIL import ImageDraw
 
 from app.grouping.heuristics import _is_nontranslatable
 from app.replacement import geometry as geo
-from app.replacement.color import contrasting_fg
 from app.replacement.color import sample_oriented_colors
 from app.replacement.fit import break_pieces
 from app.replacement.fit import fold_lone_fullwidth_punctuation
@@ -109,6 +108,9 @@ _ERASE_MARGIN = 2.0
 # growth only sticks when it reaches a CLEAN row within its cap (texture never does).
 _INK_DELTA = 48
 _SWEEP_MAX_INK_FRACTION = 0.35
+# Residue swallow: how far past the erase quads leftover ink of the erased text is searched.
+# Descenders and anti-alias fringes reach a few px; anything farther is not ours to erase.
+_RESIDUE_MARGIN = 12
 
 
 @dataclass(frozen=True)
@@ -125,7 +127,11 @@ class _Job:
 
 
 def render_translated_image(
-    input_path: Path, translation_units: list[dict[str, Any]], *, render_size_mode: str = "min"
+    input_path: Path,
+    translation_units: list[dict[str, Any]],
+    *,
+    render_size_mode: str = "median",
+    erase_fill_mode: str = "flat",
 ) -> bytes:
     opened = Image.open(input_path)
     # Carry the source's ICC colour profile onto the output. ``convert("RGB")`` keeps the raw pixel
@@ -157,13 +163,23 @@ def render_translated_image(
         )
 
     # Pass 1: cover every original (along the slant) so no source text peeks through.
+    # ``erase_fill_mode`` is accepted but currently a NO-OP: "inpaint" renders exactly like
+    # "flat". Two fills were tried and removed (2026-07-06): cv2 Telea diffusion (transports
+    # boundary pixels inward — glyph residue, JPEG chroma halos and overlapping icons smear
+    # across the fill, and OCR quad run-variance makes the failures unpredictable) and a
+    # per-job least-squares colour-plane fit (on designed flat bands the per-line fits land
+    # on slightly different shades and the result reads as patchwork — flat is visibly
+    # better on menukaart/nike-ad). The flag stays so API clients and pinned fixtures keep
+    # working until a fill that actually beats flat lands (LaMa benchmark is parked).
+    original = np.asarray(base).copy()
     erase = ImageDraw.Draw(base)
     for job in jobs:
         for quad in job.erase_quads:
             erase.polygon(quad, fill=job.bg_color)
+    canvas = np.asarray(base).copy()
+    _swallow_erase_residue(canvas, original, jobs)
 
     # Pass 2: warp each text tile onto its oriented region.
-    canvas = np.asarray(base).copy()
     for job in jobs:
         if job.tile is not None:
             _composite(canvas, job)
@@ -174,6 +190,51 @@ def render_translated_image(
         save_kwargs["icc_profile"] = icc_profile
     Image.fromarray(canvas).save(out, format="PNG", **save_kwargs)
     return out.getvalue()
+
+
+def _swallow_erase_residue(
+    canvas: np.ndarray, original: np.ndarray, jobs: list[_Job]
+) -> None:
+    """Extend the flat erase to residue of the erased text itself: an ink component that lies
+    mostly INSIDE the erase quads is a leftover part of the text being removed — a descender
+    the tight quad bottom cut through, an anti-alias fringe past the quad edge — and is
+    painted with the job's background colour too. Detection runs on the ORIGINAL pixels: on
+    the erased canvas a residue crumb no longer connects to its glyph's interior ink and the
+    majority-inside test would see it as fully outside. Self-limiting on unreliable ground:
+    busy texture merges the glyphs into one large mostly-outside component and nothing
+    happens, and a component reaching the search window's border has an unknown true extent
+    (a table rule grazing the line) and is skipped. Named limit: a surviving neighbour glyph
+    already overlapped >50% by an erase quad is taken whole instead of left half-cut."""
+    occupied = np.zeros(canvas.shape[:2], dtype=np.uint8)
+    for job in jobs:
+        for quad in job.erase_quads:
+            cv2.fillPoly(occupied, [np.asarray(quad, dtype=np.int32)], 255)
+    for job in jobs:
+        bg = np.asarray(job.bg_color, dtype=np.int16)
+        points = np.vstack([np.asarray(q, dtype=np.int32) for q in job.erase_quads])
+        x0, y0 = np.maximum(points.min(axis=0) - _RESIDUE_MARGIN, 0)
+        x1, y1 = points.max(axis=0) + _RESIDUE_MARGIN + 1
+        window = original[y0:y1, x0:x1].astype(np.int16)
+        ink = (np.abs(window - bg).max(axis=2) >= _INK_DELTA).astype(np.uint8)
+        if not ink.any():
+            continue
+        count, labels = cv2.connectedComponents(ink, connectivity=8)
+        inside = np.bincount(labels[occupied[y0:y1, x0:x1] > 0].ravel(), minlength=count)
+        total = np.bincount(labels.ravel(), minlength=count)
+        border = np.zeros(labels.shape, dtype=bool)
+        border[0, :] = border[-1, :] = border[:, 0] = border[:, -1] = True
+        ids = np.arange(count)
+        swallow = (
+            (ids > 0)
+            & (inside * 2 >= total)
+            # Fully-inside components are already under the quad paint; only the partial
+            # ones need work.
+            & (inside < total)
+            & ~np.isin(ids, np.unique(labels[border]))
+        )
+        if swallow.any():
+            region = canvas[y0:y1, x0:x1]
+            region[np.isin(labels, ids[swallow])] = np.asarray(job.bg_color, dtype=np.uint8)
 
 
 def _groups(units: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
@@ -478,7 +539,7 @@ def _plan_group(
     units: list[dict[str, Any]],
     *,
     snap_horizontal: bool = False,
-    render_size_mode: str = "min",
+    render_size_mode: str = "median",
     protected_boxes: list[dict[str, Any]] | None = None,
     sweep_ok: bool | None = None,
 ) -> list[_Job]:
@@ -626,7 +687,10 @@ def _plan_group(
     if len(colors) > 1:
         median_bg = tuple(int(median(bg[channel] for bg, _ in colors)) for channel in range(3))
         if all(max(abs(bg[c] - median_bg[c]) for c in range(3)) <= _BG_SNAP_DELTA for bg, _ in colors):
-            colors = [(median_bg, contrasting_fg(median_bg))] * len(colors)
+            # Snap the fg by majority too: the per-plane fg is ink-evidence (not derived from
+            # bg), so recomputing it from the snapped bg would throw that evidence away.
+            fgs = [fg for _, fg in colors]
+            colors = [(median_bg, max(set(fgs), key=fgs.count))] * len(colors)
 
     # Flat, angle-snapped groups get the pixel-evidence cleanups: the descender bottom
     # extension per line, and — gated separately on hint coverage — the stray-ink slot sweep

@@ -148,7 +148,8 @@ def run_translate_image_pipeline(
     preserve_heuristic_text = _bool_request_flag(request, "preserve_heuristic_text", default=True)
     preserve_unchanged_text = _bool_request_flag(request, "preserve_unchanged_text", default=False)
     use_geometry_columns = _bool_request_flag(request, "use_geometry_columns", default=True)
-    render_size_mode = str(request.get("render_size_mode") or "min").strip() or "min"
+    render_size_mode = str(request.get("render_size_mode") or "median").strip() or "median"
+    erase_fill_mode = str(request.get("erase_fill_mode") or "flat").strip() or "flat"
     # Opt-in: feed the geometry-adjusted hints (a `|` injected where a column gap shows the VLM
     # missed a rule-3/4 boundary) instead of the raw VLM hints. Same translation path, different input.
     hint_units_for_translation = hint_units_adjusted if use_geometry_columns else grouping.hint_units
@@ -211,7 +212,9 @@ def run_translate_image_pipeline(
 
     checkpoint()
     replacement_started = time.perf_counter()
-    rendered_image = render_translated_image(input_path, translation_units, render_size_mode=render_size_mode)
+    rendered_image = render_translated_image(
+        input_path, translation_units, render_size_mode=render_size_mode, erase_fill_mode=erase_fill_mode
+    )
     replacement_wall_ms = _elapsed_ms(replacement_started)
 
     debug = {
@@ -224,6 +227,8 @@ def run_translate_image_pipeline(
             "preserve_heuristic_text": preserve_heuristic_text,
             "preserve_unchanged_text": preserve_unchanged_text,
             "use_geometry_columns": use_geometry_columns,
+            "render_size_mode": render_size_mode,
+            "erase_fill_mode": erase_fill_mode,
             "timings_ms": {
                 "ocr": ocr_wall_ms,
                 "grouping": grouping_wall_ms,
@@ -274,6 +279,7 @@ def run_translate_image_pipeline(
         "preserve_unchanged_text": preserve_unchanged_text,
         "use_geometry_columns": use_geometry_columns,
         "render_size_mode": render_size_mode,
+        "erase_fill_mode": erase_fill_mode,
         "translation_source": "llm_pool",
         "translation_input": sent_input,
         "translation_instructions": sent_instructions,

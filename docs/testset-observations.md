@@ -449,3 +449,23 @@ inpaint-grade fill (Tier-2/LaMa) the extension becomes visually free and this te
 the correct scope for it. Until then the slot sweep covers superseded lines (ghost words +
 box-undershoot remnants there); streaks under TILED lines remain a named limit of the flat-fill
 erase. Do not attempt a fourth local-heuristic variant.
+
+**Generous-erase experiments for the residue (2026-07-05) — TRIED AND REVERTED.** Diagnosis
+first: the residue is a descender/comma tail surviving below PaddleOCR's tight detection box.
+The knob `text_det_unclip_ratio` does grow the box over the tail (measured: 2.5 moves the box
+bottom past it) but inflates box height 58->79px, and the renderer sizes the font from box
+height, so text comes out ~36% bigger — not free. The production translation apps show no
+residue not from better OCR but because they erase generously (some paint clean white rounded
+rectangles, no inpaint) and accept a visible card on texture; the residue is a
+flat-fill-STINGINESS artifact.
+Two generous-erase variants were built: (a) fill the gap BETWEEN a group's consecutive lines
+(safe — that band is the group's own footprint; kassabon stayed bit-identical, only 5 benign
+re-OCR re-segmentations), and (b) full per-line SLOTS reaching halfway to each neighbour plus a
+descent past the block edge. Variant (b) was REJECTED on sight: on `cartoon` it ate the speech
+bubbles' outlines and a chunk of the image — the slot reaches past the text into surrounding
+GRAPHICS that are not another text unit, so the foreign-box guard (which only knows text member
+boxes) does not protect them. Reverted entirely. Lesson: a group's inter-line band is safe, but
+anything reaching toward a group's OUTER edge can hit non-text image content the pipeline has no
+box for. The residue stays a named flat-fill limit; a real fix needs an inpaint-grade erase (so
+over-reach is reconstructed, not destroyed) — which is exactly why the big tools inpaint or
+overlay opaque cards.

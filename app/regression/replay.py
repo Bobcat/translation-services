@@ -66,7 +66,10 @@ def replay_fixture(
 
     render_started = time.perf_counter()
     rendered_png = render_translated_image(
-        input_path, translation_units, render_size_mode=fixture.render_size_mode
+        input_path,
+        translation_units,
+        render_size_mode=fixture.render_size_mode,
+        erase_fill_mode=fixture.erase_fill_mode,
     )
     render_ms = (time.perf_counter() - render_started) * 1000.0
     return actual_units, actual_ignored, rendered_png, {"group_ms": group_ms, "render_ms": render_ms}

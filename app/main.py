@@ -211,6 +211,16 @@ def create_app(settings_path: str | Path | None = None) -> FastAPI:
         )
         return JSONResponse(status_code=int(status_code), content=payload)
 
+    @app.post("/v1/requests/{source_request_id}/rerender", response_model=RequestSubmitEnvelope)
+    async def rerender_request(
+        source_request_id: str,
+        body: dict[str, Any] = Body(default_factory=dict),
+    ) -> JSONResponse:
+        status_code, payload = await runtime.submit_rerender(
+            source_request_id=source_request_id, body=dict(body or {})
+        )
+        return JSONResponse(status_code=int(status_code), content=payload)
+
     @app.get("/v1/prompts")
     async def list_prompts() -> JSONResponse:
         return JSONResponse(status_code=200, content={"prompts": [e.to_dict() for e in prompt_store.list()]})
