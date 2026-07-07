@@ -428,10 +428,21 @@ reference app's render. Excluding translation length and the resulting smaller f
   differently and the whole sign reads wobbly instead of printed. On the cigarette pack
   the drawn angle underestimates the true tilt so the heading lines staircase and the
   yellow-band text runs visibly non-parallel to the band. The reference renders one
-  smoothly varying angle. Honest fix = a robust per-image angle FIELD (angle as a
-  function of y, fitted on all line baselines — a tilted sign is a perspective gradient,
-  ~1° top to ~8° bottom, so one global angle is wrong). This is the historical
-  heuristics minefield: own task, measured on all tilted fixtures, never a side-patch.
+  smoothly varying angle. SHIPPED (2026-07-08) as `_document_angle_field`: measurement
+  first confirmed the hypothesis on all four tilted fixtures — angle(y) is near-linear
+  with <=0.5° MAD (the horse sign: +1° top to +8.4° bottom; the menu: -7.8° to -3°) while
+  per-group fits wobble ±0.5-1° around it and one-word groups sit up to 3.5° off (the
+  bottom-left logo). Theil-Sen fit over multi-word baseline fits + wide single-cell edge
+  angles (near-square quads excluded — the measured outliers were all logos/prices);
+  every group reads its angle from the field at its own y. Two locks: flat images never
+  get a field, and a fit failing the evidence gates (samples/y-span/residual MAD) falls
+  back to the per-group path — the warning-sign photo trips the y-span gate (big glyphs,
+  short document) and keeps its already-clean per-line angles; the product-photo box
+  (text in every direction) is rejected by both locks. Named limit: one angle per group,
+  so the intra-group perspective fan (field slope × group height, <1° on the testset)
+  is not reproduced. Verified: flat fixtures byte-identical (field is None there);
+  tilted fixtures re-baselined after visual review — heading+body blocks now parallel,
+  the logo sits in the sign's plane.
 - **Centre axis.** Sub-lines anchor on their own plane centres and drift a few px off
   their heading's axis. SHIPPED (2026-07-08): within-group centre-snap — a centered
   multi-line group's line centres snap to their median when the spread is noise-sized
@@ -455,8 +466,9 @@ reference app's render. Excluding translation length and the resulting smaller f
   original (and the VLM's pt labels) sit at 0.75× — the oversized body fills the
   original whitespace. Same size-metric dossier as the parenthesis inflation (now the
   `size_metric_mode: "band"` flag) — but this sign is TILTED, and "band" deliberately
-  skips tilted images (axis-aligned scan), so the leading symptom stays open until the
-  angle task. The VLM pt ratios remain a candidate cross-check signal.
+  skips tilted images (axis-aligned scan). Still open after the angle field shipped:
+  the field fixes angles, not size measurement — closing this needs the band scan
+  extended to oriented frames. The VLM pt ratios remain a candidate cross-check signal.
 - **Erase plates.** The grey flat plates on the pack's black panel (photo ground) are
   the Tier-2 case — "inpaint" renders both signs visibly cleaner (verified on the
   gradient strip of the horse sign: seamless with inpaint, a visible patch with flat).

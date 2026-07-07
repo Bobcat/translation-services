@@ -140,6 +140,21 @@ _BAND_MIN_SAMPLES = 4  # document ratio needs at least this many measured quads
 # the gate sits in the gap. (The ratio is against the plane target = 0.9x line height.)
 _CENTER_SNAP_MAX_RATIO = 0.12
 
+# Angle FIELD (tilted images): a photographed tilted sign is a perspective gradient —
+# every text line's angle follows one smooth, near-linear function of image y (measured
+# across the tilted testset: linear fits with <=0.5deg MAD over the whole document),
+# while each group's own baseline fit wobbles +-0.5-1deg around it and a one-word group
+# can sit several degrees off. Reading every group's angle from one document-level fit
+# renders the sign as a single printed surface. Evidence gates (all must hold, else the
+# per-group path): a single-cell line's edge angle only counts when its quad is clearly
+# wider than tall (a square-ish quad's edge direction is meaningless — the measured
+# outliers were all near-square logos/prices); enough samples over enough y-range to
+# define a slope; residuals no wider than a real gradient's.
+_FIELD_MIN_SAMPLES = 5
+_FIELD_MIN_EDGE_ASPECT = 2.0  # single-cell sample: quad width >= this x line height
+_FIELD_MIN_SPAN_RATIO = 10.0  # sample y-span >= this x the median sampled line height
+_FIELD_MAX_RESIDUAL_MAD_DEG = 1.0
+
 # "extend" width fit: a line may widen into clean background to its right by at most its
 # own original width (so a short item on an empty page cannot balloon into a banner). The
 # pixel gates, not this cap, are the safety: extension stops at the first ink, protected
@@ -208,6 +223,7 @@ def render_translated_image(
         if member.get("bbox")
     ]
     band_ratio = _document_band_ratio(base, translation_units) if size_metric_mode == "band" else None
+    angle_field = _document_angle_field(translation_units)
     for group in groups:
         jobs.extend(
             _plan_group(
@@ -217,6 +233,7 @@ def render_translated_image(
                 render_size_mode=render_size_mode,
                 width_fit_mode=width_fit_mode,
                 band_ratio=band_ratio,
+                angle_field=angle_field,
                 protected_boxes=protected_boxes,
             )
         )
@@ -692,6 +709,7 @@ def _plan_group(
     render_size_mode: str = "median",
     width_fit_mode: str = "footprint",
     band_ratio: float | None = None,
+    angle_field: tuple[float, float] | None = None,
     protected_boxes: list[dict[str, Any]] | None = None,
     sweep_ok: bool | None = None,
 ) -> list[_Job]:
@@ -712,6 +730,7 @@ def _plan_group(
                     render_size_mode=render_size_mode,
                     width_fit_mode=width_fit_mode,
                     band_ratio=band_ratio,
+                    angle_field=angle_field,
                     protected_boxes=protected_boxes,
                     sweep_ok=sweep_ok,
                 )
@@ -766,16 +785,27 @@ def _plan_group(
     # bottom), so its
     # small top-line angles are kept; snapping only those would break the gradient.
     angle = median(geo.angle_deg(quad) for quad in group_quads)
-    clusters = _line_clusters(group_quads, angle)
-    # The rendered text is warped to this angle, so it must match the band the words actually sit
-    # on. Per-quad edge angles are noisy (a short word's OCR quad reads several degrees off), and
-    # their median comes out biased shallow — the rendered line then drifts off a tilted band. The
-    # baseline FIT through the word centres recovers the true line direction; the parallel lines of
-    # a block share it, so it keeps them parallel. Falls back to the quad-median when too few words
-    # carry a baseline (a one-word line, a vertical stack of single words).
-    angle = _baseline_angle(clusters, angle)
-    if snap_horizontal and abs(angle) < _ANGLE_DEADZONE_DEG:
-        angle = 0.0
+    if angle_field is not None:
+        # A tilted image carries ONE smooth perspective gradient (see the _FIELD_*
+        # constants): every group reads its angle from the document field at its own y,
+        # instead of trusting its own noisy fit. One angle per group — the intra-group
+        # fan (field slope x group height) stays under ~1deg on the measured signs.
+        slope, intercept = angle_field
+        y_centre = median(sum(p[1] for p in quad) / 4.0 for quad in group_quads)
+        angle = slope * y_centre + intercept
+        clusters = _line_clusters(group_quads, angle)
+    else:
+        clusters = _line_clusters(group_quads, angle)
+        # The rendered text is warped to this angle, so it must match the band the words actually
+        # sit on. Per-quad edge angles are noisy (a short word's OCR quad reads several degrees
+        # off), and their median comes out biased shallow — the rendered line then drifts off a
+        # tilted band. The baseline FIT through the word centres recovers the true line direction;
+        # the parallel lines of a block share it, so it keeps them parallel. Falls back to the
+        # quad-median when too few words carry a baseline (a one-word line, a vertical stack of
+        # single words).
+        angle = _baseline_angle(clusters, angle)
+        if snap_horizontal and abs(angle) < _ANGLE_DEADZONE_DEG:
+            angle = 0.0
     size_ratio = _CJK_SIZE_RATIO if any(is_cjk_text(text) for text in texts) else _SIZE_RATIO
     planes: list[dict[str, Any]] = []
     for quads in clusters:
@@ -993,6 +1023,66 @@ def _document_band_ratio(base: Image.Image, units: list[dict[str, Any]]) -> floa
     if len(ratios) < _BAND_MIN_SAMPLES:
         return None
     return float(median(ratios))
+
+
+def _document_angle_field(units: list[dict[str, Any]]) -> tuple[float, float] | None:
+    """The document's text angle as a function of y — ``(slope_deg_per_px, intercept_deg)``
+    — or None when the image is flat or the evidence fails the gates (see the _FIELD_*
+    constants). Samples: each multi-word line contributes its baseline-fit angle; a
+    single-cell line contributes its quad edge angle only when clearly wider than tall.
+    The fit is Theil-Sen (median of pairwise slopes), so a stray sample cannot tip it."""
+    if _image_is_flat(units):
+        return None
+    samples: list[tuple[float, float]] = []  # (line centre y, angle deg)
+    heights: list[float] = []
+    for group in _groups(units):
+        quads = [
+            quad
+            for unit in group
+            for member in (unit.get("members") or [])
+            if member.get("bbox") and (quad := geo.quad_of(member)) is not None
+        ]
+        if not quads:
+            continue
+        seed = median(geo.angle_deg(quad) for quad in quads)
+        for cluster in _line_clusters(quads, seed):
+            centres = [(sum(p[0] for p in q) / 4.0, sum(p[1] for p in q) / 4.0) for q in cluster]
+            y_centre = sum(c[1] for c in centres) / len(centres)
+            xs = [c[0] for c in centres]
+            if len(centres) >= 2 and (max(xs) - min(xs)) >= 1.0:
+                samples.append((y_centre, _baseline_angle([cluster], seed)))
+                heights.append(median(geo.line_height(q) for q in cluster))
+            elif len(cluster) == 1:
+                quad = cluster[0]
+                width = 0.5 * (
+                    math.hypot(quad[1][0] - quad[0][0], quad[1][1] - quad[0][1])
+                    + math.hypot(quad[2][0] - quad[3][0], quad[2][1] - quad[3][1])
+                )
+                height = geo.line_height(quad)
+                if width >= _FIELD_MIN_EDGE_ASPECT * height:
+                    samples.append((y_centre, geo.angle_deg(quad)))
+                    heights.append(height)
+    if len(samples) < _FIELD_MIN_SAMPLES:
+        return None
+    ys = [y for y, _ in samples]
+    y_span = max(ys) - min(ys)
+    if y_span < _FIELD_MIN_SPAN_RATIO * median(heights):
+        return None
+    # Pairs closer in y than 5% of the span carry no slope information, only noise.
+    min_dy = 0.05 * y_span
+    slopes = [
+        (a2 - a1) / (y2 - y1)
+        for i, (y1, a1) in enumerate(samples)
+        for y2, a2 in samples[i + 1 :]
+        if abs(y2 - y1) >= min_dy
+    ]
+    if not slopes:
+        return None
+    slope = median(slopes)
+    intercept = median(a - slope * y for y, a in samples)
+    if median(abs(a - (slope * y + intercept)) for y, a in samples) > _FIELD_MAX_RESIDUAL_MAD_DEG:
+        return None
+    return float(slope), float(intercept)
 
 
 def _clean_right_extension(

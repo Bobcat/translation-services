@@ -457,6 +457,69 @@ def test_band_metric_shrinks_a_parenthesis_inflated_line_and_leaves_siblings(tmp
     assert ink_height(band, 20, 70) == ink_height(extent, 20, 70)
 
 
+def _tilted_line_unit(uid, y, deg, w=400.0, h=30.0, cx=500.0):
+    # One single-cell text line: a w x h quad centred at (cx, y), rotated by deg.
+    ux, uy = math.cos(math.radians(deg)), math.sin(math.radians(deg))
+    vx, vy = -uy, ux
+
+    def pt(dx, dy):
+        return {"x": cx + dx * ux + dy * vx, "y": y + dx * uy + dy * vy}
+
+    poly = [pt(-w / 2, -h / 2), pt(w / 2, -h / 2), pt(w / 2, h / 2), pt(-w / 2, h / 2)]
+    xs = [p["x"] for p in poly]
+    ys = [p["y"] for p in poly]
+    bbox = {"left": min(xs), "top": min(ys), "width": max(xs) - min(xs), "height": max(ys) - min(ys)}
+    return {"translated_text": "vertaalde regel", "block_id": uid, "level": "body",
+            "members": [{"cell_id": uid, "text": "een regel", "translate": True,
+                         "bbox": bbox, "polygon": poly}]}
+
+
+def test_document_angle_field_recovers_a_linear_gradient_and_gates_junk() -> None:
+    from app.replacement.render import _document_angle_field
+
+    # A tilted sign: line angles follow angle(y) = 2 + 6 * y/1000 (the measured shape).
+    gradient = [_tilted_line_unit(i, y, 2.0 + 6.0 * y / 1000.0)
+                for i, y in enumerate(range(100, 1600, 200))]
+    field = _document_angle_field(gradient)
+    assert field is not None
+    slope, intercept = field
+    assert abs(slope - 0.006) < 0.0005
+    assert abs(intercept - 2.0) < 0.5
+
+    # Scattered angles (product-photo archetype: each line its own direction) must be
+    # rejected by the residual gate, not fitted.
+    scattered = [_tilted_line_unit(i, y, 8.0 if i % 2 else -8.0)
+                 for i, y in enumerate(range(100, 1600, 200))]
+    assert _document_angle_field(scattered) is None
+
+    # Too little y-range to define a slope.
+    narrow = [_tilted_line_unit(i, 400.0 + i * 20.0, 6.0) for i in range(8)]
+    assert _document_angle_field(narrow) is None
+
+    # A flat image never gets a field (its per-line angles are OCR noise).
+    flat = [_tilted_line_unit(i, y, 0.5) for i, y in enumerate(range(100, 1600, 200))]
+    assert _document_angle_field(flat) is None
+
+
+def test_plan_group_reads_its_angle_from_the_document_field(tmp_path) -> None:
+    # A one-line group whose own quad reads +2deg on a document whose field says +8deg
+    # at that y must render at the field angle; without a field it trusts its own quad.
+    img = Image.new("RGB", (1000, 800), (255, 255, 255))
+    path = tmp_path / "field.png"
+    img.save(path)
+    unit = _tilted_line_unit(1, 400.0, 2.0)
+
+    def top_edge_angle(angle_field):
+        jobs = _plan_group(Image.open(path).convert("RGB"), [dict(unit)],
+                           snap_horizontal=False, angle_field=angle_field)
+        (job,) = [j for j in jobs if j.dst_quad]
+        (x0, y0), (x1, y1) = job.dst_quad[0], job.dst_quad[1]
+        return math.degrees(math.atan2(y1 - y0, x1 - x0))
+
+    assert abs(top_edge_angle((0.0, 8.0)) - 8.0) < 0.3
+    assert abs(top_edge_angle(None) - 2.0) < 0.3
+
+
 def test_inpaint_budget_scale_caps_the_model_input_area() -> None:
     assert budget_scale(1000, 1000, 1_500_000) == 1.0
     scale = budget_scale(4096, 3072, 1_500_000)
