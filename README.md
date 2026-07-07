@@ -109,7 +109,7 @@ All routes are versioned under `/v1`.
 | `GET` | `/v1/requests/{id}` | Poll the request lifecycle (`state`, `stage`, `timings`, `response`, `error`). |
 | `POST` | `/v1/requests/{id}/cancel` | Request cancellation. |
 | `POST` | `/v1/requests/{id}/retranslate` | Re-translate a completed request's cached units with a new prompt/target language. |
-| `POST` | `/v1/requests/{id}/rerender` | Re-render a completed request's cached translations with new render flags (`render_size_mode`/`erase_fill_mode`); no new translation. |
+| `POST` | `/v1/requests/{id}/rerender` | Re-render a completed request's cached translations with new render flags (`render_size_mode`/`erase_fill_mode`/`width_fit_mode`); no new translation. |
 | `GET` | `/v1/requests/{id}/artifacts/{name}` | Fetch a stored artifact (e.g. `rendered.png`, `translation.json`). |
 | `GET` `POST` | `/v1/prompts` | List / create saved prompts. |
 | `GET` `PUT` `DELETE` | `/v1/prompts/{id}` | Read / update / delete a saved prompt. |

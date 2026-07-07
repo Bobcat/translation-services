@@ -56,6 +56,11 @@ class Fixture:
         # Same rule: the fill mode changes the render, so replay must reproduce it.
         return str(self.request_flags.get("erase_fill_mode") or "flat")
 
+    @property
+    def width_fit_mode(self) -> str:
+        # Same rule again; fixtures captured before the flag existed rendered "footprint".
+        return str(self.request_flags.get("width_fit_mode") or "footprint")
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "image_sha256": self.image_sha256,

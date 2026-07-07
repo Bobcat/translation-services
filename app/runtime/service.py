@@ -387,6 +387,9 @@ class RequestRuntime:
             "erase_fill_mode": str(body.get("erase_fill_mode") or "").strip()
             or source_request.get("erase_fill_mode")
             or "flat",
+            "width_fit_mode": str(body.get("width_fit_mode") or "").strip()
+            or source_request.get("width_fit_mode")
+            or "footprint",
         }
         # Same for the boolean flags: body overrides, else the source run's value carries over —
         # letting the schema default refill them would silently change the retranslate's inputs
@@ -443,6 +446,9 @@ class RequestRuntime:
             "erase_fill_mode": str(body.get("erase_fill_mode") or "").strip()
             or source_request.get("erase_fill_mode")
             or "flat",
+            "width_fit_mode": str(body.get("width_fit_mode") or "").strip()
+            or source_request.get("width_fit_mode")
+            or "footprint",
         }
         for flag in ("preserve_heuristic_text", "preserve_unchanged_text", "use_geometry_columns"):
             if flag in source_request:

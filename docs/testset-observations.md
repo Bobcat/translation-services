@@ -365,6 +365,88 @@ them more than we do. Two distinct problems, addressed differently.
   other text (no ring) default to flat.
 
 
+## `bullets-dashes.png` (7-item list, one marker glyph per item, en→nl/zh)
+
+### Fixed — a dash marker survived on one line and vanished on the next
+
+- The loose-glyph bullet scan accepted a run as "the bullet" only when it was NARROW
+  (≤ 0.4 × line height). A dash is wide but FLAT, and its width sat right on that cap, so a
+  few px of OCR quad-height wobble decided per line whether the dash was kept or erased —
+  same list, same glyph, different outcome per run. Fix: a run also qualifies when it is
+  wide-but-flat (width ≤ 0.9 × line height AND ink rows spanning ≤ 0.35 × line height),
+  which still rejects line-TALL layout ink (a panel/book edge is the thing the width cap
+  guarded against). The three fixtures for this image were re-baselined (their snapshots
+  froze the broken dash).
+
+### Option — `width_fit_mode: "footprint" | "extend"` (new render flag, default footprint)
+
+- The remaining complaint was size: a short item whose translation is much longer
+  ("Dash" → "Streepje") condenses/shrinks into the original footprint while the page right
+  of it is empty. `"extend"` widens a line's usable width into VERIFIED clean background
+  before fitting: the strip right of the line must be ink-free against the plane's sampled
+  background (a glyph, a paper/panel edge and any surface change all read as ink), free of
+  protected cells, capped at the line's own width, and keeping a ~1-em margin to the image
+  border (on a clean page nothing else stops the growth, and text running to the document's
+  edge reads as a layout error). Strictly additive — every guard that
+  fails leaves footprint behaviour; nothing is erased in the extension, text composites
+  over untouched pixels, so a guard miss can at worst overprint, never wipe.
+- Named limits: axis-aligned groups only (the scan is axis-aligned, same limit as the ink
+  sweep); centered elements never extend (growing right would break the centring); an
+  obstacle below the ink delta (a very faint watermark) can be overprinted — same class of
+  residual as the stray-ink sweep. Verified: the list renders at uniform full size under
+  "extend" with every marker kept; with an obstacle directly right of a line, "extend"
+  renders byte-identical to "footprint" (pinned by test).
+- Both modes stay permanently: the user picks per request (workbench Render section); a
+  future heuristic may choose per job, the way the hybrid inpaint fill chose flat/model.
+- Named limit (parked): the SOURCE SIZE comes from the OCR polygon's full ink extent, and
+  sparse tall glyphs — parentheses around an enumerate marker or mid-text, brackets, a lone
+  descender — stretch that measure far past the text band (measured on a numbered-list
+  image: bbox 69–76px / ink 50px / text band 35px on parenthesised lines, vs 35px siblings).
+  "footprint" often masks the inflation by accident (its width-driven pt-shrink pulls the
+  size back down); "extend" removes the width shortage and renders the inflated size
+  faithfully — such lines come out visibly too large. A marker-scoped correction would be
+  curve-fitting (parentheses appear mid-text too); the honest fix is a robust text-band
+  height metric, which re-calibrates sizing for every render and is deliberately parked as
+  its own task. Until then: pick "footprint" for such images — this is exactly why the mode
+  stays selectable.
+
+
+## Typography gap vs the reference app (tilted signs, 2026-07-07 comparison)
+
+Side-by-side of the horse-habitat sign (and the cigarette-pack photo) against the
+reference app's render. Excluding translation length and the resulting smaller fonts
+(accepted), the remaining gap decomposes into:
+
+- **Angle coherence (the biggest lever).** Each element group renders at its own
+  baseline-fit angle from its own noisy quads; adjacent blocks lean a fraction
+  differently and the whole sign reads wobbly instead of printed. On the cigarette pack
+  the drawn angle underestimates the true tilt so the heading lines staircase and the
+  yellow-band text runs visibly non-parallel to the band. The reference renders one
+  smoothly varying angle. Honest fix = a robust per-image angle FIELD (angle as a
+  function of y, fitted on all line baselines — a tilted sign is a perspective gradient,
+  ~1° top to ~8° bottom, so one global angle is wrong). This is the historical
+  heuristics minefield: own task, measured on all tilted fixtures, never a side-patch.
+- **Centre axis.** Sub-lines anchor on their own plane centres and drift a few px off
+  their heading's axis. Within-group centre-snap (median, noise-gated like the bg snap)
+  is the small safe step; cross-block axis alignment belongs to the angle task.
+- **Heading/body hierarchy: weight works, the SIGNAL wobbles.** The VLM labels this
+  sign cleanly (24pt|700 headings, 18pt|400 body), units carry it, and the sans family
+  face's weight axis genuinely bolds (+40% ink measured) — a fresh render shows bold
+  headings. Runs where hierarchy is flat are weight-signal run-variance. Candidate
+  deterministic backstop: per-level majority vote over the document's weights.
+- **Leading reads compressed.** Baselines anchor on the original planes (pitch is
+  faithful); the compression is the BODY SIZE: full-extent height measurement makes
+  lowercase body lines (ascenders+descenders) render ~0.85× of the heading where the
+  original (and the VLM's pt labels) sit at 0.75× — the oversized body fills the
+  original whitespace. Same parked size-metric dossier as the parenthesis inflation;
+  second symptom in one day. The VLM pt ratios are a candidate cross-check signal.
+- **Erase plates.** The grey flat plates on the pack's black panel (photo ground) are
+  the Tier-2 case — "inpaint" renders both signs visibly cleaner (verified on the
+  gradient strip of the horse sign: seamless with inpaint, a visible patch with flat).
+  Small open bug found doing so: the re-rendered distance label picked near-black ink
+  where the original is arrow-blue (fg sampling on the gradient strip).
+
+
 ## Parked: VLM serving non-determinism (after the `*…:*` prompt lock-in)
 
 The grouping prompt is locked (`*<t|h|b|m>|<font>|<size>pt|<weight>|<l|c|r>:*` single-star label

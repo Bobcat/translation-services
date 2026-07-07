@@ -47,11 +47,15 @@ class RequestPayload(BaseModel):
     # line dragging the whole block down. Default "median" since 2026-07-06: evaluated across
     # the testset — clearly better renders, no regressions seen.
     render_size_mode: Literal["min", "median"] = "median"
-    # How erased source text is filled. Currently a NO-OP: "inpaint" renders exactly like
-    # "flat" (Telea diffusion and a plane-fit fill were both tried and removed 2026-07-06 —
-    # see the pass-1 comment in app/replacement/render.py); the value stays accepted so
-    # clients and pinned fixtures keep working until a fill that beats flat lands.
+    # How erased source text is filled. "flat" paints each erased line with its sampled
+    # background colour; "inpaint" is the hybrid model-based fill — flat paint on designed
+    # flat ground, model reconstruction where the ground varies (app/replacement/inpaint.py).
     erase_fill_mode: Literal["flat", "inpaint"] = "flat"
+    # How a translation wider than its original line is fitted. "footprint" keeps it inside
+    # the original line's width (condense in x, then shrink pt); "extend" first widens the
+    # usable width into VERIFIED clean background right of the line (never over other text,
+    # ink or a surface change), so a short list item's longer translation keeps its size.
+    width_fit_mode: Literal["footprint", "extend"] = "footprint"
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 

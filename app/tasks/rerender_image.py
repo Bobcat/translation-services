@@ -45,6 +45,7 @@ def run_rerender_image_pipeline(
     preserve_heuristic_text = _bool_request_flag(request, "preserve_heuristic_text", default=True)
     render_size_mode = str(request.get("render_size_mode") or "median").strip() or "median"
     erase_fill_mode = str(request.get("erase_fill_mode") or "flat").strip() or "flat"
+    width_fit_mode = str(request.get("width_fit_mode") or "footprint").strip() or "footprint"
     rendered_units = _units_for_preserve_heuristic_text(
         units, preserve_heuristic_text=preserve_heuristic_text
     )
@@ -68,7 +69,11 @@ def run_rerender_image_pipeline(
     checkpoint()
     replacement_started = time.perf_counter()
     rendered_image = render_translated_image(
-        input_path, translation_units, render_size_mode=render_size_mode, erase_fill_mode=erase_fill_mode
+        input_path,
+        translation_units,
+        render_size_mode=render_size_mode,
+        erase_fill_mode=erase_fill_mode,
+        width_fit_mode=width_fit_mode,
     )
     replacement_wall_ms = _elapsed_ms(replacement_started)
 
@@ -81,6 +86,7 @@ def run_rerender_image_pipeline(
             "source_request_id": str(request.get("source_request_id") or ""),
             "render_size_mode": render_size_mode,
             "erase_fill_mode": erase_fill_mode,
+            "width_fit_mode": width_fit_mode,
             "preserve_heuristic_text": preserve_heuristic_text,
             "timings_ms": {"replacement": replacement_wall_ms},
         },
@@ -100,6 +106,7 @@ def run_rerender_image_pipeline(
         "use_geometry_columns": _bool_request_flag(request, "use_geometry_columns", default=True),
         "render_size_mode": render_size_mode,
         "erase_fill_mode": erase_fill_mode,
+        "width_fit_mode": width_fit_mode,
         "translation_source": "cached_rerender",
         "source_request_id": str(request.get("source_request_id") or ""),
         "image_category": str(source_grouping.get("category") or ""),

@@ -65,6 +65,7 @@ def build_fixture(response: dict[str, Any], *, source_bytes: bytes) -> fx.Fixtur
             "use_geometry_columns": bool(metadata.get("use_geometry_columns", True)),
             "render_size_mode": str(metadata.get("render_size_mode") or "min"),
             "erase_fill_mode": str(metadata.get("erase_fill_mode") or "flat"),
+            "width_fit_mode": str(metadata.get("width_fit_mode") or "footprint"),
         },
         grouping_model=str(metadata.get("grouping_model") or ""),
         target_lang=str(metadata.get("target_lang_code") or ""),

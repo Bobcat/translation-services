@@ -117,6 +117,14 @@ _RESIDUE_MARGIN = 12
 # tight anti-alias allowance tuned for the flat paint; the model additionally needs the
 # fringe pixels MASKED (not just covered) or it treats them as context to continue.
 _INPAINT_MASK_DILATE_PX = 3
+# "extend" width fit: a line may widen into clean background to its right by at most its
+# own original width (so a short item on an empty page cannot balloon into a banner). The
+# pixel gates, not this cap, are the safety: extension stops at the first ink, protected
+# cell or surface change. Near the image border a typographic margin of one line height
+# (~1 em, scales with the text) stays clear — on a clean page nothing else stops the
+# growth and text running to the very edge of the document reads as a layout error.
+_EXTEND_MAX_RATIO = 1.0
+
 # Ground router for erase_fill_mode="inpaint": the model only fills jobs whose ground
 # actually varies; on designed flat/solid ground the flat paint is right by construction,
 # while a model reconstruction of a near-total hole is unstable run-to-run (washed-out
@@ -155,6 +163,7 @@ def render_translated_image(
     *,
     render_size_mode: str = "median",
     erase_fill_mode: str = "flat",
+    width_fit_mode: str = "footprint",
 ) -> bytes:
     opened = Image.open(input_path)
     # Carry the source's ICC colour profile onto the output. ``convert("RGB")`` keeps the raw pixel
@@ -181,6 +190,7 @@ def render_translated_image(
                 group,
                 snap_horizontal=snap_horizontal,
                 render_size_mode=render_size_mode,
+                width_fit_mode=width_fit_mode,
                 protected_boxes=protected_boxes,
             )
         )
@@ -654,6 +664,7 @@ def _plan_group(
     *,
     snap_horizontal: bool = False,
     render_size_mode: str = "median",
+    width_fit_mode: str = "footprint",
     protected_boxes: list[dict[str, Any]] | None = None,
     sweep_ok: bool | None = None,
 ) -> list[_Job]:
@@ -672,6 +683,7 @@ def _plan_group(
                     [cell],
                     snap_horizontal=snap_horizontal,
                     render_size_mode=render_size_mode,
+                    width_fit_mode=width_fit_mode,
                     protected_boxes=protected_boxes,
                     sweep_ok=sweep_ok,
                 )
@@ -763,6 +775,31 @@ def _plan_group(
             planes[0]["width"] = xmax - text_start
             planes[0]["bullet_y"] = bullet_y
 
+    centered = any(str(unit.get("alignment") or "") == "center" for unit in units)
+
+    # One element usually sits on one surface: when the per-plane background samples
+    # are near-equal (texture noise), snap them to their median so the erase planes
+    # don't show slightly different shades per line.
+    colors = [sample_oriented_colors(base, _plane_corners(plane)) for plane in planes]
+    if len(colors) > 1:
+        median_bg = tuple(int(median(bg[channel] for bg, _ in colors)) for channel in range(3))
+        if all(max(abs(bg[c] - median_bg[c]) for c in range(3)) <= _BG_SNAP_DELTA for bg, _ in colors):
+            # Snap the fg by majority too: the per-plane fg is ink-evidence (not derived from
+            # bg), so recomputing it from the snapped bg would throw that evidence away.
+            fgs = [fg for _, fg in colors]
+            colors = [(median_bg, max(set(fgs), key=fgs.count))] * len(colors)
+
+    # "extend" width fit: widen each plane's usable width into VERIFIED clean background to
+    # its right before fitting, so a longer translation of a short line (a list item) keeps
+    # its size instead of condensing/shrinking. Strictly additive: every guard that fails
+    # leaves the plane at its footprint width, i.e. exactly the "footprint" behaviour. Only
+    # for axis-aligned groups (the scan is axis-aligned — same honest limit as the ink
+    # sweep) and never for centered ones (growing right would break the centring).
+    if width_fit_mode == "extend" and angle == 0.0 and not centered:
+        base_px = np.asarray(base)
+        for plane, (bg, _fg) in zip(planes, colors):
+            plane["width"] += _clean_right_extension(base_px, plane, bg, protected_boxes or [])
+
     # The whole group renders at ONE size = the original's source size (true line height),
     # NOT a size chosen to fit the width. So a heading keeps heading size and body keeps
     # body size — the source size carries the hierarchy. The joined translation is balanced
@@ -786,7 +823,6 @@ def _plan_group(
     if _raw_condense(font, lines, planes) < _CONDENSE_FLOOR:
         return []
     ascent, descent = font.getmetrics()
-    centered = any(str(unit.get("alignment") or "") == "center" for unit in units)
 
     # Width is matched by horizontal condensation, not by shrinking the font: at the source
     # size the translated line is usually wider than its original, so squeeze it in x to fit
@@ -794,18 +830,6 @@ def _plan_group(
     # keeps a multi-line block visually coherent; never stretch (cap at 1.0), so a shorter
     # line just stays narrower.
     condense = _condense_scale(font, lines, planes)
-
-    # One element usually sits on one surface: when the per-plane background samples
-    # are near-equal (texture noise), snap them to their median so the erase planes
-    # don't show slightly different shades per line.
-    colors = [sample_oriented_colors(base, _plane_corners(plane)) for plane in planes]
-    if len(colors) > 1:
-        median_bg = tuple(int(median(bg[channel] for bg, _ in colors)) for channel in range(3))
-        if all(max(abs(bg[c] - median_bg[c]) for c in range(3)) <= _BG_SNAP_DELTA for bg, _ in colors):
-            # Snap the fg by majority too: the per-plane fg is ink-evidence (not derived from
-            # bg), so recomputing it from the snapped bg would throw that evidence away.
-            fgs = [fg for _, fg in colors]
-            colors = [(median_bg, max(set(fgs), key=fgs.count))] * len(colors)
 
     # Flat, angle-snapped groups get the pixel-evidence cleanups: the descender bottom
     # extension per line, and — gated separately on hint coverage — the stray-ink slot sweep
@@ -870,6 +894,34 @@ def _plan_group(
     if base_np is not None and sweep_ok:
         _sweep_stray_ink(base_np, planes, jobs, protected_boxes or [], own_boxes)
     return jobs
+
+
+def _clean_right_extension(
+    base_px: np.ndarray,
+    plane: dict[str, Any],
+    bg: tuple[int, int, int],
+    protected_boxes: list[dict[str, Any]],
+) -> float:
+    """Extra usable width right of the plane: the run of columns verified to be clean,
+    continuous background — no ink against the plane's sampled colour (a colour step, a
+    paper/panel edge and any glyph all read as ink), and no protected cell (another unit's
+    text, whether or not it renders). Text drawn over the extension is composited onto the
+    untouched original pixels; nothing is erased there, so a guard miss can at worst
+    overprint — never wipe."""
+    _x_axis, _y_axis, xmin, xmax, ymin, ymax = plane["frame"]
+    height, width = base_px.shape[:2]
+    y0, y1 = max(0, int(ymin)), min(height, int(ymax) + 1)
+    x0 = int(round(xmax + plane["pad"]))
+    border_margin = int(round(ymax - ymin))  # ~1 em at this line's size
+    x1 = min(width - border_margin, x0 + int(round((xmax - xmin) * _EXTEND_MAX_RATIO)))
+    if x0 >= x1 or y0 >= y1:
+        return 0.0
+    strip = base_px[y0:y1, x0:x1].astype(np.int16)
+    unclean = (np.abs(strip - np.asarray(bg, dtype=np.int16)).max(axis=2) >= _INK_DELTA).any(axis=0)
+    unclean |= _column_mask(protected_boxes, y0, y1, x0, x1)
+    blocked = np.nonzero(unclean)[0]
+    clean = int(blocked[0]) if len(blocked) else (x1 - x0)
+    return max(0.0, clean - plane["pad"])
 
 
 def _hint_covers_undetected_text(units: list[dict[str, Any]]) -> bool:
@@ -1023,15 +1075,24 @@ def _bullet_geometry(base: Image.Image, frame: tuple, angle: float) -> tuple[flo
     mask = np.abs(arr - bg) > 60
     ink = mask.any(axis=0)                                 # columns holding a high-contrast pixel
     runs = _ink_runs(ink)
-    # Find the bullet: the first SMALL (dot-sized) run that is followed by a clear gap and then
-    # the text. Skipping wider runs avoids mistaking adjacent layout ink (a coloured panel/book
-    # edge next to the column) for the bullet; the VLM flag guarantees a real bullet is present.
+    # Find the bullet: the first glyph-sized run that is followed by a clear gap and then the
+    # text. A bullet is small in INK HEIGHT, not necessarily narrow: a dot/circle/diamond is
+    # narrow, a dash is wide but flat. The width cap alone rejected a dash or not depending on
+    # a few px of quad-height wobble (the 0.4x threshold sat right on a dash's width), so wide
+    # runs are accepted too when their ink rows span only a thin band — which still rejects
+    # adjacent layout ink (a coloured panel/book edge next to the column is line-TALL); the
+    # VLM flag guarantees a real bullet is present.
     min_width = max(2.0, 0.06 * line_h)  # a 1px anti-alias speck is not a bullet
     for i in range(len(runs) - 1):
         width = runs[i][1] - runs[i][0] + 1
         gap = runs[i + 1][0] - runs[i][1] - 1
-        if min_width <= width <= 0.4 * line_h and gap >= 0.12 * line_h:
-            rows = np.where(mask[:, runs[i][0]:runs[i][1] + 1].any(axis=1))[0]
+        if width < min_width or gap < 0.12 * line_h:
+            continue
+        rows = np.where(mask[:, runs[i][0]:runs[i][1] + 1].any(axis=1))[0]
+        row_span = (rows.max() - rows.min() + 1) if len(rows) else 0
+        dot_like = width <= 0.4 * line_h
+        dash_like = width <= 0.9 * line_h and row_span <= 0.35 * line_h
+        if dot_like or dash_like:
             bullet_y = y0 + (rows.min() + rows.max()) / 2.0 if len(rows) else (y0 + y1) / 2.0
             return float(x0 + runs[i + 1][0]), float(bullet_y)
     return None

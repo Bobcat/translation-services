@@ -293,6 +293,96 @@ def test_flat_erase_swallows_residue_of_the_erased_text_but_not_neighbours(tmp_p
     assert out[62:88, 212:226].min() < 100   # the icon's outside part survives
 
 
+def test_bullet_geometry_accepts_a_wide_flat_dash_but_not_line_tall_edge_ink() -> None:
+    # A bullet is small in ink HEIGHT, not necessarily narrow: a dash is wide but flat and
+    # must be kept (its width sat right on the old 0.4x-line-height cap, so quad-height
+    # wobble flipped it per line). A line-TALL run (a coloured panel edge) is still no bullet.
+    from app.replacement.render import _bullet_geometry
+
+    def strokes(draw):  # glyph-like text ink: thin strokes, not a solid slab
+        for x in range(40, 120, 12):
+            draw.rectangle((x, 15, x + 5, 35), fill=(0, 0, 0))
+
+    img = Image.new("RGB", (200, 60), (255, 255, 255))
+    draw = ImageDraw.Draw(img)
+    draw.rectangle((14, 28, 26, 31), fill=(0, 0, 0))  # dash: 13px wide, 4px tall on a 20px line
+    strokes(draw)
+    frame = (None, None, 12.0, 130.0, 14.0, 34.0)
+    geometry = _bullet_geometry(img, frame, 0.0)
+    assert geometry is not None
+    assert abs(geometry[0] - 40) <= 2  # text starts past the dash
+    assert abs(geometry[1] - 29.5) <= 2  # centred on the dash
+
+    tall = Image.new("RGB", (200, 60), (255, 255, 255))
+    draw = ImageDraw.Draw(tall)
+    draw.rectangle((14, 12, 26, 36), fill=(200, 30, 30))  # line-tall edge ink at the dash's spot
+    strokes(draw)
+    edge_case = _bullet_geometry(tall, frame, 0.0)
+    # The guard under test: line-tall ink is NOT the bullet, so the text anchor must not sit
+    # right after it (the pre-existing dot rule may still anchor elsewhere in the strokes).
+    assert edge_case is None or edge_case[0] > 41
+
+
+def test_clean_right_extension_stops_at_ink_protected_cells_and_the_cap() -> None:
+    from app.replacement.render import _clean_right_extension
+
+    base = np.full((60, 400, 3), 250, dtype=np.uint8)
+    plane = {"frame": (None, None, 20.0, 100.0, 20.0, 40.0), "pad": 4.0}
+    # Clean page to the right: capped at the plane's own width (80px), minus nothing else.
+    assert _clean_right_extension(base, plane, (250, 250, 250), []) == pytest.approx(76.0)
+    # Ink at x=140 stops the run there.
+    inked = base.copy()
+    inked[22:38, 140:150] = (30, 30, 30)
+    assert 0 < _clean_right_extension(inked, plane, (250, 250, 250), []) <= 140 - 104
+    # A protected cell (another unit's text) blocks even without visible ink.
+    boxes = [{"left": 130, "top": 18, "width": 40, "height": 24}]
+    assert _clean_right_extension(base, plane, (250, 250, 250), boxes) <= 130 - 104
+    # A surface change (panel edge) reads as ink against the plane bg.
+    panel = base.copy()
+    panel[:, 150:] = (180, 200, 220)
+    assert _clean_right_extension(panel, plane, (250, 250, 250), []) <= 150 - 104
+    # Near the image border a ~1-em margin stays clear: a line ending at x=340 on a
+    # 400px-wide page may extend at most to 400 - line_height(20) = 380.
+    edge_plane = {"frame": (None, None, 290.0, 340.0, 20.0, 40.0), "pad": 4.0}
+    assert _clean_right_extension(base, edge_plane, (250, 250, 250), []) <= 380 - 344
+
+
+def test_width_fit_extend_keeps_size_on_free_ground_and_footprint_when_blocked(tmp_path) -> None:
+    # A short list item whose translation is much longer: "footprint" condenses/shrinks it
+    # into the original width; "extend" verifies the page right of it is clean background
+    # and keeps the size, rendering wider. With an obstacle directly right of the line the
+    # guards fail and "extend" must render exactly like "footprint".
+    def make(path, with_obstacle):
+        img = Image.new("RGB", (400, 80), (255, 255, 255))
+        draw = ImageDraw.Draw(img)
+        for x in range(20, 66, 12):  # the original short "word": glyph-like strokes
+            draw.rectangle((x, 30, x + 5, 50), fill=(0, 0, 0))
+        if with_obstacle:
+            draw.rectangle((74, 28, 96, 52), fill=(0, 0, 0))  # directly right of the line
+        img.save(path)
+
+    unit = {"translated_text": "langere vertaling",
+            "members": [{"cell_id": 1, "text": "kort", "translate": True,
+                         "bbox": {"left": 20, "top": 30, "width": 50, "height": 20}}]}
+
+    free = tmp_path / "free.png"
+    make(free, with_obstacle=False)
+    footprint = render_translated_image(free, [dict(unit)], width_fit_mode="footprint")
+    extend = render_translated_image(free, [dict(unit)], width_fit_mode="extend")
+    assert footprint != extend
+    ink_cols = lambda png: np.nonzero(  # noqa: E731
+        (np.asarray(Image.open(BytesIO(png)).convert("L")) < 128).any(axis=0)
+    )[0]
+    # The extended render's ink reaches clearly past the original cell's right edge.
+    assert ink_cols(extend).max() > ink_cols(footprint).max() + 10
+
+    blocked = tmp_path / "blocked.png"
+    make(blocked, with_obstacle=True)
+    assert render_translated_image(
+        blocked, [dict(unit)], width_fit_mode="extend"
+    ) == render_translated_image(blocked, [dict(unit)], width_fit_mode="footprint")
+
+
 def test_inpaint_budget_scale_caps_the_model_input_area() -> None:
     assert budget_scale(1000, 1000, 1_500_000) == 1.0
     scale = budget_scale(4096, 3072, 1_500_000)
