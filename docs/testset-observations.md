@@ -406,9 +406,15 @@ them more than we do. Two distinct problems, addressed differently.
   size back down); "extend" removes the width shortage and renders the inflated size
   faithfully — such lines come out visibly too large. A marker-scoped correction would be
   curve-fitting (parentheses appear mid-text too); the honest fix is a robust text-band
-  height metric, which re-calibrates sizing for every render and is deliberately parked as
-  its own task. Until then: pick "footprint" for such images — this is exactly why the mode
-  stays selectable.
+  height metric. SHIPPED (2026-07-08) as its own render flag `size_metric_mode:
+  "extent" | "band"` (default extent = the old behaviour, fixtures untouched): "band"
+  clamps each line to its strong ink band scaled by the DOCUMENT's own median extent/band
+  ratio — the anchor must come from the image itself, because OCR box generosity varies
+  per archetype and no absolute or local gate separates parenthesis inflation from
+  measurement noise (three measurement rounds: 108/406 quads trip a local fringe test).
+  One-sided (only shrinks outliers), weak ink evidence and tilted images keep the extent
+  path. Verified: the numbered list renders all levels at one coherent size under "band",
+  siblings byte-identical to "extent".
 
 
 ## Typography gap vs the reference app (tilted signs, 2026-07-07 comparison)
@@ -427,8 +433,17 @@ reference app's render. Excluding translation length and the resulting smaller f
   ~1° top to ~8° bottom, so one global angle is wrong). This is the historical
   heuristics minefield: own task, measured on all tilted fixtures, never a side-patch.
 - **Centre axis.** Sub-lines anchor on their own plane centres and drift a few px off
-  their heading's axis. Within-group centre-snap (median, noise-gated like the bg snap)
-  is the small safe step; cross-block axis alignment belongs to the angle task.
+  their heading's axis. SHIPPED (2026-07-08): within-group centre-snap — a centered
+  multi-line group's line centres snap to their median when the spread is noise-sized
+  (measured bimodal across the testset: quad noise ≤0.04× line height, designed offsets
+  ≥0.18×; gate at 0.12× the plane target). Cross-block axis alignment (heading vs its
+  body — different groups, different tilted frames) belongs to the angle task.
+- **Weight backstop: measured, then dropped.** 8 grouping runs on the horse sign: the
+  weight signal was 79/80 consistent (700 headings / 400 body every run; one dropout on
+  the lone header element, which a per-level majority vote could not fix either — no
+  majority within a one-element level). The flat-hierarchy render that started this was
+  from an older code state. No backstop built; re-measure if flat hierarchy reappears in
+  current renders.
 - **Heading/body hierarchy: weight works, the SIGNAL wobbles.** The VLM labels this
   sign cleanly (24pt|700 headings, 18pt|400 body), units carry it, and the sans family
   face's weight axis genuinely bolds (+40% ink measured) — a fresh render shows bold
@@ -438,8 +453,10 @@ reference app's render. Excluding translation length and the resulting smaller f
   faithful); the compression is the BODY SIZE: full-extent height measurement makes
   lowercase body lines (ascenders+descenders) render ~0.85× of the heading where the
   original (and the VLM's pt labels) sit at 0.75× — the oversized body fills the
-  original whitespace. Same parked size-metric dossier as the parenthesis inflation;
-  second symptom in one day. The VLM pt ratios are a candidate cross-check signal.
+  original whitespace. Same size-metric dossier as the parenthesis inflation (now the
+  `size_metric_mode: "band"` flag) — but this sign is TILTED, and "band" deliberately
+  skips tilted images (axis-aligned scan), so the leading symptom stays open until the
+  angle task. The VLM pt ratios remain a candidate cross-check signal.
 - **Erase plates.** The grey flat plates on the pack's black panel (photo ground) are
   the Tier-2 case — "inpaint" renders both signs visibly cleaner (verified on the
   gradient strip of the horse sign: seamless with inpaint, a visible patch with flat).

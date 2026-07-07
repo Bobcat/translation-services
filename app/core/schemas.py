@@ -56,6 +56,13 @@ class RequestPayload(BaseModel):
     # usable width into VERIFIED clean background right of the line (never over other text,
     # ink or a surface change), so a short list item's longer translation keeps its size.
     width_fit_mode: Literal["footprint", "extend"] = "footprint"
+    # Where a line's SOURCE SIZE comes from. "extent" (default) sizes from the OCR
+    # polygon's full ink extent; "band" clamps each line to its strong ink band scaled
+    # by the document's own extent/band norm, so sparse tall glyphs (parentheses — as a
+    # marker or mid-text — brackets) cannot inflate a line's size past its siblings.
+    # One-sided: "band" only ever shrinks an outlier, and weak ink evidence keeps the
+    # extent behaviour.
+    size_metric_mode: Literal["extent", "band"] = "extent"
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 

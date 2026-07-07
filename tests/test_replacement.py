@@ -383,6 +383,80 @@ def test_width_fit_extend_keeps_size_on_free_ground_and_footprint_when_blocked(t
     ) == render_translated_image(blocked, [dict(unit)], width_fit_mode="footprint")
 
 
+def test_centered_group_lines_snap_to_one_axis_when_the_spread_is_noise(tmp_path) -> None:
+    # Two centered lines of one element whose plane centres differ by a few px (quad
+    # noise) must render on ONE axis; a genuinely offset second line (spread far past
+    # the noise gate) must keep its own centre.
+    def render_centers(offset_px):
+        img = Image.new("RGB", (400, 160), (255, 255, 255))
+        draw = ImageDraw.Draw(img)
+        for x in range(100, 296, 14):  # line 1: centre 200
+            draw.rectangle((x, 30, x + 6, 50), fill=(0, 0, 0))
+        for x in range(100 + offset_px, 296 + offset_px, 14):  # line 2: centre 200+offset
+            draw.rectangle((x, 70, x + 6, 90), fill=(0, 0, 0))
+        path = tmp_path / f"c{offset_px}.png"
+        img.save(path)
+        unit = {"translated_text": "eerste regel tweede regel", "alignment": "center",
+                "block_id": 1, "level": "body",
+                "members": [
+                    {"cell_id": 1, "text": "eerste regel", "translate": True,
+                     "bbox": {"left": 100, "top": 30, "width": 202, "height": 20}},
+                    {"cell_id": 2, "text": "tweede regel", "translate": True,
+                     "bbox": {"left": 100 + offset_px, "top": 70, "width": 202, "height": 20}},
+                ]}
+        from app.replacement.render import _groups, _image_is_flat, _plan_group
+        group = _groups([unit])[0]
+        jobs = _plan_group(Image.open(path).convert("RGB"), group,
+                           snap_horizontal=_image_is_flat([unit]), render_size_mode="median")
+        centers = [
+            (min(p[0] for p in j.dst_quad) + max(p[0] for p in j.dst_quad)) / 2
+            for j in jobs if j.dst_quad
+        ]
+        assert len(centers) == 2
+        return centers
+
+    noisy = render_centers(3)  # 3px << 0.12 * target: noise -> one axis
+    assert abs(noisy[0] - noisy[1]) < 0.6
+    designed = render_centers(40)  # 40px >> gate: genuinely offset -> kept apart
+    assert abs(designed[0] - designed[1]) > 20
+
+
+def test_band_metric_shrinks_a_parenthesis_inflated_line_and_leaves_siblings(tmp_path) -> None:
+    # Four sibling lines share one text-band height; one of them carries sparse tall ink
+    # (parenthesis-like tips above and below) and an OCR box stretched to match. Under
+    # "extent" that line renders visibly taller than its siblings; under "band" it sinks
+    # to the document norm while an untouched sibling renders byte-identically to extent.
+    img = Image.new("RGB", (420, 320), (255, 255, 255))
+    draw = ImageDraw.Draw(img)
+    units = []
+    for row, (top, inflated) in enumerate([(30, False), (100, False), (170, True), (240, False)]):
+        for x in range(40, 200, 14):  # glyph strokes: band 24px tall
+            draw.rectangle((x, top, x + 6, top + 24), fill=(0, 0, 0))
+        bbox = {"left": 40, "top": top, "width": 166, "height": 25}
+        if inflated:
+            draw.rectangle((40, top - 12, 42, top + 36), fill=(0, 0, 0))   # sparse tall tip left
+            draw.rectangle((204, top - 12, 206, top + 36), fill=(0, 0, 0))  # and right
+            bbox = {"left": 38, "top": top - 12, "width": 172, "height": 49}
+        units.append({"translated_text": f"regel {row} vertaald", "block_id": row, "level": "body",
+                      "members": [{"cell_id": row, "text": f"regel {row}", "translate": True,
+                                   "bbox": bbox}]})
+    path = tmp_path / "band.png"
+    img.save(path)
+
+    extent = render_translated_image(path, [dict(u) for u in units], size_metric_mode="extent")
+    band = render_translated_image(path, [dict(u) for u in units], size_metric_mode="band")
+    assert extent != band
+
+    def ink_height(png, y0, y1):
+        arr = np.asarray(Image.open(BytesIO(png)).convert("L"))[y0:y1]
+        rows = np.nonzero((arr < 128).any(axis=1))[0]
+        return (rows.max() - rows.min() + 1) if len(rows) else 0
+
+    # The inflated line (row band y 158..220) shrinks under "band"; a sibling stays put.
+    assert ink_height(band, 150, 225) < ink_height(extent, 150, 225)
+    assert ink_height(band, 20, 70) == ink_height(extent, 20, 70)
+
+
 def test_inpaint_budget_scale_caps_the_model_input_area() -> None:
     assert budget_scale(1000, 1000, 1_500_000) == 1.0
     scale = budget_scale(4096, 3072, 1_500_000)

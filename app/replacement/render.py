@@ -117,6 +117,29 @@ _RESIDUE_MARGIN = 12
 # tight anti-alias allowance tuned for the flat paint; the model additionally needs the
 # fringe pixels MASKED (not just covered) or it treats them as context to continue.
 _INPAINT_MASK_DILATE_PX = 3
+# "band" size metric (size_metric_mode): the OCR polygon's full ink extent is the default
+# size source, but sparse tall glyphs — parentheses (as a marker OR mid-text), brackets, a
+# stray swash — stretch it far past the text band while the band itself stays put
+# (measured on a numbered list: polygon 69-76px, text band 36px, vs 47-50/35 on plain
+# siblings). No LOCAL gate separates that inflation from measurement noise reliably
+# (three measurement rounds: absolute band ratios, doc-normalised ratios and fringe
+# ratios all overlap with normal lines), so the correction is per-DOCUMENT and one-sided:
+# the document's median polygon/band ratio anchors what "normal" looks like on this very
+# image, and a line's height is clamped to band * that ratio — outliers sink to the
+# document norm, everything else is untouched. Weak ink evidence falls back to the extent.
+_BAND_STRONG_ROW_FRACTION = 0.15  # rows holding >= this fraction of the peak ink count
+_BAND_MIN_ROWS = 3
+_BAND_MIN_PEAK = 4
+_BAND_MIN_SAMPLES = 4  # document ratio needs at least this many measured quads
+
+# Centered lines of one element sit on ONE axis in print, but each rendered line anchors
+# on its own plane's centre, and those wobble a few px with OCR quad noise — the block
+# comes out ragged. Snap the centres to their median when the spread is noise-sized.
+# Measured across the testset's centered multi-line groups the spread is bimodal: quad
+# noise stays under ~0.04x the line height, genuinely offset designs start at ~0.18x —
+# the gate sits in the gap. (The ratio is against the plane target = 0.9x line height.)
+_CENTER_SNAP_MAX_RATIO = 0.12
+
 # "extend" width fit: a line may widen into clean background to its right by at most its
 # own original width (so a short item on an empty page cannot balloon into a banner). The
 # pixel gates, not this cap, are the safety: extension stops at the first ink, protected
@@ -164,6 +187,7 @@ def render_translated_image(
     render_size_mode: str = "median",
     erase_fill_mode: str = "flat",
     width_fit_mode: str = "footprint",
+    size_metric_mode: str = "extent",
 ) -> bytes:
     opened = Image.open(input_path)
     # Carry the source's ICC colour profile onto the output. ``convert("RGB")`` keeps the raw pixel
@@ -183,6 +207,7 @@ def render_translated_image(
         for member in (unit.get("members") or [])
         if member.get("bbox")
     ]
+    band_ratio = _document_band_ratio(base, translation_units) if size_metric_mode == "band" else None
     for group in groups:
         jobs.extend(
             _plan_group(
@@ -191,6 +216,7 @@ def render_translated_image(
                 snap_horizontal=snap_horizontal,
                 render_size_mode=render_size_mode,
                 width_fit_mode=width_fit_mode,
+                band_ratio=band_ratio,
                 protected_boxes=protected_boxes,
             )
         )
@@ -665,6 +691,7 @@ def _plan_group(
     snap_horizontal: bool = False,
     render_size_mode: str = "median",
     width_fit_mode: str = "footprint",
+    band_ratio: float | None = None,
     protected_boxes: list[dict[str, Any]] | None = None,
     sweep_ok: bool | None = None,
 ) -> list[_Job]:
@@ -684,6 +711,7 @@ def _plan_group(
                     snap_horizontal=snap_horizontal,
                     render_size_mode=render_size_mode,
                     width_fit_mode=width_fit_mode,
+                    band_ratio=band_ratio,
                     protected_boxes=protected_boxes,
                     sweep_ok=sweep_ok,
                 )
@@ -757,6 +785,7 @@ def _plan_group(
             "quads": quads,
             "tokens": _plane_source_tokens(quads, group_quads, quad_tokens),
             "target": max(8, int(true_height * size_ratio)),
+            "true_height": true_height,
             "pad": max(2.0, true_height / 6.0),
             "frame": (x_axis, y_axis, xmin, xmax, ymin, ymax),
             "width": xmax - xmin,
@@ -776,6 +805,14 @@ def _plan_group(
             planes[0]["bullet_y"] = bullet_y
 
     centered = any(str(unit.get("alignment") or "") == "center" for unit in units)
+    if centered and len(planes) > 1:
+        centers = [(plane["frame"][2] + plane["frame"][3]) / 2 for plane in planes]
+        axis = median(centers)
+        if max(abs(c - axis) for c in centers) <= _CENTER_SNAP_MAX_RATIO * median(
+            plane["target"] for plane in planes
+        ):
+            for plane in planes:
+                plane["center_x"] = axis
 
     # One element usually sits on one surface: when the per-plane background samples
     # are near-equal (texture noise), snap them to their median so the erase planes
@@ -788,6 +825,18 @@ def _plan_group(
             # bg), so recomputing it from the snapped bg would throw that evidence away.
             fgs = [fg for _, fg in colors]
             colors = [(median_bg, max(set(fgs), key=fgs.count))] * len(colors)
+
+    # "band" size metric: clamp each plane's size target to its ink band scaled by the
+    # document's own extent/band norm — a line whose polygon is stretched by sparse tall
+    # glyphs sinks to the size its band says, everything else stays on the extent path
+    # (one-sided: min(), never enlarges; weak ink evidence keeps the extent).
+    if band_ratio is not None and angle == 0.0:
+        band_px = np.asarray(base)
+        for plane, (bg, _fg) in zip(planes, colors):
+            bands = [b for q in plane["quads"] if (b := _quad_band_height(band_px, q, bg)) is not None]
+            if bands:
+                clamped = min(plane["true_height"], median(bands) * band_ratio)
+                plane["target"] = max(8, int(clamped * size_ratio))
 
     # "extend" width fit: widen each plane's usable width into VERIFIED clean background to
     # its right before fitting, so a longer translation of a short line (a list item) keeps
@@ -867,7 +916,7 @@ def _plan_group(
                     oy = bullet_y - pad - (int(rows[0]) + int(rows[-1])) / 2.0
             tile_w = max(1, text_w + 2 * int(pad))
             tile_h = max(1, text_h + 2 * int(pad))
-            ox = (xmin + xmax) / 2 - tile_w / 2 if centered else xmin - pad
+            ox = plane.get("center_x", (xmin + xmax) / 2) - tile_w / 2 if centered else xmin - pad
             tile = Image.new("RGBA", (tile_w, tile_h), (0, 0, 0, 0))
             tile.paste(text_img, (int(pad), int(pad)))
             dst_quad = [
@@ -894,6 +943,56 @@ def _plan_group(
     if base_np is not None and sweep_ok:
         _sweep_stray_ink(base_np, planes, jobs, protected_boxes or [], own_boxes)
     return jobs
+
+
+def _quad_band_height(base_px: np.ndarray, quad, bg: tuple[int, int, int]) -> float | None:
+    """Height of the quad's STRONG ink band: the row span where the ink column count
+    reaches at least _BAND_STRONG_ROW_FRACTION of the peak row. Sparse fringe rows (a
+    parenthesis tip, an anti-alias fade) fall below it; the band tracks the glyph core.
+    None when the ink evidence is too weak to trust."""
+    xs = [p[0] for p in quad]
+    ys = [p[1] for p in quad]
+    x0, x1 = max(0, int(min(xs))), min(base_px.shape[1], int(max(xs)) + 1)
+    y0, y1 = max(0, int(min(ys))), min(base_px.shape[0], int(max(ys)) + 1)
+    if x1 - x0 < 4 or y1 - y0 < 4:
+        return None
+    window = base_px[y0:y1, x0:x1].astype(np.int16)
+    counts = (np.abs(window - np.asarray(bg, dtype=np.int16)).max(axis=2) >= _INK_DELTA).sum(axis=1)
+    if counts.max() < _BAND_MIN_PEAK:
+        return None
+    strong = np.nonzero(counts >= max(2, _BAND_STRONG_ROW_FRACTION * counts.max()))[0]
+    if len(strong) < _BAND_MIN_ROWS:
+        return None
+    return float(strong.max() - strong.min() + 1)
+
+
+def _document_band_ratio(base: Image.Image, units: list[dict[str, Any]]) -> float | None:
+    """Median polygon-height / band-height over the document's member quads — what the
+    extent-to-band relation looks like on this image's NORMAL lines (OCR box generosity
+    varies per archetype, so the anchor must come from the image itself). None without
+    enough evidence, or on tilted images where the axis-aligned scan is unreliable."""
+    if not _image_is_flat(units):
+        return None
+    base_px = np.asarray(base)
+    ratios: list[float] = []
+    for unit in units:
+        for member in (unit.get("members") or []):
+            if not member.get("bbox"):
+                continue
+            quad = geo.quad_of(member)
+            if quad is None or abs(geo.angle_deg(quad)) >= _ANGLE_DEADZONE_DEG:
+                continue
+            height = geo.line_height(quad)
+            xs = [p[0] for p in quad]
+            ys = [p[1] for p in quad]
+            frame = ((1.0, 0.0), (0.0, 1.0), min(xs), max(xs), min(ys), max(ys))
+            bg, _fg = sample_oriented_colors(base, _plane_corners({"frame": frame, "pad": max(2.0, height / 6.0)}))
+            band = _quad_band_height(base_px, quad, bg)
+            if band:
+                ratios.append(height / band)
+    if len(ratios) < _BAND_MIN_SAMPLES:
+        return None
+    return float(median(ratios))
 
 
 def _clean_right_extension(

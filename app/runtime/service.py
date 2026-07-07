@@ -390,6 +390,9 @@ class RequestRuntime:
             "width_fit_mode": str(body.get("width_fit_mode") or "").strip()
             or source_request.get("width_fit_mode")
             or "footprint",
+            "size_metric_mode": str(body.get("size_metric_mode") or "").strip()
+            or source_request.get("size_metric_mode")
+            or "extent",
         }
         # Same for the boolean flags: body overrides, else the source run's value carries over —
         # letting the schema default refill them would silently change the retranslate's inputs
@@ -449,6 +452,9 @@ class RequestRuntime:
             "width_fit_mode": str(body.get("width_fit_mode") or "").strip()
             or source_request.get("width_fit_mode")
             or "footprint",
+            "size_metric_mode": str(body.get("size_metric_mode") or "").strip()
+            or source_request.get("size_metric_mode")
+            or "extent",
         }
         for flag in ("preserve_heuristic_text", "preserve_unchanged_text", "use_geometry_columns"):
             if flag in source_request:
