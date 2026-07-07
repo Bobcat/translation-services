@@ -2,13 +2,19 @@ from __future__ import annotations
 
 from io import BytesIO
 
+import cv2
 import numpy as np
+import pytest
 from PIL import Image
 from PIL import ImageDraw
 
 import math
 
 from app.replacement.color import sample_region_colors
+from app.replacement.inpaint import border_pads
+from app.replacement.inpaint import budget_scale
+from app.replacement.inpaint import context_window
+from app.replacement.inpaint import work_scale
 from app.replacement.fit import _dominant_script
 from app.replacement.fit import fit_text
 from app.replacement.fit import fold_lone_fullwidth_punctuation
@@ -221,7 +227,7 @@ def test_slot_sweep_erases_ink_the_ocr_box_undershot(tmp_path) -> None:
 
 
 def test_sweep_erases_unclaimed_ink_but_keeps_other_units_pixels(tmp_path) -> None:
-    # adv-budgets anatomy: OCR detected '2025' but missed the 'in' before it. The unclaimed ink
+    # Screenshot anatomy: OCR detected '2025' but missed the 'in' before it. The unclaimed ink
     # inside the group's own line band is leftover source text -> swept. The same ink, when it
     # belongs to ANOTHER unit's member (a preserved/skipped cell), is protected ground.
     def make_input(path):
@@ -287,26 +293,124 @@ def test_flat_erase_swallows_residue_of_the_erased_text_but_not_neighbours(tmp_p
     assert out[62:88, 212:226].min() < 100   # the icon's outside part survives
 
 
-def test_inpaint_mode_is_a_noop_that_renders_identical_to_flat(tmp_path) -> None:
-    # "inpaint" stays an accepted erase_fill_mode (API clients and pinned fixtures keep
-    # working) but renders byte-identical to flat: the Telea diffusion and the plane-fit
-    # fills were both tried and removed (2026-07-06) — see the pass-1 comment in render.py.
+def test_inpaint_budget_scale_caps_the_model_input_area() -> None:
+    assert budget_scale(1000, 1000, 1_500_000) == 1.0
+    scale = budget_scale(4096, 3072, 1_500_000)
+    assert 0.0 < scale < 1.0
+    assert (4096 * scale) * (3072 * scale) <= 1_500_000 + 1  # float slack
+
+
+def test_inpaint_work_scale_upscales_tiny_crops_but_caps_at_2x_and_budget() -> None:
+    assert work_scale(2048, 1536, 1_500_000) < 1.0  # over budget: downscale wins
+    assert work_scale(800, 600, 1_500_000) == 1.0  # comfortable size: untouched
+    assert work_scale(307, 164, 1_500_000) == pytest.approx(320 / 164)  # tiny thumbnail: ~2x
+    assert work_scale(400, 100, 1_500_000) == 2.0  # thin strip: the 2x cap binds
+    assert work_scale(400, 300, 1_500_000) == pytest.approx(320 / 300)  # just short: exact ratio
+    assert work_scale(300, 200, 90_000) == pytest.approx(math.sqrt(90_000 / 60_000))  # budget caps the upscale
+
+
+def test_inpaint_ground_router_keeps_flat_on_designed_ground_and_models_gradients() -> None:
+    # Designed ground: a solid band with the line fully inside it — every side band is
+    # constant along the line, so the flat paint is right and the model must stay out.
+    # Textured ground: shading drifting along the line scars under a flat rectangle and
+    # must go to the model.
+    from app.replacement.render import _ellipse
+    from app.replacement.render import _GROUND_RING_INNER_PX
+    from app.replacement.render import _Job
+    from app.replacement.render import _needs_model_fill
+
+    quad = [(60, 60), (240, 60), (240, 90), (60, 90)]
+    job = _Job(erase_quads=[quad], bg_color=(220, 60, 30), tile=None, dst_quad=None)
+    occupied = np.zeros((160, 300), dtype=np.uint8)
+    cv2.fillPoly(occupied, [np.asarray(quad, dtype=np.int32)], 255)
+    occupied = cv2.dilate(occupied, _ellipse(_GROUND_RING_INNER_PX))
+
+    designed = np.zeros((160, 300, 3), dtype=np.uint8)
+    designed[:, :] = (220, 60, 30)  # the whole ring lives inside one solid band
+    assert not _needs_model_fill(designed, job, occupied)
+
+    graded = np.zeros((160, 300, 3), dtype=np.uint8)
+    graded[:, :] = np.linspace(90, 200, 300).astype(np.uint8)[None, :, None]  # drift along the line
+    assert _needs_model_fill(graded, job, occupied)
+
+
+def test_inpaint_border_pads_only_where_the_hole_touches_a_mirrorable_border() -> None:
+    # Corner case: the mask reaches the top-left image corner and the strip is plain
+    # background -> mirror-pad top+left. Counter-cases: a near-fully masked strip or a
+    # featureful strip (a mounting hole: mirroring it makes a pair the model repeats as
+    # a period) must NOT be mirrored.
+    plain = np.full((100, 200, 3), 245, dtype=np.uint8)
+    crop_mask = np.zeros((100, 200), dtype=np.uint8)
+    crop_mask[0:20, 0:60] = 255  # a line clipped into the top-left corner
+    pads = border_pads(plain, crop_mask, (0, 0, 200, 100), (400, 400))
+    assert pads[0] > 0 and pads[2] > 0  # top and left mirrored
+    assert pads[1] == 0 and pads[3] == 0  # bottom/right: crop not on the image border
+
+    full = np.full((100, 200), 255, dtype=np.uint8)  # near-fully masked strip: no anchor
+    assert border_pads(plain, full, (0, 0, 200, 100), (100, 200)) == (0, 0, 0, 0)
+
+    featureful = plain.copy()
+    featureful[4:12, 100:116] = (220, 60, 30)  # a distinctive UNMASKED mark in the top strip
+    assert border_pads(featureful, crop_mask, (0, 0, 200, 100), (400, 400))[0] == 0
+
+    inset = np.zeros((100, 200), dtype=np.uint8)
+    inset[40:60, 40:160] = 255  # mask nowhere near the crop edge
+    assert border_pads(plain, inset, (0, 0, 200, 100), (100, 200)) == (0, 0, 0, 0)
+
+
+def test_inpaint_context_window_adds_margin_and_clamps_to_the_image() -> None:
+    mask = np.zeros((200, 300), dtype=np.uint8)
+    assert context_window(mask) is None
+    mask[80:100, 10:120] = 255  # touches the left margin zone
+    x0, y0, x1, y1 = context_window(mask)
+    assert x0 == 0  # clamped: 10 - margin(>=32) < 0
+    assert y0 <= 80 - 32 and y1 >= 100 + 32  # at least the minimum context ring
+    assert x1 >= 120 + 32 and x1 <= 300
+
+
+def test_inpaint_mode_reconstructs_the_gradient_the_flat_fill_would_flatten(tmp_path) -> None:
+    # The acceptance direction for the Tier-2 fill (2026-07-06 verdict): reconstruct the
+    # ground instead of painting one colour. On a vertical gradient the flat fill leaves a
+    # constant band; LaMa must continue the gradient through the erased region. Model-based
+    # and GPU-only, so this runs where the service runs (dc1) and skips elsewhere.
+    torch = pytest.importorskip("torch")
+    if not torch.cuda.is_available():
+        pytest.skip("inpaint fill is GPU-only")
+    from app.core.config import load_settings
+    from pathlib import Path
+
+    if not Path(load_settings().inpaint.model_path).expanduser().exists():
+        pytest.skip("no LaMa checkpoint on this machine")
+
     input_path = tmp_path / "in.png"
     img = Image.new("RGB", (300, 160), (255, 255, 255))
     draw = ImageDraw.Draw(img)
-    for y in range(160):  # a gradient, where the removed fills diverged from flat the most
+    for y in range(160):
         shade = 60 + y
         draw.line([(0, y), (300, y)], fill=(shade, shade, shade))
     for x in range(44, 196, 14):
         draw.rectangle((x, 60, x + 6, 90), fill=(255, 255, 255))
     img.save(input_path)
-    unit = {"translated_text": "aa",
+    unit = {"translated_text": "aa",  # narrow, anchored left: x>150 keeps no tile
             "members": [{"cell_id": 1, "text": "WARNING", "translate": True,
                          "bbox": {"left": 40, "top": 58, "width": 160, "height": 34}}]}
 
-    flat = render_translated_image(input_path, [dict(unit)], erase_fill_mode="flat")
-    inpaint = render_translated_image(input_path, [dict(unit)], erase_fill_mode="inpaint")
-    assert flat == inpaint
+    flat = np.asarray(Image.open(BytesIO(
+        render_translated_image(input_path, [dict(unit)], erase_fill_mode="flat")
+    )).convert("RGB")).astype(np.int16)
+    inpaint = np.asarray(Image.open(BytesIO(
+        render_translated_image(input_path, [dict(unit)], erase_fill_mode="inpaint")
+    )).convert("RGB")).astype(np.int16)
+
+    # Sample the erased band right of the rendered tile. Flat paints it one colour; the
+    # reconstruction must follow the gradient (rows keep their own shade, within noise).
+    rows = np.arange(64, 86)
+    expected = 60 + rows
+    filled_rows = inpaint[64:86, 150:190].mean(axis=(1, 2))
+    flat_rows = flat[64:86, 150:190].mean(axis=(1, 2))
+    assert np.ptp(flat_rows) < 4  # the flat band really is flat, or the test proves nothing
+    assert np.abs(filled_rows - expected).mean() < 8
+    assert np.ptp(filled_rows) > 10  # follows the gradient's spread, not one shade
 
 
 def test_company_member_with_preserve_dropped_field_stays_out_of_the_spend_cell() -> None:

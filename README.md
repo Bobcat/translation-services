@@ -165,6 +165,9 @@ Key sections (see `app/core/config.py` for all defaults):
 - `ocr` — `backend`, `language` (empty = route the recognizer per image from the
   grouping hint), `min_confidence`, `device` (`cpu` / `gpu:0`), `ocr_version`,
   detection limits, and optional explicit `det_model` / `rec_model`.
+- `inpaint` — `model_path` (TorchScript checkpoint for the model-based erase
+  fill, used by `erase_fill_mode="inpaint"`; GPU-only), `pixel_budget_px` (hard
+  cap on the crop area fed to the model, bounds its VRAM use).
 
 `translator_mode`: `generic` uses a target-language prompt and auto-detects the
 source; `translategemma` uses the dedicated model and needs `source_lang_code`.

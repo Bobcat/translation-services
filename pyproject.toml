@@ -17,6 +17,9 @@ dependencies = [
   "uvicorn>=0.30",
   "pydantic>=2.6",
   "python-multipart>=0.0.9",
+  # erase_fill_mode="inpaint" (LaMa, GPU-only). Blackwell needs the cu128 wheels:
+  # pip install torch --index-url https://download.pytorch.org/whl/cu128
+  "torch>=2.11",
 ]
 
 [tool.setuptools.packages.find]

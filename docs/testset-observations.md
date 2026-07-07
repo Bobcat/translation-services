@@ -4,7 +4,7 @@ Per-image findings from running the pipeline on `testset/` screenshots: what goe
 the diagnosed cause, and whether it is fixed or parked. Each entry names the test image so a
 fix can be re-checked against it.
 
-Last updated: 2026-06-24.
+Last updated: 2026-07-07.
 
 ---
 
@@ -268,6 +268,101 @@ them more than we do. Two distinct problems, addressed differently.
   on these signs). Design the general approach once we have **several hard-language signs where the
   VLM text and the OCR text diverge** (`æ/œ/ß/ø/þ/ð` — Icelandic/Danish/Norwegian/German/French),
   then lean on the VLM (which reads these correctly) to repair OCR-misread leftovers.
+
+
+## `circus.jpeg` (tiny web image 307×164, red warning banner, en→fr)
+
+### Fixed — junk strip at the banner top under the Tier-2 inpaint fill
+
+- **Hallucinated shapes along the top edge of the red bar** (`erase_fill_mode="inpaint"`).
+  The erase mask covered nearly the whole image (the WARNING quad spans y1–y50 of a ~52px
+  banner), leaving ~1px of red context above; at 1:1 the model reads glyph-scale features of
+  such a thumbnail-sized crop as texture to continue, and drags the JPEG edge junk across the
+  fill. Fix: `inpaint.work_scale` upscales a crop whose **short side < 320px** toward the
+  model's training scale (bicubic in, area out), **capped at 2×** and never past the pixel
+  budget. The cap is load-bearing: on this image ~2× fills clean, but 3×/4× wash out to grey —
+  the hole outgrows what the context ring supports. Masking the border sliver instead
+  (extending the mask to the image edge) was tested and did not help. Validated: circus clean,
+  `bullets-dashes.png` (226×223, second small fixture) clean, short side ≥ 320 takes the old
+  path bit-for-bit.
+
+### Open / parked — Tier-2 fill performance headroom, and a faint haze
+
+- **Residual:** at 3× zoom a faint greenish haze remains across the reconstructed banner top;
+  invisible at 1:1. Revisit only if it shows on a real image at viewing size.
+- **Parked: CPU-side blend cost.** The inpaint delta over flat is small (~<0.5s on a 12Mpx
+  photo) and almost none of it is GPU (forward ≈ 130ms at the 1.5Mpx budget). The rest is
+  full-crop CPU work in `inpaint.inpaint_mask` — on a mask spanning the whole photo the crop is
+  the whole image, so the fill upscale, the feather blur and the float32 blend each traverse
+  ~12Mpx × 3 channels. If it ever matters: (1) limit the feather+blend to the mask's bounding
+  rows instead of the full crop; (2) per-region crops (one forward per text block — less resize
+  traffic AND sharper local texture; also the known quality follow-up for far-apart small lines
+  on huge photos); (3) integer or GPU-side blend. Not worth the complexity at <0.5s.
+
+
+## `items-levels-2.png` / `adv-budgets.jpg` — Tier-2 inpaint border and small-crumb fixes
+
+### Fixed — dark corner smudge (`items-levels-2`, top-left)
+
+- The "1." line's erase quad clips into the image corner; a hole touching the input border
+  has no context on that side and the fill comes back unanchored (dark smudge). Fix:
+  `inpaint.border_pads` mirror-pads a side (reflect-101, mask mirrored too) when the crop
+  sits on the image border there, the mask reaches it, AND the mirrored strip is safe to
+  mirror. Both guards are load-bearing, measured on the circus banner:
+  - **anchored** (≥25% unmasked): mirroring a near-fully-masked strip (circus top) just
+    enlarges the hole;
+  - **near-uniform** (unmasked max channel std ≤ 20): mirroring a strip with a distinctive
+    feature plants a copy next to the real one, and the Fourier-convolution model reads the
+    pair as a period to REPEAT — circus's mounting holes became a dot row across the whole
+    bar, seeping down through the fill (left/right strips: 30–34% unmasked but std ~100).
+    Featureful borders keep the model's own boundary handling.
+
+### Fixed — erased-glyph crumbs bleeding back through (`adv-budgets`)
+
+- Two mechanisms, both inpaint-only (flat was clean): (1) the paste feather (Gaussian on the
+  mask alpha) also weakened the mask INTERIOR — a 3px residue crumb never reaches alpha 1 at
+  its centre, so the original ink blended back in; now the feather is outward-only
+  (alpha clamped to 1 inside the mask). (2) on crops above the pixel budget the mask was
+  downscaled with NEAREST, dropping 1–2px crumbs — the model then saw that ink as context
+  and handed it straight back; now the mask resize is coverage-preserving (INTER_AREA > 0).
+
+### Open / parked — dense overlay ink next to the hole (`adv-budgets` status-bar strip)
+
+- Around the status-bar icons (alarm/bluetooth/wifi/battery, overlapped by the ghost
+  heading) the reconstruction grows dark halos / re-invents glyph-ish smears: the hole is
+  surrounded by dense unmasked icon ink and the model continues those shapes inward. This is
+  acceptance-criterion territory (boundary overlays), not a mask bug — a whole-image diff vs
+  flat shows the remaining dark deltas confined to that strip. Much reduced by the ground
+  router below (most of the screenshot now takes the flat paint); small smears remain at the
+  icon-adjacent jobs that route to the model. Candidate if it must improve: per-region crops
+  at full resolution (sharper shape termination), the same follow-up parked under
+  `circus.jpeg` above.
+
+
+## Tier-2 inpaint — ground router: designed ground stays flat (circus/danger-1 wash-out)
+
+### Fixed — unstable model reconstruction on designed flat/solid ground
+
+- With the whole erase mask sent to the model, designed graphics reconstructed unstably
+  run-to-run: washed-out streaks through the solid banner (circus, three consecutive runs,
+  three different failures, seeping down through the bar), muddy bands in the white field
+  below it, and a grey fill instead of the solid red panel behind `100°C` (danger-1). Root
+  cause: a near-total hole on flat/solid ground gives the model almost no anchor, and OCR
+  quad run-variance moves what little context there is — while the flat paint is right there
+  BY CONSTRUCTION. Fix: `render._needs_model_fill` routes per job. The ring around the quads
+  is split into side bands (above/below/left/right), each band into segments along the line;
+  the ground is flat-safe when within every band the segment medians agree (Δ ≤ 20 per
+  channel) — a designed band or panel is constant ALONG the line even when the sides differ
+  from each other (red band above, white field below). `erase_fill_mode="inpaint"` is now a
+  hybrid: flat paint by default, model only where the ground actually varies.
+- Measured routing across archetypes (spread p75/max): circus 8/17 → fully flat; menukaart
+  8/30 → 1 job to the model; adv-budgets 6/226 → 2 jobs; kassabon 14/46 → 8 crease/shadow
+  lines to the model, evenly lit lines flat. Verified live: circus solid and stable over
+  three runs, danger-1 red behind `100°C`, kassabon crumples still reconstruct, menukaart
+  clean.
+- Named limit: a designed boundary running through a line's LENGTH (a line spanning two
+  panels) reads as varying and goes to the model — the safe direction. And jobs boxed in by
+  other text (no ring) default to flat.
 
 
 ## Parked: VLM serving non-determinism (after the `*…:*` prompt lock-in)

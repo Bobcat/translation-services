@@ -62,11 +62,21 @@ class OcrSettings:
 
 
 @dataclass(frozen=True)
+class InpaintSettings:
+    # TorchScript big-lama checkpoint used by erase_fill_mode="inpaint" (Tier-2 fill).
+    model_path: str = "~/.cache/lama/big-lama.pt"
+    # Hard VRAM ceiling: the crop fed to the model never exceeds this many pixels
+    # (activations scale linearly, ~750 MiB/Mpx + ~200 MiB weights -> ~1.6 GiB at 1.5 Mpx).
+    pixel_budget_px: int = 1_500_000
+
+
+@dataclass(frozen=True)
 class AppSettings:
     service: ServiceSettings = field(default_factory=ServiceSettings)
     scheduler: SchedulerSettings = field(default_factory=SchedulerSettings)
     llm_pool: LlmPoolSettings = field(default_factory=LlmPoolSettings)
     ocr: OcrSettings = field(default_factory=OcrSettings)
+    inpaint: InpaintSettings = field(default_factory=InpaintSettings)
 
 
 def load_settings(path: str | Path | None = None) -> AppSettings:
@@ -87,6 +97,7 @@ def load_settings(path: str | Path | None = None) -> AppSettings:
     scheduler_payload = _dict(payload.get("scheduler"))
     llm_pool_payload = _dict(payload.get("llm_pool"))
     ocr_payload = _dict(payload.get("ocr"))
+    inpaint_payload = _dict(payload.get("inpaint"))
 
     records_ttl_s = _int_dict(
         scheduler_payload.get("records_ttl_s"),
@@ -129,6 +140,11 @@ def load_settings(path: str | Path | None = None) -> AppSettings:
             text_det_limit_type=_text_det_limit_type(ocr_payload.get("text_det_limit_type", "max")),
             det_model=str(ocr_payload.get("det_model", "") or "").strip(),
             rec_model=str(ocr_payload.get("rec_model", "") or "").strip(),
+        ),
+        inpaint=InpaintSettings(
+            model_path=str(inpaint_payload.get("model_path", "~/.cache/lama/big-lama.pt") or "").strip()
+            or "~/.cache/lama/big-lama.pt",
+            pixel_budget_px=max(65_536, int(inpaint_payload.get("pixel_budget_px", 1_500_000))),
         ),
     )
 

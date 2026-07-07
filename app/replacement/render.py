@@ -21,7 +21,8 @@ Two facts make this work without a model:
   oriented region with OpenCV.
 
 `translate: false` members and ignored cells are never touched. Textured/photographic
-backgrounds still scar (a flat fill can't blend) — that is the LaMa (Tier 2) case.
+backgrounds scar under the flat fill (it can't blend); ``erase_fill_mode="inpaint"``
+switches pass 1 to the LaMa reconstruction (Tier 2, :mod:`app.replacement.inpaint`).
 See docs/re-placement.md.
 """
 from __future__ import annotations
@@ -45,6 +46,7 @@ from app.grouping.heuristics import _is_nontranslatable
 from app.replacement import geometry as geo
 from app.replacement.color import sample_oriented_colors
 from app.replacement.fit import break_pieces
+from app.replacement.inpaint import inpaint_mask
 from app.replacement.fit import fold_lone_fullwidth_punctuation
 from app.replacement.fit import is_cjk_text
 from app.replacement.fit import load_font
@@ -82,7 +84,7 @@ _STRAY_LINE_WIDTH_RATIO = 0.5
 
 # Below this group angle (degrees) the text is treated as horizontal and placed axis-aligned,
 # so OCR detection noise on a flat image isn't warped into a visible slant. A genuine page
-# tilt is well above it (a photographed menukaart sits at ~6°), so real perspective is kept.
+# tilt is well above it (a photographed menu card sits at ~6°), so real perspective is kept.
 _ANGLE_DEADZONE_DEG = 3.0
 
 # Minimum source-text similarity to bind a table-row field to a cell. Below it the row is
@@ -111,6 +113,27 @@ _SWEEP_MAX_INK_FRACTION = 0.35
 # Residue swallow: how far past the erase quads leftover ink of the erased text is searched.
 # Descenders and anti-alias fringes reach a few px; anything farther is not ours to erase.
 _RESIDUE_MARGIN = 12
+# Growth of the Tier-2 inpaint mask past the erase quads. The quads' vertical margin is a
+# tight anti-alias allowance tuned for the flat paint; the model additionally needs the
+# fringe pixels MASKED (not just covered) or it treats them as context to continue.
+_INPAINT_MASK_DILATE_PX = 3
+# Ground router for erase_fill_mode="inpaint": the model only fills jobs whose ground
+# actually varies; on designed flat/solid ground the flat paint is right by construction,
+# while a model reconstruction of a near-total hole is unstable run-to-run (washed-out
+# streaks through a solid banner). Per job the ring around the quads is split into side
+# bands (above/below/left/right), each band into segments along the line; the ground is
+# "flat-safe" when within every band the segment medians agree — a designed panel or band
+# is constant ALONG the line even when the sides differ from each other (red band above,
+# white field below), where texture/shading (crumpled paper, photo ground) drifts along
+# it. Thresholds measured across four testset archetypes; designed boundaries running
+# THROUGH a line's length read as varying and go to the model — the safe direction.
+_GROUND_RING_INNER_PX = 7
+_GROUND_RING_OUTER_PX = 23
+_GROUND_MAX_SIDE_SPREAD = 20
+_GROUND_SEGMENTS_ALONG = 6
+_GROUND_SEGMENTS_ACROSS = 3
+_GROUND_MIN_BAND_PX = 60
+_GROUND_MIN_SEGMENT_PX = 20
 
 
 @dataclass(frozen=True)
@@ -163,21 +186,41 @@ def render_translated_image(
         )
 
     # Pass 1: cover every original (along the slant) so no source text peeks through.
-    # ``erase_fill_mode`` is accepted but currently a NO-OP: "inpaint" renders exactly like
-    # "flat". Two fills were tried and removed (2026-07-06): cv2 Telea diffusion (transports
-    # boundary pixels inward — glyph residue, JPEG chroma halos and overlapping icons smear
-    # across the fill, and OCR quad run-variance makes the failures unpredictable) and a
-    # per-job least-squares colour-plane fit (on designed flat bands the per-line fits land
-    # on slightly different shades and the result reads as patchwork — flat is visibly
-    # better on menukaart/nike-ad). The flag stays so API clients and pinned fixtures keep
-    # working until a fill that actually beats flat lands (LaMa benchmark is parked).
+    # "flat" paints each quad with its sampled background colour (Tier-1, model-free);
+    # "inpaint" reconstructs the background under the same quads with LaMa (Tier-2,
+    # see app/replacement/inpaint.py). Two model-free fills sat behind "inpaint" before
+    # and were removed (2026-07-06): cv2 Telea diffusion (transports boundary pixels
+    # inward — glyph residue, JPEG chroma halos and overlapping icons smear across the
+    # fill) and a per-job least-squares colour-plane fit (on designed flat bands the
+    # per-line fits land on slightly different shades — patchwork). LaMa reconstructs
+    # rather than transports, which is exactly that failure-mode split.
     original = np.asarray(base).copy()
-    erase = ImageDraw.Draw(base)
-    for job in jobs:
-        for quad in job.erase_quads:
-            erase.polygon(quad, fill=job.bg_color)
-    canvas = np.asarray(base).copy()
-    _swallow_erase_residue(canvas, original, jobs)
+    if erase_fill_mode == "inpaint":
+        # Hybrid: flat paint stays the fill for jobs on designed flat/solid ground (it is
+        # right there by construction); the model only reconstructs the jobs whose ground
+        # varies — texture or shading a flat rectangle would scar.
+        occupied = np.zeros(original.shape[:2], dtype=np.uint8)
+        for job in jobs:
+            for quad in job.erase_quads:
+                cv2.fillPoly(occupied, [np.asarray(quad, dtype=np.int32)], 255)
+        occupied = cv2.dilate(occupied, _ellipse(_GROUND_RING_INNER_PX))
+        routed = [(job, _needs_model_fill(original, job, occupied)) for job in jobs]
+        flat_jobs = [job for job, to_model in routed if not to_model]
+        model_jobs = [job for job, to_model in routed if to_model]
+        canvas = original.copy()
+        for job in flat_jobs:
+            for quad in job.erase_quads:
+                cv2.fillPoly(canvas, [np.asarray(quad, dtype=np.int32)], job.bg_color)
+        _swallow_erase_residue(canvas, original, flat_jobs)
+        if model_jobs:
+            canvas = inpaint_mask(canvas, _erase_mask(original, model_jobs))
+    else:
+        erase = ImageDraw.Draw(base)
+        for job in jobs:
+            for quad in job.erase_quads:
+                erase.polygon(quad, fill=job.bg_color)
+        canvas = np.asarray(base).copy()
+        _swallow_erase_residue(canvas, original, jobs)
 
     # Pass 2: warp each text tile onto its oriented region.
     for job in jobs:
@@ -195,17 +238,89 @@ def render_translated_image(
 def _swallow_erase_residue(
     canvas: np.ndarray, original: np.ndarray, jobs: list[_Job]
 ) -> None:
-    """Extend the flat erase to residue of the erased text itself: an ink component that lies
-    mostly INSIDE the erase quads is a leftover part of the text being removed — a descender
-    the tight quad bottom cut through, an anti-alias fringe past the quad edge — and is
-    painted with the job's background colour too. Detection runs on the ORIGINAL pixels: on
-    the erased canvas a residue crumb no longer connects to its glyph's interior ink and the
-    majority-inside test would see it as fully outside. Self-limiting on unreliable ground:
-    busy texture merges the glyphs into one large mostly-outside component and nothing
-    happens, and a component reaching the search window's border has an unknown true extent
-    (a table rule grazing the line) and is skipped. Named limit: a surviving neighbour glyph
-    already overlapped >50% by an erase quad is taken whole instead of left half-cut."""
-    occupied = np.zeros(canvas.shape[:2], dtype=np.uint8)
+    """Extend the flat erase to residue of the erased text itself (see
+    :func:`_residue_regions`): each residue component is painted with its job's
+    background colour, like the quad fill it belongs to."""
+    for y0, y1, x0, x1, pixels, job in _residue_regions(original, jobs):
+        region = canvas[y0:y1, x0:x1]
+        region[pixels] = np.asarray(job.bg_color, dtype=np.uint8)
+
+
+def _needs_model_fill(original: np.ndarray, job: _Job, occupied: np.ndarray) -> bool:
+    """Ground router (see the _GROUND_* constants): True when the ground around the job
+    varies along the line — texture or shading the flat paint would scar — False when
+    every side band is constant along it (designed flat/solid ground, where the flat
+    paint is right by construction and a model reconstruction is unstable)."""
+    height, width = original.shape[:2]
+    quad_mask = np.zeros((height, width), dtype=np.uint8)
+    for quad in job.erase_quads:
+        cv2.fillPoly(quad_mask, [np.asarray(quad, dtype=np.int32)], 255)
+    inner = cv2.dilate(quad_mask, _ellipse(_GROUND_RING_INNER_PX))
+    outer = cv2.dilate(quad_mask, _ellipse(_GROUND_RING_OUTER_PX))
+    ring_y, ring_x = np.nonzero((outer > 0) & (inner == 0) & (occupied == 0))
+    if ring_y.size == 0:
+        return False  # boxed in by other text: no ground to judge, keep the flat paint
+    ys, xs = np.nonzero(quad_mask)
+    y_lo, y_hi, x_lo, x_hi = ys.min(), ys.max(), xs.min(), xs.max()
+    for in_band, coord, segments in (
+        (ring_y < y_lo, ring_x, _GROUND_SEGMENTS_ALONG),
+        (ring_y > y_hi, ring_x, _GROUND_SEGMENTS_ALONG),
+        (ring_x < x_lo, ring_y, _GROUND_SEGMENTS_ACROSS),
+        (ring_x > x_hi, ring_y, _GROUND_SEGMENTS_ACROSS),
+    ):
+        if in_band.sum() < _GROUND_MIN_BAND_PX:
+            continue
+        band_y, band_x, band_c = ring_y[in_band], ring_x[in_band], coord[in_band]
+        lo, hi = band_c.min(), band_c.max() + 1
+        medians = []
+        for step in range(segments):
+            seg = (band_c >= lo + (hi - lo) * step // segments) & (
+                band_c < lo + (hi - lo) * (step + 1) // segments
+            )
+            if seg.sum() < _GROUND_MIN_SEGMENT_PX:
+                continue
+            medians.append(np.median(original[band_y[seg], band_x[seg]].astype(np.int16), axis=0))
+        if len(medians) < 2:
+            continue
+        stack = np.array(medians)
+        if np.abs(stack[:, None] - stack[None, :]).max() > _GROUND_MAX_SIDE_SPREAD:
+            return True
+    return False
+
+
+def _ellipse(radius_px: int) -> np.ndarray:
+    return cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (radius_px, radius_px))
+
+
+def _erase_mask(original: np.ndarray, jobs: list[_Job]) -> np.ndarray:
+    """Erase mask for the Tier-2 (LaMa) fill: every erase quad, dilated a few px so the
+    anti-alias fringe past the tight quad edges is masked too (a half-covered glyph edge
+    left in the context reads as text the model would continue into the hole), plus the
+    same residue components the flat path swallows — reconstructed instead of painted."""
+    mask = np.zeros(original.shape[:2], dtype=np.uint8)
+    for job in jobs:
+        for quad in job.erase_quads:
+            cv2.fillPoly(mask, [np.asarray(quad, dtype=np.int32)], 255)
+    size = _INPAINT_MASK_DILATE_PX * 2 + 1
+    mask = cv2.dilate(mask, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (size, size)))
+    for y0, y1, x0, x1, pixels, _job in _residue_regions(original, jobs):
+        mask[y0:y1, x0:x1][pixels] = 255
+    return mask
+
+
+def _residue_regions(original: np.ndarray, jobs: list[_Job]):
+    """Residue of the erased text itself: an ink component that lies mostly INSIDE the
+    erase quads is a leftover part of the text being removed — a descender the tight quad
+    bottom cut through, an anti-alias fringe past the quad edge. Yields
+    ``(y0, y1, x0, x1, pixel_mask, job)`` per job window with residue. Detection runs on
+    the ORIGINAL pixels: on an erased canvas a residue crumb no longer connects to its
+    glyph's interior ink and the majority-inside test would see it as fully outside.
+    Self-limiting on unreliable ground: busy texture merges the glyphs into one large
+    mostly-outside component and nothing happens, and a component reaching the search
+    window's border has an unknown true extent (a table rule grazing the line) and is
+    skipped. Named limit: a surviving neighbour glyph already overlapped >50% by an erase
+    quad is taken whole instead of left half-cut."""
+    occupied = np.zeros(original.shape[:2], dtype=np.uint8)
     for job in jobs:
         for quad in job.erase_quads:
             cv2.fillPoly(occupied, [np.asarray(quad, dtype=np.int32)], 255)
@@ -233,8 +348,7 @@ def _swallow_erase_residue(
             & ~np.isin(ids, np.unique(labels[border]))
         )
         if swallow.any():
-            region = canvas[y0:y1, x0:x1]
-            region[np.isin(labels, ids[swallow])] = np.asarray(job.bg_color, dtype=np.uint8)
+            yield y0, y1, x0, x1, np.isin(labels, ids[swallow]), job
 
 
 def _groups(units: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
@@ -608,7 +722,8 @@ def _plan_group(
     # detects each quad a degree or so off, and warping the tile to that noise turns straight
     # text visibly slanted. When the WHOLE image reads as flat (``snap_horizontal``), snap a
     # near-horizontal group angle to 0. A genuinely tilted sign is NOT flat (its angles form a
-    # perspective gradient — afstand-houden runs ~1° at the top to ~8° at the bottom), so its
+    # perspective gradient — a tall photographed sign runs ~1° at the top to ~8° at the
+    # bottom), so its
     # small top-line angles are kept; snapping only those would break the gradient.
     angle = median(geo.angle_deg(quad) for quad in group_quads)
     clusters = _line_clusters(group_quads, angle)

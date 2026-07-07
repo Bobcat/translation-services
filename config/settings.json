@@ -32,5 +32,9 @@
     "text_det_limit_type": "max",
     "det_model": "",
     "rec_model": ""
+  },
+  "inpaint": {
+    "model_path": "~/.cache/lama/big-lama.pt",
+    "pixel_budget_px": 1500000
   }
 }
