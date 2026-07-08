@@ -88,6 +88,33 @@ def test_repeated_tokens_do_not_inflate_a_full_match() -> None:
     assert 0 in truly_full.full
 
 
+def test_ligature_word_binds_its_line_exactly_but_a_misread_stays_leftover() -> None:
+    # A line whose first word carries a ligature (æ) the VLM reads correctly while OCR spells
+    # it out: the spelled-out cell must bind that line EXACTLY via the folded token — as a
+    # leftover it would get its own translation rendered a second time over the same line. A
+    # misread that DROPS the ligature's vowel must NOT reach the folded token through the fuzzy
+    # ratio: it stays a leftover by design (the fuzzy universe keeps the unfolded fragments,
+    # which — with the ligature early in the word — are too short to match). Synthetic words.
+    hint = ["TITELWOORD", "SÆLDA TWEEDE", "DERDE VIERDE"]
+
+    def cells(first_word: str) -> list[dict]:
+        return [
+            {"id": 1, "text": "TITELWOORD", "bbox": {"left": 60, "top": 10, "width": 300, "height": 40}},
+            {"id": 2, "text": first_word, "bbox": {"left": 10, "top": 60, "width": 180, "height": 40}},
+            {"id": 3, "text": "TWEEDE", "bbox": {"left": 210, "top": 60, "width": 180, "height": 40}},
+            {"id": 4, "text": "DERDE", "bbox": {"left": 10, "top": 110, "width": 180, "height": 40}},
+        ]
+
+    bound = build_units_from_hint(cells=cells("SAELDA"), hint_units=hint, model="qwen")
+    by_hint = {u.hint_index: [m.text for m in u.members] for u in bound.units}
+    assert by_hint.get(1) == ["SAELDA", "TWEEDE"]
+    assert all(u.hint_index is not None for u in bound.units)
+
+    misread = build_units_from_hint(cells=cells("SALDA"), hint_units=hint, model="qwen")
+    leftovers = [m.text for u in misread.units if u.hint_index is None for m in u.members]
+    assert leftovers == ["SALDA"]
+
+
 def _cells() -> list[dict]:
     return [
         {"id": 1, "text": "THE SHOE", "bbox": {"left": 10, "top": 10, "width": 200, "height": 40}},

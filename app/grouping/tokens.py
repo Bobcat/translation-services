@@ -33,6 +33,16 @@ import unicodedata
 _FUZZY_MIN_LEN = 4
 _FUZZY_RATIO = 0.8
 
+# Latin letters NFKD does NOT decompose (ligatures and letters with their own code point).
+# OCR spells them out (a word with "æ" reads as its "ae" form) while the VLM keeps the
+# ligature, and the unfolded word splits on the non-[a-z] character into fragments too short
+# to match — the cell falls through as a leftover and its translation renders a SECOND time
+# over the same line. So the EXACT match compares folded tokens. The fuzzy match deliberately
+# keeps the UNFOLDED tokens (``_fuzzy_tokens``): folding the hint would let a misread that
+# drops the ligature's vowel ratio-match the folded token (0.90) and bind a cell that must
+# stay a leftover — the unfolded fragments being unmatchable is what shields that case.
+_FOLD = str.maketrans({"æ": "ae", "œ": "oe", "ø": "o", "ß": "ss", "þ": "th", "ð": "d"})
+
 # Scriptio-continua characters (no word spaces) — each is its own token. Ranges cover Hiragana +
 # Katakana, the common CJK ideograph blocks, and Hangul syllables; CJK punctuation (。、 …) is
 # deliberately excluded so it is dropped, like ASCII punctuation. None of these code points is the
@@ -56,9 +66,18 @@ def _normalize(text: str) -> str:
 
 def _tokens(text: str) -> list[str]:
     """Match tokens for one text: spaced-script words (Latin + digits) plus one token per CJK
-    character. For any text without CJK source characters this is exactly the historical
-    ``[a-z0-9]+`` token list (see the module docstring for the zero-regression argument). Token
-    order is irrelevant downstream — every consumer overlaps against a hint *set* or counts."""
+    character, with the non-decomposing Latin letters folded (``_FOLD``) so a ligature word and
+    OCR's spelled-out reading of it produce the same token. For text without CJK or foldable
+    characters this is exactly the historical ``[a-z0-9]+`` token list (see the module docstring
+    for the zero-regression argument). Token order is irrelevant downstream — every consumer
+    overlaps against a hint *set* or counts."""
+    normalized = _normalize(text).translate(_FOLD)
+    return _SPACED.findall(normalized) + _CJK_CHAR.findall(normalized)
+
+
+def _fuzzy_tokens(text: str) -> list[str]:
+    """The UNFOLDED token list — the universe the fuzzy match scans (see ``_FOLD`` for why the
+    fold must stay invisible to it)."""
     normalized = _normalize(text)
     return _SPACED.findall(normalized) + _CJK_CHAR.findall(normalized)
 
@@ -78,18 +97,20 @@ def _token_pair_matches(token: str, hint_token: str) -> bool:
     return difflib.SequenceMatcher(None, token, hint_token).ratio() >= _FUZZY_RATIO
 
 
-def _token_score(token: str, hint_set: set[str]) -> float:
+def _token_score(token: str, hint_set: set[str], fuzzy_tokens: set[str] | None = None) -> float:
     """1.0 exact, else fuzzy (slightly lower, so exact wins a tie) for OCR garble: the cell
     must still bind to its clean VLM line when OCR splits a word ("Kaar thouder" vs
     "Kaarthouder") or drops/adds a character ("AHNEDAARDBEI" vs "AHNEDAARBEI") — otherwise
     the cell becomes a leftover, the per-unit fallback translates the garbled text in
     isolation, and the good structured translation of the VLM line is orphaned. Below exact
-    so "Kaart" still binds its own line, not "Kaarthouder"."""
+    so "Kaart" still binds its own line, not "Kaarthouder". When ``fuzzy_tokens`` is given
+    (the UNFOLDED hint tokens) the fuzzy scan runs over those instead of ``hint_set``, so
+    ligature folding stays exact-only (see ``_FOLD``)."""
     if token in hint_set:
         return 1.0
     if len(token) < _FUZZY_MIN_LEN:
         return 0.0
-    for hint_token in hint_set:
+    for hint_token in (hint_set if fuzzy_tokens is None else fuzzy_tokens):
         if _token_pair_matches(token, hint_token):
             return 0.9
     return 0.0

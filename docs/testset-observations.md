@@ -236,7 +236,7 @@ them more than we do. Two distinct problems, addressed differently.
   (`_category_instructions()` in `app/translation/translate.py`, empty map for now). No-regression
   verified: 0 output diffs across the testset inputs × nl/zh/en (monolingual images unchanged).
 
-### Open / parked — leftover doubling, and the VLM↔OCR-text strategy
+### Leftover doubling — ligature half SHIPPED; position-guard half + VLM↔OCR strategy parked
 
 - **Symptom.** A hint line the VLM read correctly is **split** because one OCR cell does not bind:
   the orphan becomes a leftover, is translated and rendered **separately**, and its translation shows
@@ -258,16 +258,20 @@ them more than we do. Two distinct problems, addressed differently.
     fixtures); a hand-rolled cell-id signature missed the `hint_index` leftover→title flip that
     `run_variant` caught. OCR params are not a lever either — raising `text_det_limit_side_len` did
     not change the `æ` reading (stable per photo) and regressed `FJARAN`→`EJARAN`.
-- **Designed, not built.** The discriminator is **exact-vs-fuzzy**: normalize the hint for the
-  **exact** match (`danger-2` `HAETTA` binds exact, score 1.0) but keep the **fuzzy** fallback on the
-  **original** `{h, tta}` tokens (`danger-1` `hatta` reaches a line only via fuzzy → still fails →
-  stays leftover). Alternative: a **spatial gate** — bind an orphan only when it is adjacent to an
-  already-bound cell of that VLM line (`danger-1`'s lone heading has none). Both are
-  `danger-1`-safe by construction.
-- **Parked (by agreement).** Leave as-is for now (quality already ahead of off-the-shelf translators
-  on these signs). Design the general approach once we have **several hard-language signs where the
-  VLM text and the OCR text diverge** (`æ/œ/ß/ø/þ/ð` — Icelandic/Danish/Norwegian/German/French),
-  then lean on the VLM (which reads these correctly) to repair OCR-misread leftovers.
+- **SHIPPED (2026-07-08): the exact-vs-fuzzy discriminator, exactly as designed.** `tokens._FOLD`
+  folds the non-decomposing Latin letters (`æ→ae œ→oe ø→o ß→ss þ→th ð→d`) into `_tokens` — the
+  EXACT-match universe everywhere (binding, dedup, heuristics stay mutually consistent) — while the
+  fuzzy fallback scans the new `_fuzzy_tokens` (unfolded): `danger-2`'s `HAETTA` now binds its line
+  exact (score 1.0) and the line translates as ONE unit ("PAS OP! GEVAAR!" — the doubling is gone,
+  and the translator even differentiates the two warnings); `danger-1`'s misread `HATTA` reaches
+  the folded token only via fuzzy, which never sees it → stays leftover, all five `danger-1`
+  fixtures byte-identical. Verified: 51/51 sweep + live run. For text without the six letters the
+  fold is the identity — zero behaviour change.
+- **Still parked.** (2) the `Local` position-guard case (a spatial gate — bind an orphan only when
+  adjacent to an already-bound cell of its VLM line — remains the designed candidate), and the
+  general VLM↔OCR-divergence strategy: once we have **several hard-language signs where the VLM
+  text and the OCR text diverge**, lean on the VLM (which reads these correctly) to repair
+  OCR-misread leftovers beyond what folding covers (dropped letters, not just expansions).
 
 
 ## `circus.jpeg` (tiny web image 307×164, red warning banner, en→fr)

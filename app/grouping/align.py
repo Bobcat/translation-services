@@ -21,6 +21,7 @@ from app.grouping.heuristics import _is_continuation
 from app.grouping.heuristics import _is_icon_fragment
 from app.grouping.heuristics import _is_nontranslatable
 from app.grouping.heuristics import _near
+from app.grouping.tokens import _fuzzy_tokens
 from app.grouping.tokens import _token_pair_matches
 from app.grouping.tokens import _token_score
 from app.grouping.tokens import _tokens
@@ -55,9 +56,17 @@ def build_units_from_hint(
     hint_bullet_markers: list[str | None] | None = None,
 ) -> GroupingResult:
     hint_token_sets = [set(_tokens(text)) for text in hint_units]
+    # The fuzzy fallback scans the UNFOLDED hint tokens: ligature folding is for the exact
+    # match only (see tokens._FOLD), so a ligature misread cannot ratio-match onto a line.
+    hint_fuzzy_sets = [set(_fuzzy_tokens(text)) for text in hint_units]
     token_to_hints = _build_hint_index(hint_token_sets)
     matches = [
-        _match_scores(cell, hint_token_sets, _candidate_hints(cell, token_to_hints))
+        _match_scores(
+            cell,
+            hint_token_sets,
+            _candidate_hints(cell, token_to_hints),
+            fuzzy_sets=hint_fuzzy_sets,
+        )
         for cell in cells
     ]
     positions, positions_anchored = _anchored_positions(cells, matches, len(hint_units))
@@ -380,10 +389,12 @@ def _match_scores(
     cell: dict[str, Any],
     hint_token_sets: list[set[str]],
     candidate_indices: set[int] | None = None,
+    fuzzy_sets: list[set[str]] | None = None,
 ) -> _Match:
     cell_tokens = _tokens(str(cell.get("text") or ""))
     if not cell_tokens:
         return _Match(candidates=[], score=0.0)
+    fuzzy = hint_token_sets if fuzzy_sets is None else fuzzy_sets
     # ``candidate_indices`` (from _build_hint_index) are the only lines that can score > 0; the rest
     # would add a 0 and be dropped anyway. Iterate them in index order so the result — ties and the
     # ``full`` set — is identical to scanning every line. None = scan all (the unindexed path).
@@ -394,7 +405,7 @@ def _match_scores(
         hint_set = hint_token_sets[index]
         if not hint_set:
             continue
-        matched = sum(_token_score(token, hint_set) for token in cell_tokens)
+        matched = sum(_token_score(token, hint_set, fuzzy[index]) for token in cell_tokens)
         if matched:
             matched_by_index.append((index, matched))
             if matched > best_matched:
@@ -409,7 +420,7 @@ def _match_scores(
     # untouched, and an all-garble cell arrives here with ``candidate_indices`` None already — so
     # this fires only for the mixed case, which stays rare enough to keep the match near-linear.
     if candidate_indices is not None and best_matched / len(cell_tokens) < _MATCH_THRESHOLD:
-        return _match_scores(cell, hint_token_sets, None)
+        return _match_scores(cell, hint_token_sets, None, fuzzy_sets)
     candidates = [index for index, matched in matched_by_index if matched == best_matched]
     # ``full`` means "the cell carries every token of the line", so it is recounted on DISTINCT
     # cell tokens: the raw mass above counts duplicates separately, and per-character CJK tokens
@@ -420,7 +431,8 @@ def _match_scores(
     full = tuple(
         index
         for index in candidates
-        if sum(_token_score(token, hint_token_sets[index]) for token in distinct_tokens) + 1e-9
+        if sum(_token_score(token, hint_token_sets[index], fuzzy[index]) for token in distinct_tokens)
+        + 1e-9
         >= len(hint_token_sets[index])
     )
     has_alpha = any(any(ch.isalpha() for ch in token) for token in cell_tokens)

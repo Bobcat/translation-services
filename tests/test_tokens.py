@@ -8,6 +8,7 @@ import re
 import unicodedata
 
 from app.grouping.tokens import _CJK
+from app.grouping.tokens import _fuzzy_tokens
 from app.grouping.tokens import _tokens
 
 
@@ -20,14 +21,14 @@ def _old_tokens(text: str) -> list[str]:
 
 
 # Latin-script corpus, including the tricky cases the zero-regression argument hinges on:
-# accented letters (NFKD → ASCII), letters with no decomposition (ø, ß — always dropped), and
-# symbols whose NFKD lands in another alphabet (µ → Greek μ, Ω → Greek Ω — must still drop).
+# accented letters (NFKD → ASCII) and symbols whose NFKD lands in another alphabet (µ → Greek μ,
+# Ω → Greek Ω — must still drop). Words with foldable letters (æ/œ/ø/ß/þ/ð) are deliberately NOT
+# here: those now fold instead of splitting/dropping — see the fold tests below.
 LATIN_CORPUS = [
     "THE SHOE WORKS IF YOU DO.",
     "Nike Sweet Classic High is both comfortable and stylish.",
     "color options, this sneaker is the perfect choice for everyday casual wear",
     "Café crème — naïve façade",
-    "Smørrebrød Straße ø ß",
     "5 µg/mL at 50 Ω",
     "€ 8,50  1,69 B  -2,00",
     "www.nike.com  https://example.org/path  info@x.io",
@@ -41,6 +42,16 @@ LATIN_CORPUS = [
 def test_latin_tokenization_is_unchanged():
     for text in LATIN_CORPUS:
         assert _tokens(text) == _old_tokens(text), text
+
+
+def test_foldable_letters_tokenize_to_their_spelled_out_form():
+    # Ligatures and non-decomposing letters fold so the VLM's reading and OCR's spelled-out
+    # reading produce the SAME exact-match token; the unfolded fragments stay available for
+    # the fuzzy universe via _fuzzy_tokens.
+    assert _tokens("Cæsar œuvre Smørrebrød Straße þing eða") == [
+        "caesar", "oeuvre", "smorrebrod", "strasse", "thing", "eda",
+    ]
+    assert _fuzzy_tokens("Cæsar") == ["c", "sar"]
 
 
 def test_cjk_ranges_never_collide_with_latin_tokens():
