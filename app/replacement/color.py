@@ -16,13 +16,12 @@ import cv2
 import numpy as np
 from PIL import Image
 
+from app.replacement.pixels import _INK_DELTA
+
 
 Color = tuple[int, int, int]
 Point = tuple[float, float]
 
-# A pixel deviating this much from the background (any channel) is glyph ink — the same
-# delta the render's stray-ink machinery uses (render._INK_DELTA).
-_INK_DELTA = 48
 # Below this many ink pixels the region carries no readable evidence (an erase-only sliver)
 # and the foreground falls back to contrasting with the background.
 _MIN_INK_PIXELS = 24
