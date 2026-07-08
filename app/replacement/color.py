@@ -41,9 +41,22 @@ def sample_oriented_colors(image: Image.Image, corners: list[Point]) -> tuple[Co
     if width <= 0 or height <= 0:
         return (255, 255, 255), (0, 0, 0)
     src = np.asarray(corners, dtype=np.float32)
+    # Warp only the region's own bounding box, not the whole image: this runs once per
+    # plane, and converting + array-ifying + warping a full ~12 Mpx frame each time to
+    # extract a small crop dominated the render. Cropping to the corners' bbox and shifting
+    # the source points by the same offset leaves the warp output identical (every sampled
+    # source pixel lies inside the quad, hence inside the bbox).
+    img_w, img_h = image.size
+    x0 = max(0, int(np.floor(src[:, 0].min())))
+    y0 = max(0, int(np.floor(src[:, 1].min())))
+    x1 = min(img_w, int(np.ceil(src[:, 0].max())))
+    y1 = min(img_h, int(np.ceil(src[:, 1].max())))
+    if x1 <= x0 or y1 <= y0:
+        return (255, 255, 255), (0, 0, 0)
+    region = np.asarray(image.crop((x0, y0, x1, y1)).convert("RGB"))
     dst = np.asarray([[0, 0], [width, 0], [width, height], [0, height]], dtype=np.float32)
-    matrix = cv2.getPerspectiveTransform(src, dst)
-    crop = cv2.warpPerspective(np.asarray(image.convert("RGB")), matrix, (width, height))
+    matrix = cv2.getPerspectiveTransform(src - np.asarray([x0, y0], dtype=np.float32), dst)
+    crop = cv2.warpPerspective(region, matrix, (width, height))
     if crop.size == 0:
         return (255, 255, 255), (0, 0, 0)
     bg = tuple(int(channel) for channel in np.median(_border_pixels(crop), axis=0))

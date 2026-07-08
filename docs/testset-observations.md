@@ -368,6 +368,23 @@ them more than we do. Two distinct problems, addressed differently.
   panels) reads as varying and goes to the model — the safe direction. And jobs boxed in by
   other text (no ring) default to flat.
 
+### Second trigger — fine TEXTURE at a constant median (2026-07-08)
+
+- The median-spread test only catches ground whose median SHIFTS along the line (gradient,
+  shading). Photographic ground with a STEADY median but real grain — the concrete behind the
+  nike-ad headline — passed as "flat", so the flat fill painted a smooth grey patch the eye
+  reads instantly as an erase (the original headline sits directly on unbroken concrete).
+- Added `_GROUND_MAX_TEXTURE_MAD`: alongside the spread test, a job also routes to the model
+  when its ring's grain (median over segments of each ring pixel's max-channel deviation from
+  its OWN segment median) exceeds the threshold. A gradient moves the medians; texture
+  scatters pixels around a steady one — the case spread cannot see.
+- Threshold from a full-testset measurement of currently-flat jobs: designed-flat / screenshot
+  / sign ground sits ≤ 2 (afstand/danger-1/menukaart/kassabon/weather all 0–2), photographic
+  concrete 5.0–5.5 — a clean gap, gate at 3.5. Delta check confirmed it flips EXACTLY the seven
+  nike-ad concrete jobs and no other fixture's routing, so the designed-flat wash-out cannot
+  reopen. Verified live: the nike headline's grey patches gone, concrete continuous behind the
+  text.
+
 
 ## `bullets-dashes.png` (7-item list, one marker glyph per item, en→nl/zh)
 

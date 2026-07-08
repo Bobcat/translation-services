@@ -180,6 +180,14 @@ _GROUND_SEGMENTS_ALONG = 6
 _GROUND_SEGMENTS_ACROSS = 3
 _GROUND_MIN_BAND_PX = 60
 _GROUND_MIN_SEGMENT_PX = 20
+# Second route-to-model trigger: fine TEXTURE at a constant median. The side-spread test above
+# only catches ground whose median SHIFTS along the line (a gradient or shading); photographic
+# ground (concrete, fabric) has a steady median but real grain, and a flat fill paints one colour
+# — a smooth patch the eye reads instantly as an erase. Measured across the testset (see
+# docs/testset-observations.md): designed-flat / screenshot / sign ground sits <=2, photographic
+# texture >=5, so this gate separates them cleanly with margin to spare and does not reopen the
+# designed-flat wash-out (those stay well under it).
+_GROUND_MAX_TEXTURE_MAD = 3.5
 
 
 @dataclass(frozen=True)
@@ -213,6 +221,7 @@ def render_translated_image(
 
     jobs: list[_Job] = []
     groups = _groups(translation_units)
+    base_arr = np.asarray(base)  # read-only pixel view, shared across all groups
     snap_horizontal = _image_is_flat(translation_units)
     # Every member box of EVERY unit — rendered, preserved or skipped — is protected ground for
     # the stray-ink sweep: only ink no unit accounts for may be treated as leftover source text.
@@ -234,6 +243,7 @@ def render_translated_image(
                 width_fit_mode=width_fit_mode,
                 band_ratio=band_ratio,
                 angle_field=angle_field,
+                base_arr=base_arr,
                 protected_boxes=protected_boxes,
             )
         )
@@ -305,16 +315,28 @@ def _needs_model_fill(original: np.ndarray, job: _Job, occupied: np.ndarray) -> 
     every side band is constant along it (designed flat/solid ground, where the flat
     paint is right by construction and a model reconstruction is unstable)."""
     height, width = original.shape[:2]
-    quad_mask = np.zeros((height, width), dtype=np.uint8)
+    # Work in a local window: the ground ring reaches only _GROUND_RING_OUTER_PX past the
+    # quads, so a full-image mask + dilate per job is pure waste (on a large receipt with
+    # many jobs the two full-frame dilates dominate the whole render). Crop to the quads'
+    # bbox grown by the ring radius; every array below is that window, in local coords.
+    all_pts = np.concatenate([np.asarray(q, dtype=np.int32) for q in job.erase_quads])
+    margin = _GROUND_RING_OUTER_PX + 1
+    x0 = max(0, int(all_pts[:, 0].min()) - margin)
+    y0 = max(0, int(all_pts[:, 1].min()) - margin)
+    x1 = min(width, int(all_pts[:, 0].max()) + margin + 1)
+    y1 = min(height, int(all_pts[:, 1].max()) + margin + 1)
+    crop = original[y0:y1, x0:x1]
+    quad_mask = np.zeros(crop.shape[:2], dtype=np.uint8)
     for quad in job.erase_quads:
-        cv2.fillPoly(quad_mask, [np.asarray(quad, dtype=np.int32)], 255)
+        cv2.fillPoly(quad_mask, [np.asarray(quad, dtype=np.int32) - (x0, y0)], 255)
     inner = cv2.dilate(quad_mask, _ellipse(_GROUND_RING_INNER_PX))
     outer = cv2.dilate(quad_mask, _ellipse(_GROUND_RING_OUTER_PX))
-    ring_y, ring_x = np.nonzero((outer > 0) & (inner == 0) & (occupied == 0))
+    ring_y, ring_x = np.nonzero((outer > 0) & (inner == 0) & (occupied[y0:y1, x0:x1] == 0))
     if ring_y.size == 0:
         return False  # boxed in by other text: no ground to judge, keep the flat paint
     ys, xs = np.nonzero(quad_mask)
     y_lo, y_hi, x_lo, x_hi = ys.min(), ys.max(), xs.min(), xs.max()
+    textures: list[float] = []
     for in_band, coord, segments in (
         (ring_y < y_lo, ring_x, _GROUND_SEGMENTS_ALONG),
         (ring_y > y_hi, ring_x, _GROUND_SEGMENTS_ALONG),
@@ -332,13 +354,19 @@ def _needs_model_fill(original: np.ndarray, job: _Job, occupied: np.ndarray) -> 
             )
             if seg.sum() < _GROUND_MIN_SEGMENT_PX:
                 continue
-            medians.append(np.median(original[band_y[seg], band_x[seg]].astype(np.int16), axis=0))
+            pixels = crop[band_y[seg], band_x[seg]].astype(np.int16)
+            median = np.median(pixels, axis=0)
+            medians.append(median)
+            # Ground grain: how far the ring pixels sit from their OWN segment median (robust,
+            # so an edge pixel does not inflate it). A gradient shifts the medians; texture
+            # scatters pixels around a steady one — the case the side-spread test cannot see.
+            textures.append(float(np.median(np.abs(pixels - median).max(axis=1))))
         if len(medians) < 2:
             continue
         stack = np.array(medians)
         if np.abs(stack[:, None] - stack[None, :]).max() > _GROUND_MAX_SIDE_SPREAD:
             return True
-    return False
+    return bool(textures) and float(np.median(textures)) > _GROUND_MAX_TEXTURE_MAD
 
 
 def _ellipse(radius_px: int) -> np.ndarray:
@@ -710,9 +738,15 @@ def _plan_group(
     width_fit_mode: str = "footprint",
     band_ratio: float | None = None,
     angle_field: tuple[float, float] | None = None,
+    base_arr: np.ndarray | None = None,
     protected_boxes: list[dict[str, Any]] | None = None,
     sweep_ok: bool | None = None,
 ) -> list[_Job]:
+    # The read-only pixel view is materialised ONCE per render (in render_translated_image)
+    # and threaded in: np.asarray(base) copies the whole frame, and _plan_group runs per
+    # group — re-converting a large image dozens of times dominated the render.
+    if base_arr is None:
+        base_arr = np.asarray(base)
     # Decide BEFORE a table split whether this group may sweep stray ink: the split nulls the
     # field pairs on its cells, and the pairs' source texts are the hint-side evidence.
     if sweep_ok is None:
@@ -731,6 +765,7 @@ def _plan_group(
                     width_fit_mode=width_fit_mode,
                     band_ratio=band_ratio,
                     angle_field=angle_field,
+                    base_arr=base_arr,
                     protected_boxes=protected_boxes,
                     sweep_ok=sweep_ok,
                 )
@@ -861,7 +896,7 @@ def _plan_group(
     # glyphs sinks to the size its band says, everything else stays on the extent path
     # (one-sided: min(), never enlarges; weak ink evidence keeps the extent).
     if band_ratio is not None and angle == 0.0:
-        band_px = np.asarray(base)
+        band_px = base_arr
         for plane, (bg, _fg) in zip(planes, colors):
             bands = [b for q in plane["quads"] if (b := _quad_band_height(band_px, q, bg)) is not None]
             if bands:
@@ -875,9 +910,8 @@ def _plan_group(
     # for axis-aligned groups (the scan is axis-aligned — same honest limit as the ink
     # sweep) and never for centered ones (growing right would break the centring).
     if width_fit_mode == "extend" and angle == 0.0 and not centered:
-        base_px = np.asarray(base)
         for plane, (bg, _fg) in zip(planes, colors):
-            plane["width"] += _clean_right_extension(base_px, plane, bg, protected_boxes or [])
+            plane["width"] += _clean_right_extension(base_arr, plane, bg, protected_boxes or [])
 
     # The whole group renders at ONE size = the original's source size (true line height),
     # NOT a size chosen to fit the width. So a heading keeps heading size and body keeps
@@ -914,7 +948,7 @@ def _plan_group(
     # extension per line, and — gated separately on hint coverage — the stray-ink slot sweep
     # after the jobs are built. Tilted groups skip both: the axis-aligned measurement is
     # unreliable there (honest limit).
-    base_np = np.asarray(base) if angle == 0.0 else None
+    base_np = base_arr if angle == 0.0 else None
 
     jobs: list[_Job] = []
     for index, plane in enumerate(planes):
