@@ -47,6 +47,8 @@ from app.replacement.color import sample_oriented_colors
 from app.replacement.fit import break_pieces
 from app.replacement.inpaint import inpaint_mask
 from app.replacement.jobs import _Job
+from app.replacement.geometry import _ANGLE_DEADZONE_DEG
+from app.replacement.geometry import _plane_corners
 from app.replacement.pixels import _INK_DELTA
 from app.replacement.erase import _GROUND_RING_INNER_PX
 from app.replacement.erase import _ellipse
@@ -88,10 +90,6 @@ _MIN_RENDER_SIZE = 8
 # a real wrapped line. Kept, it forms a sliver plane that starves the whole unit's width fit.
 _STRAY_LINE_WIDTH_RATIO = 0.5
 
-# Below this group angle (degrees) the text is treated as horizontal and placed axis-aligned,
-# so OCR detection noise on a flat image isn't warped into a visible slant. A genuine page
-# tilt is well above it (a photographed menu card sits at ~6°), so real perspective is kept.
-_ANGLE_DEADZONE_DEG = 3.0
 
 # Minimum source-text similarity to bind a table-row field to a cell. Below it the row is
 # not split into cells (the renderer reflows it instead) — a wrong field/cell match would
@@ -1238,20 +1236,6 @@ def _member_erase_quad(quad: list, dx: float, dy: float) -> list[tuple[int, int]
         _ipoint(geo.to_image(xmax, ymin, x_axis, y_axis)),
         _ipoint(geo.to_image(xmax, ymax, x_axis, y_axis)),
         _ipoint(geo.to_image(xmin, ymax, x_axis, y_axis)),
-    ]
-
-
-def _plane_corners(plane: dict[str, Any]) -> list[tuple[float, float]]:
-    """The plane's oriented bounding box as four image-space corners [TL, TR, BR, BL].
-    Sampling background from this (deskewed) region instead of the axis-aligned bbox keeps
-    the border ring inside a tilted coloured band — on a slanted line the axis box's corners
-    reach into the surroundings (a sign's panel behind a diagonal bar) and muddy the sample."""
-    x_axis, y_axis, xmin, xmax, ymin, ymax = plane["frame"]
-    return [
-        geo.to_image(xmin, ymin, x_axis, y_axis),
-        geo.to_image(xmax, ymin, x_axis, y_axis),
-        geo.to_image(xmax, ymax, x_axis, y_axis),
-        geo.to_image(xmin, ymax, x_axis, y_axis),
     ]
 
 

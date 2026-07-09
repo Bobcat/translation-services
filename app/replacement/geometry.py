@@ -89,3 +89,22 @@ def _normalize(angle: float) -> float:
     while angle > 90.0:
         angle -= 180.0
     return angle
+
+
+# Below this group angle (degrees) the text is treated as horizontal and placed axis-aligned,
+# so OCR detection noise on a flat image isn't warped into a visible slant. A genuine page
+# tilt is well above it (a photographed menu card sits at ~6°), so real perspective is kept.
+_ANGLE_DEADZONE_DEG = 3.0
+
+def _plane_corners(plane: dict[str, Any]) -> list[tuple[float, float]]:
+    """The plane's oriented bounding box as four image-space corners [TL, TR, BR, BL].
+    Sampling background from this (deskewed) region instead of the axis-aligned bbox keeps
+    the border ring inside a tilted coloured band — on a slanted line the axis box's corners
+    reach into the surroundings (a sign's panel behind a diagonal bar) and muddy the sample."""
+    x_axis, y_axis, xmin, xmax, ymin, ymax = plane["frame"]
+    return [
+        to_image(xmin, ymin, x_axis, y_axis),
+        to_image(xmax, ymin, x_axis, y_axis),
+        to_image(xmax, ymax, x_axis, y_axis),
+        to_image(xmin, ymax, x_axis, y_axis),
+    ]
