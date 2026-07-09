@@ -17,7 +17,7 @@ import numpy as np
 from app.replacement.pixels import _INK_DELTA
 
 if TYPE_CHECKING:
-    from app.replacement.render import _Job
+    from app.replacement.jobs import _Job
 
 # Residue swallow: how far past the erase quads leftover ink of the erased text is searched.
 # Descenders and anti-alias fringes reach a few px; anything farther is not ours to erase.

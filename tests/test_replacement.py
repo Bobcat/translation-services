@@ -544,7 +544,7 @@ def test_inpaint_ground_router_keeps_flat_on_designed_ground_and_models_gradient
     from app.replacement.erase import _ellipse
     from app.replacement.erase import _GROUND_RING_INNER_PX
     from app.replacement.erase import _needs_model_fill
-    from app.replacement.render import _Job
+    from app.replacement.jobs import _Job
 
     quad = [(60, 60), (240, 60), (240, 90), (60, 90)]
     job = _Job(erase_quads=[quad], bg_color=(220, 60, 30), tile=None, dst_quad=None)

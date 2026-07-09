@@ -31,7 +31,6 @@ import difflib
 import math
 import re
 import unicodedata
-from dataclasses import dataclass
 from io import BytesIO
 from pathlib import Path
 from statistics import median
@@ -47,6 +46,7 @@ from app.replacement import geometry as geo
 from app.replacement.color import sample_oriented_colors
 from app.replacement.fit import break_pieces
 from app.replacement.inpaint import inpaint_mask
+from app.replacement.jobs import _Job
 from app.replacement.pixels import _INK_DELTA
 from app.replacement.erase import _GROUND_RING_INNER_PX
 from app.replacement.erase import _ellipse
@@ -161,19 +161,6 @@ _FIELD_MAX_RESIDUAL_MAD_DEG = 1.0
 # (~1 em, scales with the text) stays clear — on a clean page nothing else stops the
 # growth and text running to the very edge of the document reads as a layout error.
 _EXTEND_MAX_RATIO = 1.0
-
-
-@dataclass(frozen=True)
-class _Job:
-    # One tight quad per original member (word), each at its OWN tilt — not a single
-    # line-spanning rectangle. A photographed line fans (perspective steepens along it),
-    # so one straight rectangle pinned to the highest word floats above the lower ones;
-    # with a flat fill that overshoot paints background colour past the text's band.
-    erase_quads: list[list[tuple[int, int]]]
-    bg_color: tuple[int, int, int]
-    # None for an erase-only plane (the translation needed fewer lines than the original).
-    tile: Image.Image | None
-    dst_quad: list[tuple[float, float]] | None
 
 
 def render_translated_image(
