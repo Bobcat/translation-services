@@ -19,8 +19,8 @@ from app.replacement.fit import _dominant_script
 from app.replacement.fit import fit_text
 from app.replacement.fit import fold_lone_fullwidth_punctuation
 from app.replacement.fit import is_cjk_text
-from app.replacement.render import _baseline_angle
-from app.replacement.render import _group_size
+from app.replacement.text.angle import _baseline_angle
+from app.replacement.text.size import _group_size
 from app.replacement.render import _plan_group
 from app.replacement.render import _reproduced_in
 from app.replacement.render import _split_table_row
@@ -404,7 +404,9 @@ def test_centered_group_lines_snap_to_one_axis_when_the_spread_is_noise(tmp_path
                     {"cell_id": 2, "text": "tweede regel", "translate": True,
                      "bbox": {"left": 100 + offset_px, "top": 70, "width": 202, "height": 20}},
                 ]}
-        from app.replacement.render import _groups, _image_is_flat, _plan_group
+        from app.replacement.layout.groups import _groups
+        from app.replacement.render import _plan_group
+        from app.replacement.text.angle import _image_is_flat
         group = _groups([unit])[0]
         jobs = _plan_group(Image.open(path).convert("RGB"), group,
                            snap_horizontal=_image_is_flat([unit]), render_size_mode="median")
@@ -475,7 +477,7 @@ def _tilted_line_unit(uid, y, deg, w=400.0, h=30.0, cx=500.0):
 
 
 def test_document_angle_field_recovers_a_linear_gradient_and_gates_junk() -> None:
-    from app.replacement.render import _document_angle_field
+    from app.replacement.text.angle import _document_angle_field
 
     # A tilted sign: line angles follow angle(y) = 2 + 6 * y/1000 (the measured shape).
     gradient = [_tilted_line_unit(i, y, 2.0 + 6.0 * y / 1000.0)

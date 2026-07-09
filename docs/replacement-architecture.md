@@ -83,15 +83,18 @@ not to any one concern (otherwise a concern would import the planner and cycle):
 ## Execution order (each step: pure move + update test imports + tests/sweep green)
 
 - [x] 1. `jobs.py` (`_Job`) — unblocks every concern's type reference.
-- [ ] 2. Shared geometry: `_plane_corners`, `_ANGLE_DEADZONE_DEG` into `geometry.py`.
-- [ ] 3. `text/` — `angle.py`, `size.py`, `wrap.py`, and move the existing `fit.py` in.
-- [ ] 4. `ground/` — move the existing `color.py`, `erase.py`, `inpaint.py` in.
-- [ ] 5. `layout/` — `groups.py`, `tables.py`, `markers.py`, `sweep.py`, `compositing.py`,
-       then `planning.py` (`_plan_group`).
+- [x] 2. Shared geometry: `_plane_corners`, `_ANGLE_DEADZONE_DEG` into `geometry.py`.
+- [x] 3. `text/` — `angle.py`, `size.py`, `wrap.py` (+ `layout/groups.py`, pulled early because
+       the angle field depends on it). Moving the existing `fit.py` into `text/` is still to do.
+- [ ] 4. `ground/` — move the existing `color.py`, `erase.py`, `inpaint.py` in (+ `fit.py` → `text/`).
+- [ ] 5. `layout/` — `tables.py`, `markers.py`, `sweep.py`, `compositing.py`, then
+       `planning.py` (`_plan_group`).
 - [ ] 6. `render.py` shrinks to the composition root; its docstring becomes the flow map above.
 
-Until this list is fully checked the tree above is the TARGET; only `jobs.py` / `pixels.py` /
-`erase.py` are extracted so far, the rest still lives in `render.py`.
+Until this list is fully checked the tree above is the TARGET; extracted so far: `jobs.py`,
+`pixels.py`, `geometry.py` (shared), `erase.py`, `text/{angle,size,wrap}.py`, `layout/groups.py`.
+The rest (tables, markers, sweep, compositing, planning, and the file moves for color/inpaint/fit)
+still lives in `render.py` / at the package root.
 
 `_plan_group` itself (≈280 lines) moves whole in step 5; splitting its internals is a separate,
 non-mechanical task, not part of this restructure.

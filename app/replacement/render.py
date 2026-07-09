@@ -49,6 +49,18 @@ from app.replacement.inpaint import inpaint_mask
 from app.replacement.jobs import _Job
 from app.replacement.geometry import _ANGLE_DEADZONE_DEG
 from app.replacement.geometry import _plane_corners
+from app.replacement.layout.groups import _groups
+from app.replacement.text.angle import _baseline_angle
+from app.replacement.text.angle import _document_angle_field
+from app.replacement.text.angle import _image_is_flat
+from app.replacement.text.angle import _line_clusters
+from app.replacement.text.size import _document_band_ratio
+from app.replacement.text.size import _group_size
+from app.replacement.text.size import _quad_band_height
+from app.replacement.text.wrap import _CONDENSE_FLOOR
+from app.replacement.text.wrap import _condense_scale
+from app.replacement.text.wrap import _fit_group
+from app.replacement.text.wrap import _raw_condense
 from app.replacement.pixels import _INK_DELTA
 from app.replacement.erase import _GROUND_RING_INNER_PX
 from app.replacement.erase import _ellipse
@@ -69,20 +81,7 @@ _SIZE_RATIO = 0.9
 # roughly the same visual footprint a Latin line would. Hierarchy (relative sizes) is kept.
 _CJK_SIZE_RATIO = 0.72
 
-# Floor on horizontal condensation. The font is sized from the source HEIGHT (so the
-# header/body hierarchy is preserved); a translated line at that height is usually wider
-# than its original (most sans are wider than the sign's font), so the rendered text is
-# squeezed horizontally to fit the original line's width — keeping height, matching width,
-# the way the reference render does. Never squeeze past this floor: below it the glyphs
-# read as unnaturally narrow, so the pt size is reduced instead (see _WIDTH_SLACK).
-_CONDENSE_FLOOR = 0.75
 
-# A rendered line may exceed its original plane width by this factor before we spend pt.
-# Order of accommodation for a too-long translation: condense horizontally to the floor,
-# then allow up to this much overrun, and only if it STILL doesn't fit reduce the source
-# pt size (re-wrapping) — so the source size (and the header/body hierarchy) is preserved
-# unless the line genuinely cannot fit the box within the slack.
-_WIDTH_SLACK = 1.04
 # Floor on the pt-shrink search (matches the plane target floor in _plan_group).
 _MIN_RENDER_SIZE = 8
 # A line plane narrower than this fraction of the unit's other lines, AND carrying only words
@@ -114,20 +113,6 @@ _ERASE_MARGIN = 2.0
 # and nothing happens), and quad growth only sticks when it reaches a CLEAN row within its
 # cap (texture never does).
 _SWEEP_MAX_INK_FRACTION = 0.35
-# "band" size metric (size_metric_mode): the OCR polygon's full ink extent is the default
-# size source, but sparse tall glyphs — parentheses (as a marker OR mid-text), brackets, a
-# stray swash — stretch it far past the text band while the band itself stays put
-# (measured on a numbered list: polygon 69-76px, text band 36px, vs 47-50/35 on plain
-# siblings). No LOCAL gate separates that inflation from measurement noise reliably
-# (three measurement rounds: absolute band ratios, doc-normalised ratios and fringe
-# ratios all overlap with normal lines), so the correction is per-DOCUMENT and one-sided:
-# the document's median polygon/band ratio anchors what "normal" looks like on this very
-# image, and a line's height is clamped to band * that ratio — outliers sink to the
-# document norm, everything else is untouched. Weak ink evidence falls back to the extent.
-_BAND_STRONG_ROW_FRACTION = 0.15  # rows holding >= this fraction of the peak ink count
-_BAND_MIN_ROWS = 3
-_BAND_MIN_PEAK = 4
-_BAND_MIN_SAMPLES = 4  # document ratio needs at least this many measured quads
 
 # Centered lines of one element sit on ONE axis in print, but each rendered line anchors
 # on its own plane's centre, and those wobble a few px with OCR quad noise — the block
@@ -137,20 +122,6 @@ _BAND_MIN_SAMPLES = 4  # document ratio needs at least this many measured quads
 # the gate sits in the gap. (The ratio is against the plane target = 0.9x line height.)
 _CENTER_SNAP_MAX_RATIO = 0.12
 
-# Angle FIELD (tilted images): a photographed tilted sign is a perspective gradient —
-# every text line's angle follows one smooth, near-linear function of image y (measured
-# across the tilted testset: linear fits with <=0.5deg MAD over the whole document),
-# while each group's own baseline fit wobbles +-0.5-1deg around it and a one-word group
-# can sit several degrees off. Reading every group's angle from one document-level fit
-# renders the sign as a single printed surface. Evidence gates (all must hold, else the
-# per-group path): a single-cell line's edge angle only counts when its quad is clearly
-# wider than tall (a square-ish quad's edge direction is meaningless — the measured
-# outliers were all near-square logos/prices); enough samples over enough y-range to
-# define a slope; residuals no wider than a real gradient's.
-_FIELD_MIN_SAMPLES = 5
-_FIELD_MIN_EDGE_ASPECT = 2.0  # single-cell sample: quad width >= this x line height
-_FIELD_MIN_SPAN_RATIO = 10.0  # sample y-span >= this x the median sampled line height
-_FIELD_MAX_RESIDUAL_MAD_DEG = 1.0
 
 # "extend" width fit: a line may widen into clean background to its right by at most its
 # own original width (so a short item on an empty page cannot balloon into a banner). The
@@ -254,46 +225,6 @@ def render_translated_image(
         save_kwargs["icc_profile"] = icc_profile
     Image.fromarray(canvas).save(out, format="PNG", **save_kwargs)
     return out.getvalue()
-
-
-def _groups(units: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
-    """Consecutive units of one VLM block at one level reflow together — a wrapped
-    dish, a body paragraph. The level guard keeps a heading from merging into its
-    body text. Leftovers (no block — an OCR noise cell interleaved in reading order)
-    stay alone but do NOT break the surrounding block's run, or one stray cell would
-    split a dish back into per-line fitting."""
-    groups: list[list[dict[str, Any]]] = []
-    current: list[dict[str, Any]] | None = None
-    previous: tuple[Any, Any] | None = None
-    for unit in units:
-        key = (unit.get("block_id"), unit.get("level"))
-        if key[0] is None:
-            groups.append([unit])
-            continue
-        if current is not None and key == previous:
-            current.append(unit)
-        else:
-            current = [unit]
-            groups.append(current)
-        previous = key
-    return groups
-
-
-def _image_is_flat(units: list[dict[str, Any]]) -> bool:
-    """True when the image as a whole reads as fronto-parallel — its lines are near-horizontal
-    with no real page tilt, so per-line angles are OCR detection noise to be snapped away. A
-    photographed sign at an angle has a perspective gradient with a sizeable median angle and is
-    NOT flat, so its (real) angles are kept. Median over all member quads is robust to the odd
-    rotated stray (a lone tall glyph) that a mean would be skewed by."""
-    angles: list[float] = []
-    for unit in units:
-        for member in unit.get("members") or []:
-            if not member.get("bbox"):
-                continue
-            quad = geo.quad_of(member)
-            if quad is not None:
-                angles.append(abs(geo.angle_deg(quad)))
-    return bool(angles) and median(angles) < _ANGLE_DEADZONE_DEG
 
 
 def _split_table_row(unit: dict[str, Any]) -> list[dict[str, Any]] | None:
@@ -833,116 +764,6 @@ def _plan_group(
     return jobs
 
 
-def _quad_band_height(base_px: np.ndarray, quad, bg: tuple[int, int, int]) -> float | None:
-    """Height of the quad's STRONG ink band: the row span where the ink column count
-    reaches at least _BAND_STRONG_ROW_FRACTION of the peak row. Sparse fringe rows (a
-    parenthesis tip, an anti-alias fade) fall below it; the band tracks the glyph core.
-    None when the ink evidence is too weak to trust."""
-    xs = [p[0] for p in quad]
-    ys = [p[1] for p in quad]
-    x0, x1 = max(0, int(min(xs))), min(base_px.shape[1], int(max(xs)) + 1)
-    y0, y1 = max(0, int(min(ys))), min(base_px.shape[0], int(max(ys)) + 1)
-    if x1 - x0 < 4 or y1 - y0 < 4:
-        return None
-    window = base_px[y0:y1, x0:x1].astype(np.int16)
-    counts = (np.abs(window - np.asarray(bg, dtype=np.int16)).max(axis=2) >= _INK_DELTA).sum(axis=1)
-    if counts.max() < _BAND_MIN_PEAK:
-        return None
-    strong = np.nonzero(counts >= max(2, _BAND_STRONG_ROW_FRACTION * counts.max()))[0]
-    if len(strong) < _BAND_MIN_ROWS:
-        return None
-    return float(strong.max() - strong.min() + 1)
-
-
-def _document_band_ratio(base: Image.Image, units: list[dict[str, Any]]) -> float | None:
-    """Median polygon-height / band-height over the document's member quads — what the
-    extent-to-band relation looks like on this image's NORMAL lines (OCR box generosity
-    varies per archetype, so the anchor must come from the image itself). None without
-    enough evidence, or on tilted images where the axis-aligned scan is unreliable."""
-    if not _image_is_flat(units):
-        return None
-    base_px = np.asarray(base)
-    ratios: list[float] = []
-    for unit in units:
-        for member in (unit.get("members") or []):
-            if not member.get("bbox"):
-                continue
-            quad = geo.quad_of(member)
-            if quad is None or abs(geo.angle_deg(quad)) >= _ANGLE_DEADZONE_DEG:
-                continue
-            height = geo.line_height(quad)
-            xs = [p[0] for p in quad]
-            ys = [p[1] for p in quad]
-            frame = ((1.0, 0.0), (0.0, 1.0), min(xs), max(xs), min(ys), max(ys))
-            bg, _fg = sample_oriented_colors(base, _plane_corners({"frame": frame, "pad": max(2.0, height / 6.0)}))
-            band = _quad_band_height(base_px, quad, bg)
-            if band:
-                ratios.append(height / band)
-    if len(ratios) < _BAND_MIN_SAMPLES:
-        return None
-    return float(median(ratios))
-
-
-def _document_angle_field(units: list[dict[str, Any]]) -> tuple[float, float] | None:
-    """The document's text angle as a function of y — ``(slope_deg_per_px, intercept_deg)``
-    — or None when the image is flat or the evidence fails the gates (see the _FIELD_*
-    constants). Samples: each multi-word line contributes its baseline-fit angle; a
-    single-cell line contributes its quad edge angle only when clearly wider than tall.
-    The fit is Theil-Sen (median of pairwise slopes), so a stray sample cannot tip it."""
-    if _image_is_flat(units):
-        return None
-    samples: list[tuple[float, float]] = []  # (line centre y, angle deg)
-    heights: list[float] = []
-    for group in _groups(units):
-        quads = [
-            quad
-            for unit in group
-            for member in (unit.get("members") or [])
-            if member.get("bbox") and (quad := geo.quad_of(member)) is not None
-        ]
-        if not quads:
-            continue
-        seed = median(geo.angle_deg(quad) for quad in quads)
-        for cluster in _line_clusters(quads, seed):
-            centres = [(sum(p[0] for p in q) / 4.0, sum(p[1] for p in q) / 4.0) for q in cluster]
-            y_centre = sum(c[1] for c in centres) / len(centres)
-            xs = [c[0] for c in centres]
-            if len(centres) >= 2 and (max(xs) - min(xs)) >= 1.0:
-                samples.append((y_centre, _baseline_angle([cluster], seed)))
-                heights.append(median(geo.line_height(q) for q in cluster))
-            elif len(cluster) == 1:
-                quad = cluster[0]
-                width = 0.5 * (
-                    math.hypot(quad[1][0] - quad[0][0], quad[1][1] - quad[0][1])
-                    + math.hypot(quad[2][0] - quad[3][0], quad[2][1] - quad[3][1])
-                )
-                height = geo.line_height(quad)
-                if width >= _FIELD_MIN_EDGE_ASPECT * height:
-                    samples.append((y_centre, geo.angle_deg(quad)))
-                    heights.append(height)
-    if len(samples) < _FIELD_MIN_SAMPLES:
-        return None
-    ys = [y for y, _ in samples]
-    y_span = max(ys) - min(ys)
-    if y_span < _FIELD_MIN_SPAN_RATIO * median(heights):
-        return None
-    # Pairs closer in y than 5% of the span carry no slope information, only noise.
-    min_dy = 0.05 * y_span
-    slopes = [
-        (a2 - a1) / (y2 - y1)
-        for i, (y1, a1) in enumerate(samples)
-        for y2, a2 in samples[i + 1 :]
-        if abs(y2 - y1) >= min_dy
-    ]
-    if not slopes:
-        return None
-    slope = median(slopes)
-    intercept = median(a - slope * y for y, a in samples)
-    if median(abs(a - (slope * y + intercept)) for y, a in samples) > _FIELD_MAX_RESIDUAL_MAD_DEG:
-        return None
-    return float(slope), float(intercept)
-
-
 def _clean_right_extension(
     base_px: np.ndarray,
     plane: dict[str, Any],
@@ -1159,70 +980,6 @@ def _ink_runs(mask) -> list[tuple[int, int]]:
         runs.append((start, len(mask) - 1))
     return runs
 
-def _group_size(planes: list[dict[str, Any]], mode: str) -> int:
-    """The group's ONE render size, chosen from its per-line targets. ``min`` (the default)
-    never draws taller than the smallest measured line — but one under-measured line (ink
-    without ascenders reads ~70% of cap height) drags the whole block down. ``median`` is the
-    better estimator of the element's single true size, at the cost that a genuinely smaller
-    line the VLM mixed into the element renders over its own band. Selectable per request
-    (``render_size_mode``) to compare; an unknown value falls back to ``min``. A future smarter
-    selection policy slots in here as another mode."""
-    targets = [plane["target"] for plane in planes]
-    if mode == "median":
-        return int(median(targets))
-    return min(targets)
-
-
-def _baseline_angle(clusters: list[list], fallback: float) -> float:
-    """The block's text-line direction, fit through the word CENTRES rather than read off the
-    OCR quad edges (which jitter several degrees per word and bias the median shallow). Each line's
-    words are de-meaned vertically so the parallel lines of a block all contribute to ONE shared
-    slope — keeping the lines parallel while using every word for a robust fit. Falls back to
-    ``fallback`` when too few words span an x-range to define a slope (a one-word line, or a
-    vertical stack of single words at the same x)."""
-    xs: list[float] = []
-    ys: list[float] = []
-    for cluster in clusters:
-        centres = [(sum(p[0] for p in q) / 4.0, sum(p[1] for p in q) / 4.0) for q in cluster]
-        if len(centres) < 2:
-            continue
-        # De-mean BOTH axes per cluster: with only y de-meaned, clusters of different x-extents
-        # (a long line above a short last line) share one forced intercept, which drags the
-        # fitted slope toward 0 — the very shallow bias this fit exists to remove. Centred per
-        # cluster, parallel lines fit their true slope exactly.
-        mean_x = sum(c[0] for c in centres) / len(centres)
-        mean_y = sum(c[1] for c in centres) / len(centres)
-        for cx, cy in centres:
-            xs.append(cx - mean_x)
-            ys.append(cy - mean_y)
-    if len(xs) < 2 or (max(xs) - min(xs)) < 1.0:
-        return fallback
-    slope = float(np.polyfit(xs, ys, 1)[0])
-    return math.degrees(math.atan(slope))
-
-
-def _line_clusters(quads: list, angle: float) -> list[list]:
-    """Cluster member quads into physical text lines (top to bottom in the oriented
-    frame): a quad whose vertical centre falls inside the running cluster's extent is
-    on the same line; line pitch puts the next line's centre below it."""
-    measured = []
-    for quad in quads:
-        _, _, _, _, oymin, oymax = geo.oriented_frame([quad], angle)
-        measured.append((oymin, oymax, quad))
-    measured.sort(key=lambda item: (item[0] + item[1]) / 2)
-    clusters: list[list] = []
-    extent_max = float("-inf")
-    for oymin, oymax, quad in measured:
-        center = (oymin + oymax) / 2
-        if clusters and center <= extent_max:
-            clusters[-1].append(quad)
-            extent_max = max(extent_max, oymax)
-        else:
-            clusters.append([quad])
-            extent_max = oymax
-    return clusters
-
-
 def _member_erase_quad(quad: list, dx: float, dy: float) -> list[tuple[int, int]]:
     """A member's tight erase quad: its oriented bounding box in the member's OWN frame, grown
     ``dx`` horizontally (to swallow the glyph anti-alias halo) and only ``dy`` vertically (an AA
@@ -1266,129 +1023,6 @@ def _drop_redundant_stray_planes(planes: list[dict[str, Any]]) -> list[dict[str,
     redundant = bool(top["tokens"]) and top["tokens"] <= below_tokens
     narrow = top["width"] < _STRAY_LINE_WIDTH_RATIO * median(plane["width"] for plane in below)
     return below if (redundant and narrow) else planes
-
-
-def _fit_group(
-    text: str,
-    *,
-    size: int,
-    plane_widths: list[float],
-    family: str | None = None,
-    weight: int | None = None,
-) -> tuple[Any, list[str]]:
-    """Render at the source ``size`` (true line height) in the unit's VLM font ``family`` /
-    ``weight``, wrapped so each line fits the width of the plane it lands on (``plane_widths``).
-    The font is NOT reduced to fit width — the source size, and thus the header/body hierarchy,
-    is preserved; width is matched by horizontal condensation in the caller."""
-    font = load_font(max(6, min(int(size), 160)), text, family=family, weight=weight)
-    return font, _wrap_to_planes(font, text, plane_widths)
-
-
-def _raw_condense(font: Any, lines: list[str], planes: list[dict[str, Any]]) -> float:
-    """Unclamped horizontal scale needed to bring every line within its plane width + slack.
-
-    Per line: ``plane width * _WIDTH_SLACK / natural rendered width``; the group takes the
-    tightest (smallest) line factor. ``>= 1.0`` means the lines already fit within the slack;
-    below ``_CONDENSE_FLOOR`` means even maximum condensation leaves a line more than the slack
-    too wide (the caller then reduces the pt size)."""
-    factors: list[float] = []
-    for index, line in enumerate(lines):
-        if index >= len(planes) or not line:
-            continue
-        natural = font.getlength(line)
-        if natural > 0:
-            factors.append(planes[index]["width"] * _WIDTH_SLACK / natural)
-    return min(factors) if factors else 1.0
-
-
-def _condense_scale(font: Any, lines: list[str], planes: list[dict[str, Any]]) -> float:
-    """Horizontal scale that squeezes the group's lines into their original widths (plus the
-    width slack), clamped to [``_CONDENSE_FLOOR``, 1.0] — never stretch a short line, never
-    squeeze past the floor (the pt size is reduced upstream instead)."""
-    return max(_CONDENSE_FLOOR, min(1.0, _raw_condense(font, lines, planes)))
-
-
-def _wrap_to_planes(font: Any, text: str, plane_widths: list[float]) -> list[str]:
-    """Wrap so each rendered line fits the width of the PLANE it lands on, in order, and the words
-    are BALANCED across those lines — not greedily dumped.
-
-    Two failures this avoids:
-    - Wrapping every line to the widest plane overflows a narrow top plane (a short heading line
-      above a wide one), and the caller's width-fit then shrinks the whole block toward one tiny
-      line. So each line is bounded by its OWN plane width.
-    - A plain greedy fill breaks an early line at its natural plane width, leaving it half-empty
-      while the remainder (often a long token like a URL) piles onto the last line. So instead the
-      block's natural line COUNT is taken first (greedy at the plane widths, capped at the plane
-      count), then the words are spread over exactly that many lines by the smallest uniform scale
-      on the plane widths that still fits — a minimax fill that keeps every line about equally full.
-
-    A compact translation that needs fewer lines than there are planes uses fewer (the rest stay
-    erase-only). On equal-width planes a balanced fill matches the original column layout."""
-    content = str(text or "").strip()
-    if len(plane_widths) <= 1 or not content:
-        return [content]
-    # Atomic wrap units, not ``.split()``: Han/Kana/CJK-symbol scripts have no spaces, so a whole
-    # CJK line is one "word" and never wraps — it stays on one line and the caller condenses it to a
-    # sliver. ``break_pieces`` breaks CJK per character (with kinsoku) and keeps Latin/Hangul/digits
-    # as whitespace words, so each piece carries the ``glue`` to re-insert when it is not a line start.
-    pieces = break_pieces(content)
-    line_count = len(_greedy_wrap(font, pieces, plane_widths))  # fewest lines at natural plane width
-    caps = plane_widths[:line_count]
-    # Smallest scale on the plane widths that still packs the pieces into ``line_count`` lines: this
-    # is the most-relaxed (least condensed) balanced fill. Binary search — monotone in the scale.
-    lo, hi = 0.0, 10.0
-    for _ in range(40):
-        mid = (lo + hi) / 2.0
-        if _fits_in_lines(font, pieces, caps, mid):
-            hi = mid
-        else:
-            lo = mid
-    return _greedy_wrap(font, pieces, [cap * hi for cap in caps])
-
-
-def _greedy_wrap(font: Any, pieces: list[tuple[str, str]], line_caps: list[float]) -> list[str]:
-    """Greedy fill: line ``i`` takes pieces while they fit ``line_caps[i]``; the LAST cap carries
-    every remaining piece (so the result never exceeds ``len(line_caps)`` lines). A piece that alone
-    exceeds its cap still starts the line (never an empty line) — the caller condenses/shrinks it.
-    Each piece carries the ``glue`` (a space for Latin words, empty for CJK chars) re-inserted only
-    when it is not at a line start."""
-    lines: list[str] = []
-    current = ""
-    index = 0
-    last = len(line_caps) - 1
-    for piece, glue in pieces:
-        sep = glue if current else ""
-        if index >= last:
-            current = current + sep + piece
-            continue
-        trial = current + sep + piece
-        if current and font.getlength(trial) > line_caps[index]:
-            lines.append(current)
-            current = piece
-            index += 1
-        else:
-            current = trial
-    lines.append(current)
-    return lines
-
-
-def _fits_in_lines(font: Any, pieces: list[tuple[str, str]], caps: list[float], scale: float) -> bool:
-    """Whether ``pieces`` pack into ``len(caps)`` lines with each line within ``caps[i] * scale``
-    (a piece wider than its cap alone still starts a line). Used to find the smallest balancing
-    scale by binary search."""
-    index = 0
-    current = ""
-    for piece, glue in pieces:
-        sep = glue if current else ""
-        trial = current + sep + piece
-        if current and font.getlength(trial) > caps[index] * scale:
-            index += 1
-            if index >= len(caps):
-                return False
-            current = piece
-        else:
-            current = trial
-    return True
 
 
 def _composite(canvas: np.ndarray, job: _Job) -> None:
