@@ -324,7 +324,7 @@ def test_bullet_geometry_accepts_a_wide_flat_dash_but_not_line_tall_edge_ink() -
 
 
 def test_clean_right_extension_stops_at_ink_protected_cells_and_the_cap() -> None:
-    from app.replacement.render import _clean_right_extension
+    from app.replacement.layout.planning import _clean_right_extension
 
     base = np.full((60, 400, 3), 250, dtype=np.uint8)
     plane = {"frame": (None, None, 20.0, 100.0, 20.0, 40.0), "pad": 4.0}
