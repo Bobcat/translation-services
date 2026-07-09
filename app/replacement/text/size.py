@@ -10,7 +10,7 @@ from app.replacement.geometry import _ANGLE_DEADZONE_DEG
 from app.replacement.geometry import _plane_corners
 from app.replacement.pixels import _INK_DELTA
 from app.replacement.text.angle import _image_is_flat
-from app.replacement.color import sample_oriented_colors
+from app.replacement.ground.color import sample_oriented_colors
 
 
 # "band" size metric (size_metric_mode): the OCR polygon's full ink extent is the default

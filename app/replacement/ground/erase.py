@@ -2,7 +2,7 @@
 
 The flat fill paints each erase quad with its sampled background colour; on textured or
 shaded ground that scars, so ``erase_fill_mode="inpaint"`` routes those jobs to the LaMa
-fill (:mod:`app.replacement.inpaint`) instead. ``_needs_model_fill`` is the per-job router
+fill (:mod:`app.replacement.ground.inpaint`) instead. ``_needs_model_fill`` is the per-job router
 that decides flat-vs-model (see the ``_GROUND_*`` constants); ``_erase_mask`` builds the
 model's mask; ``_residue_regions`` / ``_swallow_erase_residue`` recover leftover ink of the
 erased text that the tight quads cut through.

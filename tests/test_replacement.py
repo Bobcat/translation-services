@@ -10,15 +10,15 @@ from PIL import ImageDraw
 
 import math
 
-from app.replacement.color import sample_region_colors
-from app.replacement.inpaint import border_pads
-from app.replacement.inpaint import budget_scale
-from app.replacement.inpaint import context_window
-from app.replacement.inpaint import work_scale
-from app.replacement.fit import _dominant_script
-from app.replacement.fit import fit_text
-from app.replacement.fit import fold_lone_fullwidth_punctuation
-from app.replacement.fit import is_cjk_text
+from app.replacement.ground.color import sample_region_colors
+from app.replacement.ground.inpaint import border_pads
+from app.replacement.ground.inpaint import budget_scale
+from app.replacement.ground.inpaint import context_window
+from app.replacement.ground.inpaint import work_scale
+from app.replacement.text.fit import _dominant_script
+from app.replacement.text.fit import fit_text
+from app.replacement.text.fit import fold_lone_fullwidth_punctuation
+from app.replacement.text.fit import is_cjk_text
 from app.replacement.text.angle import _baseline_angle
 from app.replacement.text.size import _group_size
 from app.replacement.render import _plan_group
@@ -543,9 +543,9 @@ def test_inpaint_ground_router_keeps_flat_on_designed_ground_and_models_gradient
     # constant along the line, so the flat paint is right and the model must stay out.
     # Textured ground: shading drifting along the line scars under a flat rectangle and
     # must go to the model.
-    from app.replacement.erase import _ellipse
-    from app.replacement.erase import _GROUND_RING_INNER_PX
-    from app.replacement.erase import _needs_model_fill
+    from app.replacement.ground.erase import _ellipse
+    from app.replacement.ground.erase import _GROUND_RING_INNER_PX
+    from app.replacement.ground.erase import _needs_model_fill
     from app.replacement.jobs import _Job
 
     quad = [(60, 60), (240, 60), (240, 90), (60, 90)]

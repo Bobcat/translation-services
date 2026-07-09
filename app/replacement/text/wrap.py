@@ -2,8 +2,8 @@
 from __future__ import annotations
 
 from typing import Any
-from app.replacement.fit import load_font
-from app.replacement.fit import break_pieces
+from app.replacement.text.fit import load_font
+from app.replacement.text.fit import break_pieces
 
 
 # Floor on horizontal condensation. The font is sized from the source HEIGHT (so the

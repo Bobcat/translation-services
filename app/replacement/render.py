@@ -22,7 +22,7 @@ Two facts make this work without a model:
 
 `translate: false` members and ignored cells are never touched. Textured/photographic
 backgrounds scar under the flat fill (it can't blend); ``erase_fill_mode="inpaint"``
-switches pass 1 to the LaMa reconstruction (Tier 2, :mod:`app.replacement.inpaint`).
+switches pass 1 to the LaMa reconstruction (Tier 2, :mod:`app.replacement.ground.inpaint`).
 See docs/re-placement.md.
 """
 from __future__ import annotations
@@ -43,9 +43,9 @@ from PIL import ImageDraw
 
 from app.grouping.heuristics import _is_nontranslatable
 from app.replacement import geometry as geo
-from app.replacement.color import sample_oriented_colors
-from app.replacement.fit import break_pieces
-from app.replacement.inpaint import inpaint_mask
+from app.replacement.ground.color import sample_oriented_colors
+from app.replacement.text.fit import break_pieces
+from app.replacement.ground.inpaint import inpaint_mask
 from app.replacement.jobs import _Job
 from app.replacement.geometry import _ANGLE_DEADZONE_DEG
 from app.replacement.geometry import _plane_corners
@@ -62,14 +62,14 @@ from app.replacement.text.wrap import _condense_scale
 from app.replacement.text.wrap import _fit_group
 from app.replacement.text.wrap import _raw_condense
 from app.replacement.pixels import _INK_DELTA
-from app.replacement.erase import _GROUND_RING_INNER_PX
-from app.replacement.erase import _ellipse
-from app.replacement.erase import _erase_mask
-from app.replacement.erase import _needs_model_fill
-from app.replacement.erase import _swallow_erase_residue
-from app.replacement.fit import fold_lone_fullwidth_punctuation
-from app.replacement.fit import is_cjk_text
-from app.replacement.fit import load_font
+from app.replacement.ground.erase import _GROUND_RING_INNER_PX
+from app.replacement.ground.erase import _ellipse
+from app.replacement.ground.erase import _erase_mask
+from app.replacement.ground.erase import _needs_model_fill
+from app.replacement.ground.erase import _swallow_erase_residue
+from app.replacement.text.fit import fold_lone_fullwidth_punctuation
+from app.replacement.text.fit import is_cjk_text
+from app.replacement.text.fit import load_font
 
 
 # Font size from the true (de-skewed) line height. The polygon height spans the full
