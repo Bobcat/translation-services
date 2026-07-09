@@ -1,0 +1,203 @@
+"""Split a receipt/table row into per-column cells, matching members to '|' fields."""
+from __future__ import annotations
+
+from typing import Any
+import re
+import difflib
+import unicodedata
+from app.grouping.heuristics import _is_nontranslatable
+
+
+# Minimum source-text similarity to bind a table-row field to a cell. Below it the row is
+# not split into cells (the renderer reflows it instead) — a wrong field/cell match would
+# place text in the wrong column, worse than a reflow.
+_FIELD_MATCH_MIN = 0.5
+
+def _split_table_row(unit: dict[str, Any]) -> list[dict[str, Any]] | None:
+    """A table row (the VLM hint carried '|' fields) becomes one pseudo-unit per rendered
+    COLUMN, so the renderer places each at its own x instead of reflowing the joined line over
+    the row's union — which would collapse the column gaps and shift the spend text left, right
+    behind the company name. This also matters when only one field remains after unchanged fields
+    were filtered: render that field in its own cell and leave the preserved neighbour untouched.
+
+    Members are grouped by the field whose SOURCE text they best match (not by order — the VLM
+    does not always list fields left-to-right). A field may own SEVERAL members: a column OCR
+    split into wrapped lines (a long spend description) then renders its one translation reflowed
+    over those lines. Conversely several fields may share one column: a 'PRIJS | BEDRAG' hint that
+    OCR read as a single box renders both translations in field order. A translatable member that
+    matches NO field stays out of every cell — its original pixels are left standing (its field
+    was preserve-dropped from the pairs, e.g. an unchanged company name). Returns None when the
+    unit is not such a row, or no requested field can be placed."""
+    pairs = unit.get("field_translations")
+    if not pairs:
+        return None
+    # Bind each member (OCR cell) to the field whose SOURCE text it best matches and group members
+    # by field — a field may own several members when OCR split a column into wrapped lines. Keep a
+    # translatable member always (one we cannot place makes the split unreliable -> reflow). A
+    # NON-translatable member joins when it is explicitly present as a field pair (mode "translate
+    # everything", e.g. a quantity/price column), or when the field's translation reproduces it (a
+    # pure-number line like '2025' the translation re-emits). Other non-translatable members (an
+    # icon, a self-standing price not requested for render) are left untouched.
+    columns: dict[int, list[dict[str, Any]]] = {}
+    for member in unit.get("members") or []:
+        if not member.get("bbox"):
+            continue
+        best_field, best_score = None, 0.0
+        best_rank: tuple[float, int, int] = (0.0, 0, -10**9)
+        member_text = str(member.get("text") or "")
+        for index, (source, _translated) in enumerate(pairs):
+            rank = _field_match_rank(source, member_text)
+            if rank > best_rank:
+                best_field, best_score, best_rank = index, rank[0], rank
+        placed = best_field is not None and best_score >= _FIELD_MATCH_MIN
+        if member.get("translate"):
+            if not placed:
+                continue
+        elif not (
+            placed
+            and (
+                _is_nontranslatable(str(pairs[best_field][0]))
+                or _reproduced_in(member, pairs[best_field][1])
+            )
+        ):
+            continue
+        columns.setdefault(best_field, []).append(member)
+    if not columns:
+        return None
+    # A field with no member of its own shares a column (a 'PRIJS | BEDRAG' hint OCR read as one
+    # box): attach its translation to the column whose members it best matches, kept in field
+    # order so the cell renders the fields as written.
+    column_texts: dict[int, list[tuple[int, str]]] = {field: [(field, pairs[field][1])] for field in columns}
+    for index, (source, translated) in enumerate(pairs):
+        if index in columns:
+            continue
+        best_field, best_score = None, 0.0
+        for field, cell_members in columns.items():
+            score = max(_field_overlap(source, str(m.get("text") or "")) for m in cell_members)
+            if score > best_score:
+                best_field, best_score = field, score
+        if best_field is None or best_score < _FIELD_MATCH_MIN:
+            return None
+        column_texts[best_field].append((index, translated))
+    cells: list[dict[str, Any]] = []
+    for field, cell_members in columns.items():
+        cell = dict(unit)
+        cell["translated_text"] = " ".join(text for _, text in sorted(column_texts[field]))
+        cell["members"] = cell_members
+        cell["field_translations"] = None  # already split — don't re-enter
+        cells.append(cell)
+    return _merge_close_table_cells(cells)
+
+def _merge_close_table_cells(cells: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Merge adjacent table fields that are really one visual column.
+
+    Weather forecast rows often split a date and weekday as ``13 jun | Za`` even though the
+    columns touch. Rendering them separately makes the translated date overrun into the weekday
+    ("Jun 13Sat"). Distant fields such as menu prices stay separate.
+    """
+    ordered = sorted(cells, key=lambda cell: (_cell_axis_box(cell)[0], _cell_axis_box(cell)[1]))
+    merged: list[dict[str, Any]] = []
+    for cell in ordered:
+        if not merged or not _should_merge_table_cells(merged[-1], cell):
+            merged.append(cell)
+            continue
+        previous = dict(merged[-1])
+        previous["translated_text"] = " ".join(
+            part for part in (previous.get("translated_text"), cell.get("translated_text")) if part
+        )
+        previous["members"] = list(previous.get("members") or []) + list(cell.get("members") or [])
+        merged[-1] = previous
+    return merged
+
+def _should_merge_table_cells(left_cell: dict[str, Any], right_cell: dict[str, Any]) -> bool:
+    left = _cell_axis_box(left_cell)
+    right = _cell_axis_box(right_cell)
+    height = max(left[3] - left[1], right[3] - right[1], 1.0)
+    y_overlap = min(left[3], right[3]) - max(left[1], right[1])
+    if y_overlap < 0.5 * height:
+        return False
+    gap = right[0] - left[2]
+    return gap <= 0.75 * height
+
+def _cell_axis_box(cell: dict[str, Any]) -> tuple[float, float, float, float]:
+    boxes = [(member.get("bbox") or {}) for member in (cell.get("members") or []) if member.get("bbox")]
+    if not boxes:
+        return 0.0, 0.0, 0.0, 0.0
+    left = min(float(box.get("left") or 0.0) for box in boxes)
+    top = min(float(box.get("top") or 0.0) for box in boxes)
+    right = max(float(box.get("left") or 0.0) + float(box.get("width") or 0.0) for box in boxes)
+    bottom = max(float(box.get("top") or 0.0) + float(box.get("height") or 0.0) for box in boxes)
+    return left, top, right, bottom
+
+def _field_key(text: str) -> str:
+    """Comparable letters+digits of a field text, script-agnostic: lowercased, diacritics folded
+    (café == cafe), every non-word character dropped. An ASCII-only key ([a-z0-9]) would be EMPTY
+    for Cyrillic/Greek/CJK source text — every rank ties at zero, no member ever places, and the
+    column split silently never fires for non-Latin rows."""
+    folded = unicodedata.normalize("NFKD", str(text or "").lower())
+    folded = "".join(ch for ch in folded if not unicodedata.combining(ch))
+    return re.sub(r"[\W_]", "", folded)
+
+def _field_overlap(a: str, b: str) -> float:
+    """Overlap of a row member against a field source: matched run length over the SHORTER of the
+    two (letters+digits only, tolerant to OCR garble like AHNEDAARBEI vs AHNEDAARDBEI). 1.0 when one
+    contains the other, so a column OCR split into wrapped fragments ('advertising &') still binds
+    to its full field source — which a symmetric ratio scores too low to clear _FIELD_MATCH_MIN.
+
+    Only CONTIGUOUS runs of 3+ characters count (capped at the shorter key's length, so a 1-2 char
+    member can still match by containment). A short member against a LONG field otherwise reaches
+    the placement threshold on scattered 1-2 char noise — "Amazon" collects 4 stray characters in
+    "$23,5 miljard aan advertising ... 2025" (4/6 = 0.67) and a company-name cell whose own field
+    was preserve-dropped from the pairs then lands in the SPEND cell: the row erase swallows the
+    company name and the spend text renders at the company's column. Genuine fragments match in
+    one full-length run, garble in a few long runs; both are untouched by the filter."""
+    na = _field_key(a)
+    nb = _field_key(b)
+    if not na or not nb:
+        return 0.0
+    min_block = min(3, len(na), len(nb))
+    matched = sum(
+        block.size
+        for block in difflib.SequenceMatcher(None, na, nb).get_matching_blocks()
+        if block.size >= min_block
+    )
+    return matched / min(len(na), len(nb))
+
+def _field_match_rank(source: str, member_text: str) -> tuple[float, int, int]:
+    source_key = _field_key(source)
+    member_key = _field_key(member_text)
+    if not source_key or not member_key:
+        return 0.0, 0, -10**9
+    score = _field_overlap(source, member_text)
+    exact = int(source_key == member_key)
+    length_closeness = -abs(len(source_key) - len(member_key))
+    return score, exact, length_closeness
+
+def _reproduced_in(member: dict[str, Any], translated: str) -> bool:
+    """Whether a NON-translatable member's text is re-emitted by the unit's translation, which
+    contains more than just that member. OCR sometimes splits an inline non-translatable token
+    (a "1, 2, 3, 4?", a code, a URL) into its own member; the structured translation still
+    translates the whole hint line, so it reproduces that token inline. Keeping the original on top
+    then doubles it AND drops it from the erase/plane set (the original peeks through). We erase
+    such a member like a translatable one — but only when the translation carries OTHER tokens too,
+    so a standalone token translating to itself (a lone price) is left untouched.
+
+    OCR also merges a short neighbouring word into the box (``op www.ikstopnu.nl`` — the "op" of
+    "Kijk op" pulled into the URL cell), and the translation rephrases that word ("Visit") rather
+    than echoing it. A token of 1-2 chars may therefore be missing; the DISTINCTIVE (>2-char)
+    tokens carry the identity, so reproduction is judged on those — every long token must be
+    reproduced, and the match must rest on a long token (or on the whole short member, the
+    "1,2,3,4" case), never on a stray short token alone."""
+    member_tokens = re.findall(r"\w+", str(member.get("text") or "").lower())
+    if not member_tokens:
+        return False
+    translation_tokens = set(re.findall(r"\w+", str(translated or "").lower()))
+    missing = [token for token in member_tokens if token not in translation_tokens]
+    if any(len(token) > 2 for token in missing):  # a distinctive token is absent -> not reproduced
+        return False
+    long_reproduced = any(len(token) > 2 for token in member_tokens if token in translation_tokens)
+    if missing and not long_reproduced:  # only short tokens matched -> too weak to call reproduced
+        return False
+    return bool(translation_tokens - set(member_tokens))
+
+

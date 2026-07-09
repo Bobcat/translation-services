@@ -22,8 +22,8 @@ from app.replacement.text.fit import is_cjk_text
 from app.replacement.text.angle import _baseline_angle
 from app.replacement.text.size import _group_size
 from app.replacement.render import _plan_group
-from app.replacement.render import _reproduced_in
-from app.replacement.render import _split_table_row
+from app.replacement.layout.tables import _reproduced_in
+from app.replacement.layout.tables import _split_table_row
 from app.replacement.render import render_translated_image
 
 
@@ -297,7 +297,7 @@ def test_bullet_geometry_accepts_a_wide_flat_dash_but_not_line_tall_edge_ink() -
     # A bullet is small in ink HEIGHT, not necessarily narrow: a dash is wide but flat and
     # must be kept (its width sat right on the old 0.4x-line-height cap, so quad-height
     # wobble flipped it per line). A line-TALL run (a coloured panel edge) is still no bullet.
-    from app.replacement.render import _bullet_geometry
+    from app.replacement.layout.markers import _bullet_geometry
 
     def strokes(draw):  # glyph-like text ink: thin strokes, not a solid slab
         for x in range(40, 120, 12):
