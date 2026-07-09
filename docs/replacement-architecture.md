@@ -87,13 +87,11 @@ not to any one concern (otherwise a concern would import the planner and cycle):
 - [x] 3. `text/` — `angle.py`, `size.py`, `wrap.py` (+ `layout/groups.py`, pulled early because
        the angle field depends on it). Moving the existing `fit.py` into `text/` is still to do.
 - [x] 4. `ground/` — `color.py`, `erase.py`, `inpaint.py` moved in; `fit.py` moved to `text/`.
-- [ ] 5. `layout/` — `tables.py`, `markers.py`, `sweep.py`, `compositing.py`, then
-       `planning.py` (`_plan_group`).
-- [ ] 6. `render.py` shrinks to the composition root; its docstring becomes the flow map above.
+- [x] 5. `layout/` — `tables.py`, `markers.py`, `sweep.py`, `compositing.py`, `planning.py`.
+- [x] 6. `render.py` is the composition root (~160 lines); its docstring carries the map.
 
-Until this list is fully checked the tree above is the TARGET; still living in `render.py`:
-the planner (`_plan_group`) and the layout concerns (tables, markers, sweep, compositing) and
-the render orchestration itself.
+Done — the tree above is the actual layout. `render.py` holds only `render_translated_image`
+(the pipeline); every concern is a named module reached from a render symptom.
 
 `_plan_group` itself (≈280 lines) moves whole in step 5; splitting its internals is a separate,
 non-mechanical task, not part of this restructure.

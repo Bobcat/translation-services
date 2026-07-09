@@ -23,7 +23,19 @@ Two facts make this work without a model:
 `translate: false` members and ignored cells are never touched. Textured/photographic
 backgrounds scar under the flat fill (it can't blend); ``erase_fill_mode="inpaint"``
 switches pass 1 to the LaMa reconstruction (Tier 2, :mod:`app.replacement.ground.inpaint`).
-See docs/re-placement.md.
+
+Composition root: this module owns only ``render_translated_image`` — the pipeline (open
+the image, plan each group into placed jobs, erase pass 1, warp the tiles on in pass 2,
+encode). Each concern lives in a named module a reader reaches from a render symptom
+(the full map is docs/replacement-architecture.md):
+
+  layout/  planning.py (group -> jobs) - groups.py - tables.py (columns) -
+           markers.py (bullets) - sweep.py (stray ink) - compositing.py (tile warp)
+  text/    angle.py (line tilt) - size.py (source size) - wrap.py (break/condense) - fit.py
+  ground/  color.py (bg sample) - erase.py (flat-vs-model + residue) - inpaint.py (LaMa)
+  shared   geometry.py - jobs.py (_Job) - pixels.py (_INK_DELTA)
+
+See docs/re-placement.md for the approach, docs/replacement-architecture.md for the tree.
 """
 from __future__ import annotations
 
