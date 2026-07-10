@@ -57,9 +57,15 @@ single recorded expected result suffices and any diff is a genuine regression.
 
 ## Freeze boundary
 
-The renderer is a pure function of `(units, source image)`; grouping/align is a pure function
-of `(cells, parsed hint)`. So we freeze the three non-deterministic stage outputs and re-run
-everything deterministic after them:
+The renderer is a pure function of `(units, source image)` — with one exception:
+`erase_fill_mode="inpaint"` re-rolls the model fill every render (GPU float
+nondeterminism). Measured (2026-07-09, 9 replays vs snapshot on the two riskiest
+fixtures): the re-OCR compare's tolerance absorbs that wobble completely, so
+inpaint-pinned fixtures are allowed and double as a Tier-2 guard — a re-OCR fail on one
+means the fill went genuinely wrong, not that the pin was invalid. Investigate a rare
+flip before re-baselining it. Grouping/align is a pure function of `(cells, parsed
+hint)`. So we freeze the three non-deterministic stage outputs and re-run everything
+deterministic after them:
 
 | live stage | in a regression run |
 |---|---|

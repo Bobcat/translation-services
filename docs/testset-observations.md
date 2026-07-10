@@ -524,6 +524,21 @@ reference app's render. Excluding translation length and the resulting smaller f
   is not reproduced. Verified: flat fixtures byte-identical (field is None there);
   tilted fixtures re-baselined after visual review — heading+body blocks now parallel,
   the logo sits in the sign's plane.
+- **Band parallelism: MEASURED (2026-07-09), parked — the quads themselves are the limit.**
+  The user saw the yellow-band text on the pack render at a slightly different tilt than
+  the original. Confirmed with pixel evidence (per-column band-edge extremes, Theil-Sen):
+  the band's edges run -20.67° (top) / -21.27° (bottom); the ORIGINAL ink follows them to
+  within 0.1° (-20.72° / -21.19°); our render sits 0.2-0.3° flatter (-20.50° / -20.93°).
+  Two causes, both beyond any quad-based fit: (1) the OCR quads read the lower line ~0.35°
+  shallower than its true ink (the known shallow bias), and the angle field — fit ON those
+  quads — inherits it; (2) the band fans 0.6° within its own ~60px height (~10°/1000px
+  locally, vs the document-wide 2.4°/1000px), local perspective a LINEAR field cannot
+  follow. Honest conclusion: when OCR is just slightly wrong, only an independent signal
+  can correct it. The band-edge measurement above IS that signal and proved robust —
+  parked as a candidate ("align text to a detected solid band's local edge"), pending the
+  trust decision: when does a surface edge overrule text geometry, and how certain must
+  band detection be. Perceptual bar: 0.3° over a 470px line = 2-4px end-to-end, visible
+  only against a hard adjacent reference edge — exactly this case.
 - **Centre axis.** Sub-lines anchor on their own plane centres and drift a few px off
   their heading's axis. SHIPPED (2026-07-08): within-group centre-snap — a centered
   multi-line group's line centres snap to their median when the spread is noise-sized
