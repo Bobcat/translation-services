@@ -385,6 +385,37 @@ them more than we do. Two distinct problems, addressed differently.
   reopen. Verified live: the nike headline's grey patches gone, concrete continuous behind the
   text.
 
+### Third pass (2026-07-10) — own-surface judgement + cross-band gradient rule
+
+Two live misroutes (user): the pack photo's dark-panel line rendered a flat brown-grey PLATE
+where the model should have run, and the warning sign's `100°C` ran the model (smearing the
+thermometer graphic) where flat was right. Instrumenting both showed two distinct blind spots,
+fixed together and verified over every fixture + the wash-out controls:
+
+- **False model — the ring crossed a designed boundary.** `100°C` sits on a solid red panel,
+  but the ±23px ring reached the thermometer graphic, the blue rule and the sign's rim: spread
+  82/76 → model → the near-total-hole fill smeared the very graphics it was routed for. Fix:
+  the spread tests now judge only OWN-surface pixels (within `_GROUND_OWN_SURFACE_DELTA`=60 of
+  the fill's bg colour — another surface is ground the fill never touches) on the NEAR ring
+  (`_GROUND_SPREAD_RING_PX`=14 — the fill only has to blend at its seam; panel weathering at
+  the far ring does not scar it). Also rescued: two pure-white rows whose v1 model routing came
+  entirely from foreign UI elements in the ring (spread 0 after filtering).
+- **False flat — a smooth gradient ACROSS the line.** The dark panel drifts top-to-bottom;
+  per-band segment tests never compare across bands (that exception existed for designed
+  different surfaces — now foreign-filtered), so within-band spreads read 11–18 < 20 while the
+  true cross drift was 75+. New rule: cross-band spread of all own-surface medians >
+  max(16, 0.5 × luminance) → model. Weber-relative: a plate's visibility scales with
+  Δ/luminance, so dark ground trips at a smaller absolute delta while a mildly-shaded bright
+  receipt (cross 24–49 on luma ~150) and the tiny-banner control (17 on 88) stay flat. The
+  threshold is deliberately high — only gradients the eye reads as a plate flip.
+- Sweep verified (all fixtures + live wash-out controls): the tiny red banner stays fully
+  flat; receipt/weather/screenshot routing unchanged; the pack's dark plates now model (both
+  packs); a handful of designed-panel lines correctly returned to flat. Named limits: the
+  weathered title panel measures texture 3.6 — a hair over the 3.5 grain gate — and stays
+  model (borderline by nature; the photo-ground meme's job sits at 4.0, so no clean cut
+  exists); and the CJK line above the sign's yellow strip stays model via texture (the strip
+  boundary crosses segment interiors, inflating unfiltered grain — the safe direction).
+
 
 ## `bullets-dashes.png` (7-item list, one marker glyph per item, en→nl/zh)
 

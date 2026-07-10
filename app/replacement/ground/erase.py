@@ -31,26 +31,41 @@ _INPAINT_MASK_DILATE_PX = 3
 # actually varies; on designed flat/solid ground the flat paint is right by construction,
 # while a model reconstruction of a near-total hole is unstable run-to-run (washed-out
 # streaks through a solid banner). Per job the ring around the quads is split into side
-# bands (above/below/left/right), each band into segments along the line; the ground is
-# "flat-safe" when within every band the segment medians agree — a designed panel or band
-# is constant ALONG the line even when the sides differ from each other (red band above,
-# white field below), where texture/shading (crumpled paper, photo ground) drifts along
-# it. Thresholds measured across four testset archetypes; designed boundaries running
-# THROUGH a line's length read as varying and go to the model — the safe direction.
+# bands (above/below/left/right), each band into segments along the line. Three triggers,
+# all measured across the testset + the reported live misroutes (docs/testset-observations.md):
+#
+# 1. WITHIN-BAND spread of the segment medians (> _GROUND_MAX_SIDE_SPREAD) — shading/texture
+#    drifting ALONG the line. Judged on the job's OWN surface only (pixels within
+#    _GROUND_OWN_SURFACE_DELTA of the fill's bg colour): a DESIGNED boundary near the line
+#    (a graphic, a panel edge, the sign's rim) is another surface the fill never touches,
+#    and counting it sent solid-panel lines to the model — whose near-total-hole fill then
+#    smeared the very graphics it was routed for. And judged on the NEAR ring only
+#    (_GROUND_SPREAD_RING_PX): the flat fill has to blend at its seam; weathering at the
+#    far ring does not scar it.
+# 2. CROSS-BAND spread of all own-surface medians (> max(_GROUND_CROSS_FLOOR,
+#    _GROUND_CROSS_REL x luminance)) — a smooth illumination gradient ACROSS the line
+#    (top vs bottom), invisible to per-band tests. Weber: a plate's visibility scales with
+#    delta/luminance, so dark ground trips at a smaller absolute delta. The threshold is
+#    deliberately high (0.5 x luma): mild vertical shading (a curved receipt, a lit sign)
+#    stays flat; only a gradient the eye reads as a plate goes to the model.
+# 3. TEXTURE (unchanged): grain around a steady median, full ring, unfiltered.
 _GROUND_RING_INNER_PX = 7
 _GROUND_RING_OUTER_PX = 23
+_GROUND_SPREAD_RING_PX = 14
+_GROUND_OWN_SURFACE_DELTA = 60
 _GROUND_MAX_SIDE_SPREAD = 20
+_GROUND_CROSS_REL = 0.5
+_GROUND_CROSS_FLOOR = 16
 _GROUND_SEGMENTS_ALONG = 6
 _GROUND_SEGMENTS_ACROSS = 3
 _GROUND_MIN_BAND_PX = 60
 _GROUND_MIN_SEGMENT_PX = 20
-# Second route-to-model trigger: fine TEXTURE at a constant median. The side-spread test above
-# only catches ground whose median SHIFTS along the line (a gradient or shading); photographic
-# ground (concrete, fabric) has a steady median but real grain, and a flat fill paints one colour
-# — a smooth patch the eye reads instantly as an erase. Measured across the testset (see
-# docs/testset-observations.md): designed-flat / screenshot / sign ground sits <=2, photographic
-# texture >=5, so this gate separates them cleanly with margin to spare and does not reopen the
-# designed-flat wash-out (those stay well under it).
+# Fine TEXTURE at a constant median: photographic ground (concrete, fabric) has a steady
+# median but real grain, and a flat fill paints one colour — a smooth patch the eye reads
+# instantly as an erase. Measured: designed-flat / screenshot / sign ground sits <=2,
+# photographic texture >=5; a weathered sign panel lands right at the boundary (3.6) and is
+# the named borderline. Computed on the full ring, unfiltered (a boundary crossing a segment
+# inflates it toward the model — the safe direction for texture).
 _GROUND_MAX_TEXTURE_MAD = 3.5
 
 
@@ -65,11 +80,25 @@ def _swallow_erase_residue(
         region[pixels] = np.asarray(job.bg_color, dtype=np.uint8)
 
 
+def _band_specs(quad_mask: np.ndarray, ring_y: np.ndarray, ring_x: np.ndarray):
+    """The four side bands (above/below/left/right) of a ring as (mask, run-coordinate,
+    segment count) triples — segments run ALONG the line for the horizontal bands and
+    across it for the short side bands."""
+    ys, xs = np.nonzero(quad_mask)
+    y_lo, y_hi, x_lo, x_hi = ys.min(), ys.max(), xs.min(), xs.max()
+    return (
+        (ring_y < y_lo, ring_x, _GROUND_SEGMENTS_ALONG),
+        (ring_y > y_hi, ring_x, _GROUND_SEGMENTS_ALONG),
+        (ring_x < x_lo, ring_y, _GROUND_SEGMENTS_ACROSS),
+        (ring_x > x_hi, ring_y, _GROUND_SEGMENTS_ACROSS),
+    )
+
+
 def _needs_model_fill(original: np.ndarray, job: _Job, occupied: np.ndarray) -> bool:
-    """Ground router (see the _GROUND_* constants): True when the ground around the job
-    varies along the line — texture or shading the flat paint would scar — False when
-    every side band is constant along it (designed flat/solid ground, where the flat
-    paint is right by construction and a model reconstruction is unstable)."""
+    """Ground router (see the _GROUND_* constants): True when the job's OWN ground varies —
+    shading along the line, a gradient across it, or grain — so a flat plate would scar;
+    False on designed flat/solid ground, where the flat paint is right by construction and
+    a model reconstruction of a near-total hole is unstable."""
     height, width = original.shape[:2]
     # Work in a local window: the ground ring reaches only _GROUND_RING_OUTER_PX past the
     # quads, so a full-image mask + dilate per job is pure waste (on a large receipt with
@@ -81,47 +110,72 @@ def _needs_model_fill(original: np.ndarray, job: _Job, occupied: np.ndarray) -> 
     y0 = max(0, int(all_pts[:, 1].min()) - margin)
     x1 = min(width, int(all_pts[:, 0].max()) + margin + 1)
     y1 = min(height, int(all_pts[:, 1].max()) + margin + 1)
-    crop = original[y0:y1, x0:x1]
+    crop = original[y0:y1, x0:x1].astype(np.int16)
+    free = occupied[y0:y1, x0:x1] == 0
     quad_mask = np.zeros(crop.shape[:2], dtype=np.uint8)
     for quad in job.erase_quads:
         cv2.fillPoly(quad_mask, [np.asarray(quad, dtype=np.int32) - (x0, y0)], 255)
     inner = cv2.dilate(quad_mask, _ellipse(_GROUND_RING_INNER_PX))
+    bg = np.asarray(job.bg_color, dtype=np.int16)
+
+    # Texture: full ring, unfiltered per-segment grain (see the constants block).
     outer = cv2.dilate(quad_mask, _ellipse(_GROUND_RING_OUTER_PX))
-    ring_y, ring_x = np.nonzero((outer > 0) & (inner == 0) & (occupied[y0:y1, x0:x1] == 0))
+    ring_y, ring_x = np.nonzero((outer > 0) & (inner == 0) & free)
     if ring_y.size == 0:
         return False  # boxed in by other text: no ground to judge, keep the flat paint
-    ys, xs = np.nonzero(quad_mask)
-    y_lo, y_hi, x_lo, x_hi = ys.min(), ys.max(), xs.min(), xs.max()
     textures: list[float] = []
-    for in_band, coord, segments in (
-        (ring_y < y_lo, ring_x, _GROUND_SEGMENTS_ALONG),
-        (ring_y > y_hi, ring_x, _GROUND_SEGMENTS_ALONG),
-        (ring_x < x_lo, ring_y, _GROUND_SEGMENTS_ACROSS),
-        (ring_x > x_hi, ring_y, _GROUND_SEGMENTS_ACROSS),
-    ):
+    for in_band, coord, segments in _band_specs(quad_mask, ring_y, ring_x):
         if in_band.sum() < _GROUND_MIN_BAND_PX:
             continue
         band_y, band_x, band_c = ring_y[in_band], ring_x[in_band], coord[in_band]
         lo, hi = band_c.min(), band_c.max() + 1
-        medians = []
         for step in range(segments):
             seg = (band_c >= lo + (hi - lo) * step // segments) & (
                 band_c < lo + (hi - lo) * (step + 1) // segments
             )
             if seg.sum() < _GROUND_MIN_SEGMENT_PX:
                 continue
-            pixels = crop[band_y[seg], band_x[seg]].astype(np.int16)
+            pixels = crop[band_y[seg], band_x[seg]]
             median = np.median(pixels, axis=0)
-            medians.append(median)
             # Ground grain: how far the ring pixels sit from their OWN segment median (robust,
             # so an edge pixel does not inflate it). A gradient shifts the medians; texture
-            # scatters pixels around a steady one — the case the side-spread test cannot see.
+            # scatters pixels around a steady one — the case the spread tests cannot see.
             textures.append(float(np.median(np.abs(pixels - median).max(axis=1))))
-        if len(medians) < 2:
-            continue
-        stack = np.array(medians)
-        if np.abs(stack[:, None] - stack[None, :]).max() > _GROUND_MAX_SIDE_SPREAD:
-            return True
+
+    # Spreads: near ring (the flat fill's blend seam), own-surface pixels only.
+    outer_near = cv2.dilate(quad_mask, _ellipse(_GROUND_SPREAD_RING_PX))
+    ring_y, ring_x = np.nonzero((outer_near > 0) & (inner == 0) & free)
+    own_medians: list[np.ndarray] = []
+    if ring_y.size:
+        for in_band, coord, segments in _band_specs(quad_mask, ring_y, ring_x):
+            if in_band.sum() < _GROUND_MIN_BAND_PX:
+                continue
+            band_y, band_x, band_c = ring_y[in_band], ring_x[in_band], coord[in_band]
+            lo, hi = band_c.min(), band_c.max() + 1
+            band_medians = []
+            for step in range(segments):
+                seg = (band_c >= lo + (hi - lo) * step // segments) & (
+                    band_c < lo + (hi - lo) * (step + 1) // segments
+                )
+                if seg.sum() < _GROUND_MIN_SEGMENT_PX:
+                    continue
+                pixels = crop[band_y[seg], band_x[seg]]
+                own = pixels[np.abs(pixels - bg).max(axis=1) <= _GROUND_OWN_SURFACE_DELTA]
+                if len(own) >= _GROUND_MIN_SEGMENT_PX:
+                    band_medians.append(np.median(own, axis=0))
+                # else: the segment is (mostly) another surface — the fill never touches it
+            if len(band_medians) >= 2:
+                stack = np.array(band_medians)
+                if np.abs(stack[:, None] - stack[None, :]).max() > _GROUND_MAX_SIDE_SPREAD:
+                    return True  # shading/texture drifting along the line
+            own_medians.extend(band_medians)
+    if len(own_medians) >= 2:
+        stack = np.array(own_medians)
+        cross = float(np.abs(stack[:, None] - stack[None, :]).max())
+        centre = np.median(stack, axis=0)
+        luma = 0.2126 * centre[0] + 0.7152 * centre[1] + 0.0722 * centre[2]
+        if cross > max(_GROUND_CROSS_FLOOR, _GROUND_CROSS_REL * luma):
+            return True  # an illumination gradient across the line: a plate would show
     return bool(textures) and float(np.median(textures)) > _GROUND_MAX_TEXTURE_MAD
 
 

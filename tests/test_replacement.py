@@ -595,25 +595,85 @@ def test_inpaint_ground_router_keeps_flat_on_designed_ground_and_models_gradient
     # Designed ground: a solid band with the line fully inside it — every side band is
     # constant along the line, so the flat paint is right and the model must stay out.
     # Textured ground: shading drifting along the line scars under a flat rectangle and
-    # must go to the model.
+    # must go to the model. The job's bg is the sampled ground (mid-gradient for the
+    # graded case), as the pipeline's colour sampling would produce.
     from app.replacement.ground.erase import _ellipse
     from app.replacement.ground.erase import _GROUND_RING_INNER_PX
     from app.replacement.ground.erase import _needs_model_fill
     from app.replacement.jobs import _Job
 
     quad = [(60, 60), (240, 60), (240, 90), (60, 90)]
-    job = _Job(erase_quads=[quad], bg_color=(220, 60, 30), tile=None, dst_quad=None)
     occupied = np.zeros((160, 300), dtype=np.uint8)
     cv2.fillPoly(occupied, [np.asarray(quad, dtype=np.int32)], 255)
     occupied = cv2.dilate(occupied, _ellipse(_GROUND_RING_INNER_PX))
 
     designed = np.zeros((160, 300, 3), dtype=np.uint8)
     designed[:, :] = (220, 60, 30)  # the whole ring lives inside one solid band
+    job = _Job(erase_quads=[quad], bg_color=(220, 60, 30), tile=None, dst_quad=None)
     assert not _needs_model_fill(designed, job, occupied)
 
     graded = np.zeros((160, 300, 3), dtype=np.uint8)
     graded[:, :] = np.linspace(90, 200, 300).astype(np.uint8)[None, :, None]  # drift along the line
+    job = _Job(erase_quads=[quad], bg_color=(145, 145, 145), tile=None, dst_quad=None)
     assert _needs_model_fill(graded, job, occupied)
+
+
+def test_inpaint_ground_router_ignores_a_designed_boundary_the_fill_never_touches() -> None:
+    # A solid panel with a contrasting graphic just outside the line (inside the ring): the
+    # boundary is another surface the flat fill never touches — counting it routed solid-panel
+    # lines to the model, whose near-total-hole fill then smeared that very graphic. The line's
+    # OWN ground is flat, so the router must keep the flat paint.
+    from app.replacement.ground.erase import _ellipse
+    from app.replacement.ground.erase import _GROUND_RING_INNER_PX
+    from app.replacement.ground.erase import _needs_model_fill
+    from app.replacement.jobs import _Job
+
+    quad = [(60, 60), (240, 60), (240, 90), (60, 90)]
+    job = _Job(erase_quads=[quad], bg_color=(180, 40, 50), tile=None, dst_quad=None)
+    occupied = np.zeros((160, 300), dtype=np.uint8)
+    cv2.fillPoly(occupied, [np.asarray(quad, dtype=np.int32)], 255)
+    occupied = cv2.dilate(occupied, _ellipse(_GROUND_RING_INNER_PX))
+
+    panel = np.zeros((160, 300, 3), dtype=np.uint8)
+    panel[:, :] = (180, 40, 50)               # solid red panel
+    panel[:, 0:52] = (250, 250, 250)          # a white graphic just left of the line
+    panel[40:52, :] = (60, 90, 200)           # a blue rule just above it
+    assert not _needs_model_fill(panel, job, occupied)
+
+
+def test_inpaint_ground_router_models_a_cross_gradient_on_dark_ground_only() -> None:
+    # A smooth illumination gradient ACROSS the line (top vs bottom): per-band tests never
+    # see it. On dark ground the same absolute drift is proportionally huge (Weber) and a
+    # flat plate shows — model. On bright ground it stays well under the relative threshold
+    # — flat.
+    from app.replacement.ground.erase import _ellipse
+    from app.replacement.ground.erase import _GROUND_RING_INNER_PX
+    from app.replacement.ground.erase import _needs_model_fill
+    from app.replacement.jobs import _Job
+
+    # A tilted line: two word quads at different heights, so the line's bbox is tall and the
+    # above/below bands sit ~160px apart — a shallow smooth gradient (0.35 value/px, like a
+    # lit panel) accumulates ~55 of drift between them while staying invisible to the
+    # per-band and texture tests.
+    quads = [[(60, 60), (160, 60), (160, 90), (60, 90)],
+             [(160, 160), (260, 160), (260, 190), (160, 190)]]
+    occupied = np.zeros((400, 320), dtype=np.uint8)
+    for quad in quads:
+        cv2.fillPoly(occupied, [np.asarray(quad, dtype=np.int32)], 255)
+    occupied = cv2.dilate(occupied, _ellipse(_GROUND_RING_INNER_PX))
+
+    def vertical_gradient(top, bottom):
+        img = np.zeros((400, 320, 3), dtype=np.uint8)
+        img[:, :] = np.linspace(top, bottom, 400).astype(np.uint8)[:, None, None]
+        return img
+
+    dark = vertical_gradient(30, 170)   # cross ~55 on luma ~75: a plate would show
+    job = _Job(erase_quads=quads, bg_color=(75, 75, 75), tile=None, dst_quad=None)
+    assert _needs_model_fill(dark, job, occupied)
+
+    bright = vertical_gradient(115, 255)  # same absolute drift on luma ~160: stays flat
+    job = _Job(erase_quads=quads, bg_color=(160, 160, 160), tile=None, dst_quad=None)
+    assert not _needs_model_fill(bright, job, occupied)
 
 
 def test_inpaint_border_pads_only_where_the_hole_touches_a_mirrorable_border() -> None:
