@@ -57,6 +57,7 @@ from app.replacement.layout.planning import _plan_group
 from app.replacement.text.angle import _document_angle_field
 from app.replacement.text.angle import _image_is_flat
 from app.replacement.text.size import _document_band_ratio
+from app.replacement.text.size import _document_size_cohorts
 from app.replacement.layout.compositing import _composite
 from app.replacement.ground.erase import _GROUND_RING_INNER_PX
 from app.replacement.ground.erase import _ellipse
@@ -73,6 +74,7 @@ def render_translated_image(
     erase_fill_mode: str = "flat",
     width_fit_mode: str = "footprint",
     size_metric_mode: str = "extent",
+    size_cohort_mode: str = "off",
 ) -> bytes:
     opened = Image.open(input_path)
     # Carry the source's ICC colour profile onto the output. ``convert("RGB")`` keeps the raw pixel
@@ -95,6 +97,7 @@ def render_translated_image(
     ]
     band_ratio = _document_band_ratio(base, translation_units) if size_metric_mode == "band" else None
     angle_field = _document_angle_field(translation_units)
+    size_cohorts = _document_size_cohorts(translation_units) if size_cohort_mode == "vlm" else None
     for group in groups:
         jobs.extend(
             _plan_group(
@@ -105,6 +108,7 @@ def render_translated_image(
                 width_fit_mode=width_fit_mode,
                 band_ratio=band_ratio,
                 angle_field=angle_field,
+                size_cohorts=size_cohorts,
                 base_arr=base_arr,
                 protected_boxes=protected_boxes,
             )

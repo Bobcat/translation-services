@@ -72,6 +72,10 @@ class TranslationUnit:
     # cut when the weight is high. None for leftovers and unlabeled lines.
     font_family: str | None = None
     font_weight: int | None = None
+    # The VLM's font-size label ("<n>pt", None when unlabeled). A poor ABSOLUTE (pt->pixel scale
+    # drifts per image) but a reliable EQUALITY signal — same pt = same intended size — used only
+    # by the size-cohort render mode to regularise the noisy per-line OCR sizing.
+    font_size: int | None = None
     # True when the hint line was a bullet-list item, plus the glyph/marker the VLM saw ("•", "-",
     # "1.", "(a)", ...). The renderer redraws "<marker> <text>" (or, in legacy mode, insets the text
     # past the original glyph left in the image so the translation does not overwrite it).
@@ -90,6 +94,7 @@ class TranslationUnit:
             "alignment": self.alignment,
             "font_family": self.font_family,
             "font_weight": self.font_weight,
+            "font_size": self.font_size,
             "bullet": self.bullet,
             "bullet_marker": self.bullet_marker,
             "members": [member.to_dict() for member in self.members],
@@ -100,6 +105,7 @@ class TranslationUnit:
         hint_index = data.get("hint_index")
         block_id = data.get("block_id")
         font_weight = data.get("font_weight")
+        font_size = data.get("font_size")
         return cls(
             id=int(data["id"]),
             order=int(data.get("order") or 0),
@@ -112,6 +118,7 @@ class TranslationUnit:
             alignment=data.get("alignment"),
             font_family=data.get("font_family"),
             font_weight=int(font_weight) if font_weight is not None else None,
+            font_size=int(font_size) if font_size is not None else None,
             bullet=bool(data.get("bullet", False)),
             bullet_marker=data.get("bullet_marker"),
         )

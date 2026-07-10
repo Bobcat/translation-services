@@ -52,6 +52,7 @@ def build_units_from_hint(
     hint_alignments: list[str | None] | None = None,
     hint_families: list[str | None] | None = None,
     hint_weights: list[int | None] | None = None,
+    hint_sizes: list[int | None] | None = None,
     hint_bullets: list[bool] | None = None,
     hint_bullet_markers: list[str | None] | None = None,
 ) -> GroupingResult:
@@ -112,6 +113,7 @@ def build_units_from_hint(
             alignment=_hint_meta(label, hint_alignments),
             font_family=_hint_meta(label, hint_families),
             font_weight=_hint_meta(label, hint_weights),
+            font_size=_hint_meta(label, hint_sizes),
             bullet=bool(_hint_meta(label, hint_bullets)),
             bullet_marker=_hint_meta(label, hint_bullet_markers),
         )
@@ -651,6 +653,7 @@ def _build_unit(
     alignment: str | None = None,
     font_family: str | None = None,
     font_weight: int | None = None,
+    font_size: int | None = None,
     bullet: bool = False,
     bullet_marker: str | None = None,
 ) -> TranslationUnit:
@@ -686,6 +689,7 @@ def _build_unit(
         alignment=alignment,
         font_family=font_family,
         font_weight=font_weight,
+        font_size=font_size,
         bullet=bullet,
         bullet_marker=bullet_marker,
     )

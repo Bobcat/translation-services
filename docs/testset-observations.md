@@ -438,6 +438,35 @@ them more than we do. Two distinct problems, addressed differently.
   siblings byte-identical to "extent".
 
 
+## List-item size uniformity — the VLM pt as an equality signal (`size_cohort_mode`, 2026-07-09)
+
+- **Symptom (`bullet-list.jpg`, user).** In the original every list item is one font size; in the
+  translation they are not. Worst case: an item that wrapped to 2 lines in the source renders in
+  the translation on ONE line at a much smaller font. Root cause: the group size is picked
+  (min/median of the per-line OCR heights) BEFORE the wrap, so a short sibling line drags the size
+  down (measured: item planes 61 & 47 → `min`=47), and at that reduced size the text fits on one
+  line — the available second line-slot is wasted. The per-item variation across the whole list
+  (measured 47–61) is per-line OCR measurement noise: each item is measured independently and the
+  polygon height varies with glyph content (a lowercase word reads shorter than one with
+  ascenders).
+- **The signal (user's idea).** The VLM's font-size label (`<n>pt`) is a poor ABSOLUTE (its
+  pt→pixel scale drifts per image — 24pt→61px here, 16pt→52px on `adv-budgets`) but a reliable
+  EQUALITY signal: it gives sibling elements one pt. Measured: same-pt cohorts sit at 3–6% OCR CV
+  (`bullet-list` 24pt / `bullets-dashes` 16pt / `items-levels-1` 12pt), while genuinely different
+  sizes land in DIFFERENT pt cohorts (`adv-budgets` 14/16/24pt, each cohort ≤4% CV internally).
+  So the pt cleanly separates "same size" from "different size", and OCR gives the absolute scale.
+- **SHIPPED as `size_cohort_mode: "off" | "vlm"`.** The VLM pt is threaded through
+  (parser→units→align; previously parsed and discarded). "vlm" groups elements by pt, and when a
+  cohort's OCR heights AGREE (≥3 members, CV ≤ 0.15) snaps the whole cohort to its OCR median; a
+  cohort that DISAGREES (VLM's equal claim wrong, or an outlier) keeps per-element OCR. A short
+  item then sizes UP to the cohort and re-wraps over its available planes (the 2-line item keeps
+  the big font). Default "off" = byte-identical, sweep 51/51 with no re-baseline.
+- **Named limit.** A single-line-original item with a long translation stays width-limited (no
+  second line-slot to use) — it condenses/shrinks as before. `width_fit_mode="extend"` is the
+  other lever for those (grow into clean space); the two modes compose. And the snap only ever
+  regularises WITHIN a VLM-pt cohort — it does not invent a size the OCR evidence doesn't support.
+
+
 ## Typography gap vs the reference app (tilted signs, 2026-07-07 comparison)
 
 Side-by-side of the horse-habitat sign (and the cigarette-pack photo) against the

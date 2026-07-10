@@ -49,8 +49,12 @@ class RequestPayload(BaseModel):
     render_size_mode: Literal["min", "median"] = "median"
     # How erased source text is filled. "flat" paints each erased line with its sampled
     # background colour; "inpaint" is the hybrid model-based fill — flat paint on designed
-    # flat ground, model reconstruction where the ground varies (app/replacement/inpaint.py).
-    erase_fill_mode: Literal["flat", "inpaint"] = "flat"
+    # flat ground, model reconstruction where the ground varies
+    # (app/replacement/ground/inpaint.py). Default "inpaint" since 2026-07-09: the ground
+    # router keeps designed-flat ground on the flat paint, so the model only runs where it
+    # visibly wins (photo texture, gradients). Requires a GPU + checkpoint — on a box
+    # without either, requests must pass "flat" explicitly.
+    erase_fill_mode: Literal["flat", "inpaint"] = "inpaint"
     # How a translation wider than its original line is fitted. "footprint" keeps it inside
     # the original line's width (condense in x, then shrink pt); "extend" first widens the
     # usable width into VERIFIED clean background right of the line (never over other text,
@@ -63,6 +67,13 @@ class RequestPayload(BaseModel):
     # One-sided: "band" only ever shrinks an outlier, and weak ink evidence keeps the
     # extent behaviour.
     size_metric_mode: Literal["extent", "band"] = "extent"
+    # Cross-element size uniformity from the VLM's per-element font-size (pt) label. "off"
+    # (default) sizes each element from its own OCR true-height. "vlm" groups elements the VLM
+    # gave one pt into a size cohort and — when their OCR heights AGREE (the VLM's equal claim
+    # holds) — snaps the whole cohort to its OCR median, so a list the VLM judged one size
+    # renders uniform (and a short item sizes up and re-wraps over its lines instead of
+    # collapsing to one tiny line). A cohort whose OCR heights disagree keeps per-element sizing.
+    size_cohort_mode: Literal["off", "vlm"] = "off"
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 

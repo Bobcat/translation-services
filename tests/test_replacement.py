@@ -503,6 +503,59 @@ def test_document_angle_field_recovers_a_linear_gradient_and_gates_junk() -> Non
     assert _document_angle_field(flat) is None
 
 
+def _sized_unit(uid, pt, height, width=300):
+    top = uid * 100
+    poly = [{"x": 0, "y": top}, {"x": width, "y": top},
+            {"x": width, "y": top + height}, {"x": 0, "y": top + height}]
+    return {"font_size": pt, "block_id": uid, "level": "body", "translated_text": "x",
+            "members": [{"cell_id": uid, "text": "x", "translate": True,
+                         "bbox": {"left": 0, "top": top, "width": width, "height": height},
+                         "polygon": poly}]}
+
+
+def test_size_cohorts_snap_on_agreement_split_by_pt_and_skip_on_disagreement() -> None:
+    from app.replacement.text.size import _document_size_cohorts
+
+    # One pt the VLM gave many elements, OCR heights tight -> snap to the cohort median.
+    tight = [_sized_unit(i, 24, h) for i, h in enumerate([55, 58, 60, 61, 62])]
+    cohorts = _document_size_cohorts(tight)
+    assert 24 in cohorts and 58 <= cohorts[24] <= 62
+
+    # Two pt cohorts (a real size difference the VLM saw): each tight -> both kept, distinct.
+    mixed = ([_sized_unit(i, 16, h) for i, h in enumerate([50, 52, 51, 49])] +
+             [_sized_unit(10 + i, 24, h) for i, h in enumerate([66, 64, 68])])
+    cm = _document_size_cohorts(mixed)
+    assert set(cm) == {16, 24} and cm[16] < cm[24]
+
+    # VLM claims one pt but OCR strongly disagrees -> not snapped (the equal claim is wrong).
+    noisy = [_sized_unit(i, 12, h) for i, h in enumerate([30, 45, 60, 70])]
+    assert 12 not in _document_size_cohorts(noisy)
+
+    # Too few members to trust a cohort -> omitted.
+    assert _document_size_cohorts([_sized_unit(i, 18, h) for i, h in enumerate([40, 41])]) == {}
+
+
+def test_size_cohort_mode_sizes_a_short_sibling_up_to_the_cohort(tmp_path) -> None:
+    # Three list items the VLM labelled one pt; OCR measured the third shorter. Under "vlm" the
+    # short item renders at the cohort size (taller) instead of its own small measurement.
+    img = Image.new("RGB", (400, 360), (255, 255, 255))
+    img.save(tmp_path / "list.png")
+    units = [_sized_unit(i, 24, h) for i, h in enumerate([60, 58, 44])]
+    for u in units:
+        u["translated_text"] = "vertaalde regel"
+
+    def ink_h(png, y0, y1):
+        arr = np.asarray(Image.open(BytesIO(png)).convert("L"))[y0:y1]
+        rows = np.nonzero((arr < 128).any(axis=1))[0]
+        return (rows.max() - rows.min() + 1) if len(rows) else 0
+
+    off = render_translated_image(tmp_path / "list.png", [dict(u) for u in units], size_cohort_mode="off")
+    vlm = render_translated_image(tmp_path / "list.png", [dict(u) for u in units], size_cohort_mode="vlm")
+    assert off != vlm
+    # the third item sits at y ~200..260; it renders taller under "vlm"
+    assert ink_h(vlm, 195, 300) > ink_h(off, 195, 300)
+
+
 def test_plan_group_reads_its_angle_from_the_document_field(tmp_path) -> None:
     # A one-line group whose own quad reads +2deg on a document whose field says +8deg
     # at that y must render at the field angle; without a field it trusts its own quad.

@@ -44,9 +44,10 @@ def run_rerender_image_pipeline(
     # submit_rerender — the body cannot override it (that would need a re-translate).
     preserve_heuristic_text = _bool_request_flag(request, "preserve_heuristic_text", default=True)
     render_size_mode = str(request.get("render_size_mode") or "median").strip() or "median"
-    erase_fill_mode = str(request.get("erase_fill_mode") or "flat").strip() or "flat"
+    erase_fill_mode = str(request.get("erase_fill_mode") or "inpaint").strip() or "inpaint"
     width_fit_mode = str(request.get("width_fit_mode") or "footprint").strip() or "footprint"
     size_metric_mode = str(request.get("size_metric_mode") or "extent").strip() or "extent"
+    size_cohort_mode = str(request.get("size_cohort_mode") or "off").strip() or "off"
     rendered_units = _units_for_preserve_heuristic_text(
         units, preserve_heuristic_text=preserve_heuristic_text
     )
@@ -76,6 +77,7 @@ def run_rerender_image_pipeline(
         erase_fill_mode=erase_fill_mode,
         width_fit_mode=width_fit_mode,
         size_metric_mode=size_metric_mode,
+        size_cohort_mode=size_cohort_mode,
     )
     replacement_wall_ms = _elapsed_ms(replacement_started)
 
@@ -90,6 +92,7 @@ def run_rerender_image_pipeline(
             "erase_fill_mode": erase_fill_mode,
             "width_fit_mode": width_fit_mode,
             "size_metric_mode": size_metric_mode,
+            "size_cohort_mode": size_cohort_mode,
             "preserve_heuristic_text": preserve_heuristic_text,
             "timings_ms": {"replacement": replacement_wall_ms},
         },
@@ -111,6 +114,7 @@ def run_rerender_image_pipeline(
         "erase_fill_mode": erase_fill_mode,
         "width_fit_mode": width_fit_mode,
         "size_metric_mode": size_metric_mode,
+        "size_cohort_mode": size_cohort_mode,
         "translation_source": "cached_rerender",
         "source_request_id": str(request.get("source_request_id") or ""),
         "image_category": str(source_grouping.get("category") or ""),

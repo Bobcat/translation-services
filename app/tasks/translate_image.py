@@ -149,9 +149,10 @@ def run_translate_image_pipeline(
     preserve_unchanged_text = _bool_request_flag(request, "preserve_unchanged_text", default=False)
     use_geometry_columns = _bool_request_flag(request, "use_geometry_columns", default=True)
     render_size_mode = str(request.get("render_size_mode") or "median").strip() or "median"
-    erase_fill_mode = str(request.get("erase_fill_mode") or "flat").strip() or "flat"
+    erase_fill_mode = str(request.get("erase_fill_mode") or "inpaint").strip() or "inpaint"
     width_fit_mode = str(request.get("width_fit_mode") or "footprint").strip() or "footprint"
     size_metric_mode = str(request.get("size_metric_mode") or "extent").strip() or "extent"
+    size_cohort_mode = str(request.get("size_cohort_mode") or "off").strip() or "off"
     # Opt-in: feed the geometry-adjusted hints (a `|` injected where a column gap shows the VLM
     # missed a rule-3/4 boundary) instead of the raw VLM hints. Same translation path, different input.
     hint_units_for_translation = hint_units_adjusted if use_geometry_columns else grouping.hint_units
@@ -221,6 +222,7 @@ def run_translate_image_pipeline(
         erase_fill_mode=erase_fill_mode,
         width_fit_mode=width_fit_mode,
         size_metric_mode=size_metric_mode,
+        size_cohort_mode=size_cohort_mode,
     )
     replacement_wall_ms = _elapsed_ms(replacement_started)
 
@@ -238,6 +240,7 @@ def run_translate_image_pipeline(
             "erase_fill_mode": erase_fill_mode,
             "width_fit_mode": width_fit_mode,
             "size_metric_mode": size_metric_mode,
+            "size_cohort_mode": size_cohort_mode,
             "timings_ms": {
                 "ocr": ocr_wall_ms,
                 "grouping": grouping_wall_ms,
@@ -291,6 +294,7 @@ def run_translate_image_pipeline(
         "erase_fill_mode": erase_fill_mode,
         "width_fit_mode": width_fit_mode,
         "size_metric_mode": size_metric_mode,
+        "size_cohort_mode": size_cohort_mode,
         "translation_source": "llm_pool",
         "translation_input": sent_input,
         "translation_instructions": sent_instructions,

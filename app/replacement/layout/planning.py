@@ -79,6 +79,7 @@ def _plan_group(
     width_fit_mode: str = "footprint",
     band_ratio: float | None = None,
     angle_field: tuple[float, float] | None = None,
+    size_cohorts: dict[int, float] | None = None,
     base_arr: np.ndarray | None = None,
     protected_boxes: list[dict[str, Any]] | None = None,
     sweep_ok: bool | None = None,
@@ -106,6 +107,7 @@ def _plan_group(
                     width_fit_mode=width_fit_mode,
                     band_ratio=band_ratio,
                     angle_field=angle_field,
+                    size_cohorts=size_cohorts,
                     base_arr=base_arr,
                     protected_boxes=protected_boxes,
                     sweep_ok=sweep_ok,
@@ -243,6 +245,18 @@ def _plan_group(
             if bands:
                 clamped = min(plane["true_height"], median(bands) * band_ratio)
                 plane["target"] = max(8, int(clamped * size_ratio))
+
+    # "cohort" size metric: an element the VLM gave a font-size (pt) that other elements share
+    # renders at the cohort's shared OCR-median size, so a list the VLM judged one size renders
+    # uniform instead of each item at its own noisy per-line measurement. A short-line item then
+    # sizes UP to the cohort and re-wraps over its available planes (keeping the size instead of
+    # collapsing to one small line). Only when the cohort passed the agreement gate.
+    if size_cohorts and angle == 0.0:
+        pt = next((u.get("font_size") for u in units if u.get("font_size") is not None), None)
+        cohort_height = size_cohorts.get(int(pt)) if pt is not None else None
+        if cohort_height is not None:
+            for plane in planes:
+                plane["target"] = max(8, int(cohort_height * size_ratio))
 
     # "extend" width fit: widen each plane's usable width into VERIFIED clean background to
     # its right before fitting, so a longer translation of a short line (a list item) keeps

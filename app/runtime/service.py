@@ -393,6 +393,9 @@ class RequestRuntime:
             "size_metric_mode": str(body.get("size_metric_mode") or "").strip()
             or source_request.get("size_metric_mode")
             or "extent",
+            "size_cohort_mode": str(body.get("size_cohort_mode") or "").strip()
+            or source_request.get("size_cohort_mode")
+            or "off",
         }
         # Same for the boolean flags: body overrides, else the source run's value carries over —
         # letting the schema default refill them would silently change the retranslate's inputs
@@ -455,6 +458,9 @@ class RequestRuntime:
             "size_metric_mode": str(body.get("size_metric_mode") or "").strip()
             or source_request.get("size_metric_mode")
             or "extent",
+            "size_cohort_mode": str(body.get("size_cohort_mode") or "").strip()
+            or source_request.get("size_cohort_mode")
+            or "off",
         }
         for flag in ("preserve_heuristic_text", "preserve_unchanged_text", "use_geometry_columns"):
             if flag in source_request:

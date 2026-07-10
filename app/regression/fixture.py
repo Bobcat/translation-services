@@ -66,6 +66,11 @@ class Fixture:
         # Same rule again; fixtures captured before the flag existed rendered "extent".
         return str(self.request_flags.get("size_metric_mode") or "extent")
 
+    @property
+    def size_cohort_mode(self) -> str:
+        # Same rule again; fixtures captured before the flag existed rendered "off".
+        return str(self.request_flags.get("size_cohort_mode") or "off")
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "image_sha256": self.image_sha256,

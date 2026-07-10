@@ -72,6 +72,7 @@ def replay_fixture(
         erase_fill_mode=fixture.erase_fill_mode,
         width_fit_mode=fixture.width_fit_mode,
         size_metric_mode=fixture.size_metric_mode,
+        size_cohort_mode=fixture.size_cohort_mode,
     )
     render_ms = (time.perf_counter() - render_started) * 1000.0
     return actual_units, actual_ignored, rendered_png, {"group_ms": group_ms, "render_ms": render_ms}

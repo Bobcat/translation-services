@@ -2,8 +2,9 @@
 from __future__ import annotations
 
 from typing import Any
+from collections import defaultdict
 import numpy as np
-from statistics import median
+from statistics import median, pstdev
 from PIL import Image
 from app.replacement import geometry as geo
 from app.replacement.geometry import _ANGLE_DEADZONE_DEG
@@ -27,6 +28,19 @@ _BAND_STRONG_ROW_FRACTION = 0.15  # rows holding >= this fraction of the peak in
 _BAND_MIN_ROWS = 3
 _BAND_MIN_PEAK = 4
 _BAND_MIN_SAMPLES = 4  # document ratio needs at least this many measured quads
+
+# "cohort" size metric (size_cohort_mode="vlm"): the VLM gives sibling elements ONE font-size
+# label (pt), so its per-element pt is a reliable EQUALITY signal even though its absolute
+# pt->pixel scale drifts per image. OCR true-height per element is the absolute scale but is
+# noisy line to line (ink extent varies with glyph content: a lowercase word reads shorter than
+# one with ascenders). So: elements the VLM labelled with one pt form a size cohort; when their
+# OCR heights AGREE (low spread — the VLM's equal claim holds), snap the whole cohort to its OCR
+# median, making the list render at one size. A cohort whose OCR heights DISAGREE (the VLM's
+# claim is wrong, or a genuine outlier) is left on per-element OCR. Measured across the list
+# fixtures: same-pt cohorts sit at 3-6% CV, genuinely-different sizes land in different pt
+# cohorts (adv-budgets 14/16/24pt) — so the gate separates cleanly.
+_COHORT_MIN_MEMBERS = 3   # need a few same-pt elements before trusting the cohort
+_COHORT_MAX_CV = 0.15     # OCR spread within a cohort must stay under this to snap
 
 def _quad_band_height(base_px: np.ndarray, quad, bg: tuple[int, int, int]) -> float | None:
     """Height of the quad's STRONG ink band: the row span where the ink column count
@@ -75,6 +89,37 @@ def _document_band_ratio(base: Image.Image, units: list[dict[str, Any]]) -> floa
     if len(ratios) < _BAND_MIN_SAMPLES:
         return None
     return float(median(ratios))
+
+def _document_size_cohorts(units: list[dict[str, Any]]) -> dict[int, float]:
+    """Map each VLM font-size (pt) to its cohort's median OCR true-height, for cohorts the VLM
+    judged one size AND OCR agrees on (>= _COHORT_MIN_MEMBERS elements, spread under
+    _COHORT_MAX_CV). A group whose pt is in the map renders at the cohort's shared size instead
+    of its own noisy per-line measurement; a pt not in the map (too few elements, or OCR
+    disagrees) keeps per-element OCR sizing. Only flat images (tilted line-height reads are
+    unreliable)."""
+    if not _image_is_flat(units):
+        return {}
+    by_pt: dict[int, list[float]] = defaultdict(list)
+    for unit in units:
+        pt = unit.get("font_size")
+        if pt is None:
+            continue
+        heights = [
+            geo.line_height(quad)
+            for member in (unit.get("members") or [])
+            if member.get("bbox") and (quad := geo.quad_of(member)) is not None
+        ]
+        if heights:
+            by_pt[int(pt)].append(median(heights))
+    cohorts: dict[int, float] = {}
+    for pt, heights in by_pt.items():
+        if len(heights) < _COHORT_MIN_MEMBERS:
+            continue
+        centre = median(heights)
+        if centre > 0 and pstdev(heights) / centre <= _COHORT_MAX_CV:
+            cohorts[pt] = centre
+    return cohorts
+
 
 def _group_size(planes: list[dict[str, Any]], mode: str) -> int:
     """The group's ONE render size, chosen from its per-line targets. ``min`` (the default)

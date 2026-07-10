@@ -27,14 +27,17 @@ class GroupingHint:
     # Parallel to ``units``: the visual hierarchy level of each line
     # ("title" | "header" | "body" | "footer", None when unlabeled), the index of the
     # element block it belongs to, its horizontal alignment ("center", None = left), and
-    # the VLM's per-element typography: font_family (a named font, None when unlabeled)
-    # and font_weight (100-900, None when unlabeled). The label's font-size is parsed off
-    # but intentionally not kept — OCR true-height drives the rendered size.
+    # the VLM's per-element typography: font_family (a named font, None when unlabeled),
+    # font_weight (100-900, None when unlabeled) and font_size (the label's "<n>pt", None when
+    # unlabeled). The size is an unreliable ABSOLUTE (its pt->pixel scale drifts per image) but a
+    # reliable EQUALITY signal — the model gives sibling elements one pt — used only by the
+    # size-cohort render mode; the default sizing comes from OCR true-height.
     levels: list[str | None] = field(default_factory=list)
     block_ids: list[int] = field(default_factory=list)
     alignments: list[str | None] = field(default_factory=list)
     font_families: list[str | None] = field(default_factory=list)
     font_weights: list[int | None] = field(default_factory=list)
+    font_sizes: list[int | None] = field(default_factory=list)
     # Parallel to ``units``: True when the line was a bullet-list item (the VLM prefixed it with the
     # "@blt|@<bullet>|" sentinel, stripped here), and the glyph/marker the VLM saw (substituted into
     # "@<bullet>": "•", "-", "1.", "(a)", ...). The renderer redraws the marker before the text (or,
@@ -151,6 +154,7 @@ def parse_grouping_output(output_text: str) -> GroupingHint:
     alignments: list[str | None] = []
     font_families: list[str | None] = []
     font_weights: list[int | None] = []
+    font_sizes: list[int | None] = []
     bullets: list[bool] = []
     bullet_markers: list[str | None] = []
     block = 0
@@ -159,9 +163,10 @@ def parse_grouping_output(output_text: str) -> GroupingHint:
     block_alignment: str | None = None
     block_family: str | None = None
     block_weight: int | None = None
+    block_size: int | None = None
 
     def close_block() -> None:
-        nonlocal block, block_open, block_level, block_alignment, block_family, block_weight
+        nonlocal block, block_open, block_level, block_alignment, block_family, block_weight, block_size
         if block_open:
             block += 1
             block_open = False
@@ -169,6 +174,7 @@ def parse_grouping_output(output_text: str) -> GroupingHint:
         block_alignment = None
         block_family = None
         block_weight = None
+        block_size = None
 
     for raw in str(output_text or "").splitlines():
         line = raw.strip()
@@ -211,7 +217,7 @@ def parse_grouping_output(output_text: str) -> GroupingHint:
                 line = text
                 block_level = level
                 block_alignment = _alignment_of(label)
-                block_family, block_weight = _parse_label_fonts(label)
+                block_family, block_weight, block_size = _parse_label_fonts(label)
                 if not line:  # standalone "[Level 3 / Body]" -> labels the lines below
                     continue
         if level is None:
@@ -232,6 +238,7 @@ def parse_grouping_output(output_text: str) -> GroupingHint:
         alignments.append(block_alignment)
         font_families.append(block_family)
         font_weights.append(block_weight)
+        font_sizes.append(block_size)
         bullets.append(bullet)
         bullet_markers.append(marker)
         block_open = True
@@ -244,6 +251,7 @@ def parse_grouping_output(output_text: str) -> GroupingHint:
         alignments=alignments,
         font_families=font_families,
         font_weights=font_weights,
+        font_sizes=font_sizes,
         bullets=bullets,
         bullet_markers=bullet_markers,
     )
@@ -286,22 +294,27 @@ def _alignment_of(label: str) -> str | None:
     return "center" if _ALIGN_CENTER.search(label.lower()) else None
 
 
-def _parse_label_fonts(label: str) -> tuple[str | None, int | None]:
-    """Pull the font-family and font-weight out of a typography label.
+def _parse_label_fonts(label: str) -> tuple[str | None, int | None, int | None]:
+    """Pull the font-family, font-weight and font-size out of a typography label.
 
     The v3 label reads "<importance> | <font-family> | <font-size>pt | <font-weight> |
     <alignment>"; only some fields may be present and their order can wobble. Weight is the
     100-900 integer; family is the first remaining field that is not a size ("18pt"), a weight,
-    or an alignment token (l/c/r or centered/left/right). Size is deliberately discarded.
-    Returns (None, None) when the label carries no font fields."""
+    or an alignment token (l/c/r or centered/left/right). The size (an unreliable ABSOLUTE, but a
+    reliable EQUALITY signal — the model gives sibling elements one pt) is kept only for the
+    optional size-cohort render mode; the default sizing still comes from OCR true-height.
+    Returns (None, None, None) when the label carries no font fields."""
     parts = [part.strip() for part in label.split("|")]
     family: str | None = None
     weight: int | None = None
+    size: int | None = None
     for part in parts[1:]:  # parts[0] is the importance code (t/h/b/m)
         lowered = part.lower()
         if not part or _ALIGN_WORD.fullmatch(lowered):
             continue
-        if re.fullmatch(r"\d{1,3}\s*pt", lowered):  # font-size: parsed off, not kept
+        pt = re.fullmatch(r"(\d{1,3})\s*pt", lowered)
+        if pt:  # font-size: kept for the size-cohort mode, ignored by the default sizing
+            size = int(pt.group(1))
             continue
         match = re.fullmatch(r"[1-9]00", part)
         if match:
@@ -309,7 +322,7 @@ def _parse_label_fonts(label: str) -> tuple[str | None, int | None]:
             continue
         if family is None:
             family = part
-    return family, weight
+    return family, weight, size
 
 
 def _is_separator(line: str) -> bool:
