@@ -10,14 +10,20 @@ from app.replacement.geometry import _ANGLE_DEADZONE_DEG
 from app.replacement.layout.sweep import _ink_runs
 
 
-# An ALPHANUMERIC enumerate marker at the START of a cell: "1."/"2)"/"(a)"/"A."/"ii.". OCR reads the
-# digit/letter reliably, so we redraw it as text on the cell. A GLYPH bullet ("•"/"*"/"-"/"◊") is
-# deliberately NOT matched here: glyphs route to the ink-scan path that keeps the original glyph in
-# place, which renders the SAME glyph uniformly whether or not OCR happened to read it on a given line
-# (mixed OCR recognition across a bullet list otherwise splits identical bullets over two paths). The
-# trailing ``(?=\s)`` keeps a price ("1.69") or a word from matching.
+# An ALPHANUMERIC enumerate marker at the START of a cell: "1."/"2)"/"(a)"/"A."/"ii.", or a dotted
+# multi-level section number "3.4.1"/"A.1.2" (two or more dot-joined segments — OCR merges those
+# into the title's cell on ToC/outline rows, so without the redraw the erase swallows the number
+# and the translation drops it). OCR reads the digit/letter reliably, so we redraw it as text on
+# the cell. A GLYPH bullet ("•"/"*"/"-"/"◊") is deliberately NOT matched here: glyphs route to the
+# ink-scan path that keeps the original glyph in place, which renders the SAME glyph uniformly
+# whether or not OCR happened to read it on a given line (mixed OCR recognition across a bullet
+# list otherwise splits identical bullets over two paths). The trailing ``(?=\s)`` keeps a price
+# ("1.69") or a word from matching; a single-dot decimal never matches (that IS a price), so a
+# plain two-level "2.3 Title" row stays off this path — only "x.y."-and-deeper forms qualify.
 _ENUMERATE_MARKER = re.compile(
-    r"^\s*(\([A-Za-z0-9]{1,3}\)|[A-Za-z0-9]{1,3}[.)])(?=\s)"
+    r"^\s*(\([A-Za-z0-9]{1,3}\)"
+    r"|(?:[A-Za-z0-9]{1,3}\.){2,}[A-Za-z0-9]{0,3}[.)]?"
+    r"|[A-Za-z0-9]{1,3}[.)])(?=\s)"
 )
 
 
@@ -72,7 +78,8 @@ def _strip_leading_glyph(units: list[dict[str, Any]]) -> list[dict[str, Any]]:
 def _bullet_geometry(base: Image.Image, frame: tuple, angle: float) -> tuple[float, float] | None:
     """For a bullet line, return (text_start_x, bullet_y_center) — where the text starts (past
     the leading bullet glyph and its gap) and the bullet glyph's vertical centre. None when no
-    clear glyph+gap is found (or the line is tilted, where the axis-aligned scan is unreliable).
+    clear glyph+gap is found near the line's left edge (or the line is tilted, where the
+    axis-aligned scan is unreliable).
     Scans the line's vertical band from a margin LEFT of the plane edge, because the OCR cell
     box's left wanders relative to the fixed bullet (sometimes landing right of it). The original
     bullet stays in the image; the caller starts the erase/anchor at the text and centres the
@@ -107,9 +114,24 @@ def _bullet_geometry(base: Image.Image, frame: tuple, angle: float) -> tuple[flo
             continue
         rows = np.where(mask[:, runs[i][0]:runs[i][1] + 1].any(axis=1))[0]
         row_span = (rows.max() - rows.min() + 1) if len(rows) else 0
-        dot_like = width <= 0.4 * line_h
+        # A bullet glyph is SMALL in a mix a letter never is: compact in both dimensions (a
+        # dot/square/diamond at ~half the line height or less) or wide-but-flat (a dash). A
+        # letter keeps one dimension at ~0.6x+ — so BOTH rules cap the ink height: without the
+        # compact rule's height cap a narrow CAP-HEIGHT letter ("I"/"l"/"1", ~0.1 x 0.8) counted
+        # as a dot, anchored the erase after itself, and survived as a stray "|" before the
+        # re-rendered line.
+        compact = width <= 0.55 * line_h and row_span <= 0.55 * line_h
         dash_like = width <= 0.9 * line_h and row_span <= 0.35 * line_h
-        if dot_like or dash_like:
+        if compact or dash_like:
+            text_start = float(x0 + runs[i + 1][0])
+            # A real bullet sits AT the line's left edge: its glyph (<=0.9x line height) plus gap
+            # never puts the text start more than ~1.2x line height past the OCR box's left. A
+            # match deeper into the line is a narrow letter/digit inside the TEXT (the VLM flags
+            # ToC/numbered rows as bullets with no glyph present) — anchoring there would leave
+            # the words left of it standing and squeeze the translation into the remainder. Any
+            # later run sits deeper still, so give up rather than scan on.
+            if text_start > xmin + 1.5 * line_h:
+                return None
             bullet_y = y0 + (rows.min() + rows.max()) / 2.0 if len(rows) else (y0 + y1) / 2.0
-            return float(x0 + runs[i + 1][0]), float(bullet_y)
+            return text_start, float(bullet_y)
     return None

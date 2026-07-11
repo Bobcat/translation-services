@@ -323,6 +323,107 @@ def test_bullet_geometry_accepts_a_wide_flat_dash_but_not_line_tall_edge_ink() -
     assert edge_case is None or edge_case[0] > 41
 
 
+def test_bullet_geometry_rejects_a_match_deep_inside_the_text() -> None:
+    # The VLM flags ToC/numbered rows as bullets with the section number as marker, but the line
+    # carries NO glyph: the scan then lands on a narrow letter followed by a word gap INSIDE the
+    # text. Anchoring there erased only the line's tail — the words left of it stayed standing at
+    # full size with the translation squeezed in behind. A candidate deeper than ~1.5x line height
+    # past the box left is no bullet: give up instead.
+    from app.replacement.layout.markers import _bullet_geometry
+
+    img = Image.new("RGB", (400, 60), (255, 255, 255))
+    draw = ImageDraw.Draw(img)
+    # a word of tightly-packed strokes at the left edge (intra-word gaps too small to qualify),
+    # then a bullet-SHAPED blob deep in the line followed by a word gap and more text: the blob
+    # passes the shape rules, so only the depth guard can reject it
+    for x in range(14, 100, 6):
+        draw.rectangle((x, 15, x + 4, 35), fill=(0, 0, 0))
+    draw.rectangle((150, 21, 157, 28), fill=(0, 0, 0))  # 8x8 blob: compact, but deep in the text
+    for x in range(190, 300, 6):
+        draw.rectangle((x, 15, x + 4, 38), fill=(0, 0, 0))
+    frame = (None, None, 12.0, 320.0, 14.0, 34.0)
+    assert _bullet_geometry(img, frame, 0.0) is None
+
+    # control: the same line WITH a real dash bullet at the edge still anchors right after it
+    with_bullet = Image.new("RGB", (400, 60), (255, 255, 255))
+    draw = ImageDraw.Draw(with_bullet)
+    draw.rectangle((14, 28, 26, 31), fill=(0, 0, 0))  # the dash bullet
+    for x in range(40, 130, 9):
+        draw.rectangle((x, 15, x + 4, 35), fill=(0, 0, 0))
+    geometry = _bullet_geometry(with_bullet, frame, 0.0)
+    assert geometry is not None
+    assert abs(geometry[0] - 40) <= 2
+
+
+def test_bullet_geometry_accepts_a_square_glyph_but_not_a_letter_tall_block() -> None:
+    # A square bullet ("■", ~half the line height in BOTH dimensions) is neither narrow (dot)
+    # nor flat (dash): it needs the compact rule. A letter-sized block (one dimension ~0.6x+)
+    # must still not pass, or any bold capital would read as a bullet.
+    from app.replacement.layout.markers import _bullet_geometry
+
+    img = Image.new("RGB", (300, 60), (255, 255, 255))
+    draw = ImageDraw.Draw(img)
+    draw.rectangle((14, 20, 26, 32), fill=(0, 30, 90))  # square: 13x13 on a 27px line
+    for x in range(40, 130, 9):
+        draw.rectangle((x, 12, x + 4, 38), fill=(0, 0, 0))  # letter strokes, line-tall
+    frame = (None, None, 16.0, 280.0, 12.0, 39.0)  # box left overlaps the square (the clip case)
+    geometry = _bullet_geometry(img, frame, 0.0)
+    assert geometry is not None
+    assert abs(geometry[0] - 40) <= 2  # text starts past the square, which stays untouched
+
+    letter = Image.new("RGB", (300, 60), (255, 255, 255))
+    draw = ImageDraw.Draw(letter)
+    draw.rectangle((14, 14, 30, 36), fill=(0, 0, 0))  # letter-tall block: 17x23 on a 27px line
+    for x in range(44, 130, 6):  # tightly packed: intra-word gaps must not qualify as bullet gaps
+        draw.rectangle((x, 12, x + 4, 38), fill=(0, 0, 0))
+    assert _bullet_geometry(letter, frame, 0.0) is None
+
+
+def test_bullet_geometry_rejects_a_cap_height_first_letter() -> None:
+    # A narrow CAP-HEIGHT first letter ("I"/"l"/"1") is not a bullet: it is ~0.1x wide but
+    # ~0.8x tall. The old dot rule checked width only, took the "I" of a title for the glyph,
+    # anchored the erase after it, and the letter survived as a stray "|" before the
+    # re-rendered translation.
+    from app.replacement.layout.markers import _bullet_geometry
+
+    img = Image.new("RGB", (300, 60), (255, 255, 255))
+    draw = ImageDraw.Draw(img)
+    draw.rectangle((18, 15, 20, 33), fill=(0, 0, 0))  # "I": 3px wide, 19px tall on a 24px line
+    for x in range(26, 130, 6):  # the rest of the word, tightly packed
+        draw.rectangle((x, 15, x + 4, 33), fill=(0, 0, 0))
+    frame = (None, None, 16.0, 280.0, 13.0, 37.0)
+    assert _bullet_geometry(img, frame, 0.0) is None
+
+    # control: a real dot bullet on the same line geometry still anchors
+    dot = Image.new("RGB", (300, 60), (255, 255, 255))
+    draw = ImageDraw.Draw(dot)
+    draw.rectangle((16, 22, 23, 29), fill=(0, 0, 0))  # 8x8 dot
+    for x in range(34, 130, 6):
+        draw.rectangle((x, 15, x + 4, 33), fill=(0, 0, 0))
+    geometry = _bullet_geometry(dot, frame, 0.0)
+    assert geometry is not None
+    assert abs(geometry[0] - 34) <= 2
+
+
+def test_cell_marker_accepts_dotted_section_numbers_but_not_decimals() -> None:
+    # OCR merges a ToC/outline row's section number into the title's cell ("3.4.1 Title"); the
+    # number must take the redraw path (erase all, re-prepend) or the erase swallows it while the
+    # translation drops it. A single-dot decimal is a price and must stay unmatched; so does a
+    # plain two-level "2.3" without a trailing dot (same shape as a decimal — the named limit).
+    from app.replacement.layout.markers import _cell_marker
+
+    def unit(source):
+        return {"source_text": source, "bullet_marker": ""}
+
+    assert _cell_marker(unit("3.4.1 Gegevensgevoeligheid en privacy")) == "3.4.1"
+    assert _cell_marker(unit("3.4. Regels voor het delen")) == "3.4."
+    assert _cell_marker(unit("A.1.2 Bijlagesectie")) == "A.1.2"
+    assert _cell_marker(unit("1. Inleiding")) == "1."
+    assert _cell_marker(unit("1.69 korting")) is None
+    assert _cell_marker(unit("2.3 Titel zonder punt")) is None
+    assert _cell_marker(unit("3.4.1nogeenwoord")) is None  # no whitespace after -> not a marker
+
+
 def test_clean_right_extension_stops_at_ink_protected_cells_and_the_cap() -> None:
     from app.replacement.layout.planning import _clean_right_extension
 
