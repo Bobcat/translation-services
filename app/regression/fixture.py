@@ -15,6 +15,7 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass
+from dataclasses import field
 from pathlib import Path
 from typing import Any
 
@@ -33,6 +34,9 @@ class Fixture:
     request_flags: dict[str, Any]
     grouping_model: str
     target_lang: str
+    # The layout regions align ran with at capture time (empty for fixtures captured before
+    # layout evidence existed — replay then feeds align None, the pre-layout path).
+    layout_regions: list[dict[str, Any]] = field(default_factory=list)
 
     @property
     def preserve_heuristic_text(self) -> bool:
@@ -81,6 +85,7 @@ class Fixture:
             "request_flags": self.request_flags,
             "grouping_model": self.grouping_model,
             "target_lang": self.target_lang,
+            "layout_regions": self.layout_regions,
         }
 
     @classmethod
@@ -94,6 +99,7 @@ class Fixture:
             request_flags=dict(data.get("request_flags") or {}),
             grouping_model=str(data.get("grouping_model") or ""),
             target_lang=str(data.get("target_lang") or ""),
+            layout_regions=list(data.get("layout_regions") or []),
         )
 
 

@@ -21,6 +21,7 @@ from app.grouping.heuristics import _is_continuation
 from app.grouping.heuristics import _is_icon_fragment
 from app.grouping.heuristics import _is_nontranslatable
 from app.grouping.heuristics import _near
+from app.grouping import layout as layout_evidence
 from app.grouping.tokens import _fuzzy_tokens
 from app.grouping.tokens import _token_pair_matches
 from app.grouping.tokens import _token_score
@@ -55,22 +56,37 @@ def build_units_from_hint(
     hint_sizes: list[int | None] | None = None,
     hint_bullets: list[bool] | None = None,
     hint_bullet_markers: list[str | None] | None = None,
+    layout_regions: list[dict[str, Any]] | None = None,
 ) -> GroupingResult:
     hint_token_sets = [set(_tokens(text)) for text in hint_units]
     # The fuzzy fallback scans the UNFOLDED hint tokens: ligature folding is for the exact
     # match only (see tokens._FOLD), so a ligature misread cannot ratio-match onto a line.
     hint_fuzzy_sets = [set(_fuzzy_tokens(text)) for text in hint_units]
     token_to_hints = _build_hint_index(hint_token_sets)
+    # Layout evidence (app.grouping.layout), used only when its own document_gate opens: cells
+    # inside image/chart regions keep their original pixels (empty match -> no label -> routed to
+    # ignored below), and multi-column pages get per-column position chains. Gate closed or no
+    # regions -> both stay inert and this is bit-for-bit the pre-layout pipeline.
+    preserved: set[int] = set()
+    cell_columns: list[int | None] | None = None
+    layout_gate_open = bool(layout_regions) and layout_evidence.document_gate(layout_regions, cells)
+    if layout_gate_open:
+        preserved = layout_evidence.preserved_cell_indices(layout_regions, cells)
+        cell_columns = layout_evidence.cell_columns(layout_regions, cells)
     matches = [
-        _match_scores(
+        _Match(candidates=[], score=0.0)
+        if index in preserved
+        else _match_scores(
             cell,
             hint_token_sets,
             _candidate_hints(cell, token_to_hints),
             fuzzy_sets=hint_fuzzy_sets,
         )
-        for cell in cells
+        for index, cell in enumerate(cells)
     ]
-    positions, positions_anchored = _anchored_positions(cells, matches, len(hint_units))
+    positions, positions_anchored = _anchored_positions(
+        cells, matches, len(hint_units), cell_columns=cell_columns
+    )
     # A cell whose best token-match is a single hint line is CONFIDENT; the rest are ambiguous (a
     # word shared by several lines). An ambiguous cell takes the line of its confident line-neighbours
     # — reading-flow contiguity — instead of a hair's-breadth position tie-break that flips it to the
@@ -97,10 +113,64 @@ def build_units_from_hint(
             previous_label = label
             previous_cell = cell
 
+    # Leftover rescue for multi-column pages. The anchored positions interpolate over the FLAT
+    # reading order, so on a two-column page the other column's cells drag a paragraph's trailing
+    # line toward their own hint indices — the position guard then rejects every text candidate
+    # (score-1.0 included) before sticky can bind it, the line orphans, and its words render TWICE
+    # (the hint-fed translation of its paragraph already carries them). Rescue is purely additive
+    # and local: only a cell that stayed unlabeled, only onto the label of the cell geometrically
+    # directly above it in its own column (same margin — _is_continuation), and only when
+    #   (a) the cell's own tokens clear the bind threshold ON that neighbour's line — the token
+    #       gate that keeps a stray like "BETALING" under "MAESTRO" out. Scored against the line
+    #       directly (not via ``match.candidates``): an OCR-garbled token ("Dental 1") pulls the
+    #       candidate list to whatever far line happens to carry the garble, while the neighbour's
+    #       line is the one the continuation geometry vouches for; and
+    #   (b) the cell CONTRIBUTES a token the line's current claimants do not cover yet. A wrapped
+    #       continuation is the line's uncovered tail; a REPEATED row ("Project" printed twice,
+    #       stacked) covers nothing new — gluing it on would get it dropped as a redundant claim
+    #       and leave the second print untranslated, so it stays its own leftover unit (which
+    #       still translates and renders at its own spot).
+    # The claim consolidation below then merges the cell into that claim, where the redundancy
+    # checks still apply.
+    for index, (cell, match) in enumerate(zip(cells, matches)):
+        if labels[index] is not None or match.score < _MATCH_THRESHOLD:
+            continue
+        cell_tokens = _tokens(str(cell.get("text") or ""))
+        for j in range(index - 1, -1, -1):
+            if labels[j] is None:
+                continue
+            if _is_continuation(cells[j], cell):
+                line = labels[j]
+                on_line = sum(
+                    _token_score(token, hint_token_sets[line], hint_fuzzy_sets[line])
+                    for token in cell_tokens
+                )
+                covered = {
+                    token
+                    for k, label_k in enumerate(labels)
+                    if label_k == line
+                    for token in _tokens(str(cells[k].get("text") or ""))
+                }
+                contributes = any(token not in covered for token in cell_tokens)
+                if cell_tokens and contributes and on_line / len(cell_tokens) >= _MATCH_THRESHOLD:
+                    labels[index] = line
+                break  # the geometric upstairs neighbour decides; farther cells are not "above"
+
     groups = _group_consecutive(labels)
     groups, ignored_indices = _consolidate_hint_claims(groups, cells, hint_units)
     groups, icon_indices = _drop_icon_fragments(groups, cells, hint_units)
     ignored_indices = list(ignored_indices) + icon_indices
+    if preserved:
+        # Preserve routing: a preserved cell has an empty match, so it always arrives here as
+        # its own leftover group — move it to ignored (original pixels: not erased, not
+        # translated, not rendered) instead of letting it become a per-cell leftover unit.
+        kept_groups: list[tuple[int | None, list[int]]] = []
+        for label, indices in groups:
+            if label is None and all(index in preserved for index in indices):
+                ignored_indices.extend(indices)
+            else:
+                kept_groups.append((label, indices))
+        groups = kept_groups
     units = [
         _build_unit(
             cells=cells,
@@ -134,6 +204,11 @@ def build_units_from_hint(
             "translatable_member_count": sum(
                 1 for unit in units for member in unit.members if member.translate
             ),
+            "layout_gate_open": layout_gate_open,
+            "layout_preserved_cell_count": len(preserved),
+            "layout_column_count": len({c for c in cell_columns if c is not None})
+            if cell_columns
+            else 0,
         },
     )
 
@@ -544,7 +619,10 @@ def _line_anchor(index: int, cells: list[dict[str, Any]], confident: list[int | 
 
 
 def _anchored_positions(
-    cells: list[dict[str, Any]], matches: list[_Match], n_hints: int
+    cells: list[dict[str, Any]],
+    matches: list[_Match],
+    n_hints: int,
+    cell_columns: list[int | None] | None = None,
 ) -> tuple[list[float], bool]:
     """Each cell's expected hint index, used only to break ties in ``_pick_hint``,
     plus whether the estimate is anchor-based (and so trustworthy enough for the
@@ -556,19 +634,40 @@ def _anchored_positions(
     non-decreasing chain of those seeds keeps the map monotone (a rogue match drops
     out); every cell's position is interpolated between its surrounding anchors. The
     global linear estimate is the fallback — it mis-points on pages whose line density
-    varies (a dense menu above a sparse footer)."""
+    varies (a dense menu above a sparse footer).
+
+    ``cell_columns`` (layout evidence, multi-column pages only): "lower on the page ->
+    further down the hint list" only holds per COLUMN — the hint lists one flow after
+    the other while their cells interleave in y, so the global chain drags every cell
+    near another column toward that column's indices and the position guard then vetoes
+    its true line. A cell with a column id interpolates on its column's own seed chain;
+    cells without one (outside text regions, in a spanner, or in a column too seed-poor
+    to chain) keep the global chain."""
     tops = [float((cell.get("bbox") or {}).get("top", 0.0)) for cell in cells]
     if not tops or n_hints <= 1:
         return [0.0] * len(cells), False
     seeds = [
-        (top, match.candidates[0])
-        for top, match in zip(tops, matches)
+        (index, top, match.candidates[0])
+        for index, (top, match) in enumerate(zip(tops, matches))
         if len(match.candidates) == 1 and match.score >= _MATCH_THRESHOLD
     ]
-    anchors = _chain(seeds)
+    anchors = _chain([(top, hint) for _, top, hint in seeds])
     if len(anchors) < 2:
         return _linear_positions(tops, n_hints), False
-    return [_interpolate(top, anchors, n_hints) for top in tops], True
+    column_chains: dict[int, list[tuple[float, int]]] = {}
+    if cell_columns is not None:
+        for column_id in {c for c in cell_columns if c is not None}:
+            chain = _chain(sorted(
+                (top, hint) for index, top, hint in seeds if cell_columns[index] == column_id
+            ))
+            if len(chain) >= 2:
+                column_chains[column_id] = chain
+    positions = []
+    for index, top in enumerate(tops):
+        column_id = cell_columns[index] if cell_columns is not None else None
+        chain = column_chains.get(column_id) if column_id is not None else None
+        positions.append(_interpolate(top, chain or anchors, n_hints))
+    return positions, True
 
 
 def _chain(seeds: list[tuple[float, int]]) -> list[tuple[float, int]]:

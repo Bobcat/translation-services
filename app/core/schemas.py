@@ -68,12 +68,14 @@ class RequestPayload(BaseModel):
     # extent behaviour.
     size_metric_mode: Literal["extent", "band"] = "extent"
     # Cross-element size uniformity from the VLM's per-element font-size (pt) label. "off"
-    # (default) sizes each element from its own OCR true-height. "vlm" groups elements the VLM
-    # gave one pt into a size cohort and — when their OCR heights AGREE (the VLM's equal claim
-    # holds) — snaps the whole cohort to its OCR median, so a list the VLM judged one size
-    # renders uniform (and a short item sizes up and re-wraps over its lines instead of
-    # collapsing to one tiny line). A cohort whose OCR heights disagree keeps per-element sizing.
-    size_cohort_mode: Literal["off", "vlm"] = "off"
+    # sizes each element from its own OCR true-height. "vlm" groups elements the VLM gave one
+    # pt into a size cohort and — when their OCR heights AGREE (the VLM's equal claim holds) —
+    # snaps the whole cohort to its OCR median, so a list the VLM judged one size renders
+    # uniform (and a short item sizes up and re-wraps over its lines instead of collapsing to
+    # one tiny line). A cohort whose OCR heights disagree keeps per-element sizing. Default
+    # "vlm" since 2026-07-11: evaluated across the testset — visibly calmer renders, no
+    # regressions observed; the OCR-agreement gate bounds any snap to the spread already there.
+    size_cohort_mode: Literal["off", "vlm"] = "vlm"
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 

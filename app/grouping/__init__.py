@@ -38,6 +38,7 @@ def group_cells_into_units(
     cells: list[dict[str, Any]],
     hint: GroupingHint,
     model: str,
+    layout_regions: list[dict[str, Any]] | None = None,
 ) -> GroupingResult:
     resolved_model = str(model or "").strip()
     if not cells:
@@ -60,6 +61,7 @@ def group_cells_into_units(
         hint_sizes=hint.font_sizes,
         hint_bullets=hint.bullets,
         hint_bullet_markers=hint.bullet_markers,
+        layout_regions=layout_regions,
     )
     return replace(
         result,

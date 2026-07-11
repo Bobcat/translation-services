@@ -71,6 +71,7 @@ def build_fixture(response: dict[str, Any], *, source_bytes: bytes) -> fx.Fixtur
         },
         grouping_model=str(metadata.get("grouping_model") or ""),
         target_lang=str(metadata.get("target_lang_code") or ""),
+        layout_regions=list(metadata.get("layout_regions") or []),
     )
 
 
@@ -138,6 +139,9 @@ def _fixture_key(fixture: fx.Fixture) -> str:
         "preserve_heuristic_text": fixture.preserve_heuristic_text,
         "grouping_model": fixture.grouping_model,
         "target_lang": fixture.target_lang,
+        # Layout evidence changes what align does with the same cells+hint (gate, columns,
+        # preserve), so it is part of the replay identity.
+        "layout_regions": fixture.layout_regions,
     }
     return fx.sha256(json.dumps(identity, sort_keys=True, ensure_ascii=False).encode("utf-8"))
 

@@ -14,6 +14,7 @@ translated text back into the image). The output image is still the debug overla
 """
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from dataclasses import replace
 from io import BytesIO
@@ -25,6 +26,7 @@ from typing import Callable
 from app.core.config import AppSettings
 from app.grouping import group_cells_into_units
 from app.grouping import request_grouping_hint
+from app.grouping.layout import detect_layout_regions
 from app.grouping.field_geometry import geometry_adjusted_hints
 from app.grouping.overlay import render_grouping_overlay_debug
 from app.grouping.units import TranslationUnit
@@ -82,14 +84,29 @@ def run_translate_image_pipeline(
     # server pair, anything else -> the en recognizer).
     grouping_model = str(request.get("grouping_model") or "").strip() or settings.llm_pool.grouping_model
     llm_calls: list[dict[str, Any]] = []  # payload + response of every VLM/LLM call, in order
-    grouping_started_at = time.perf_counter()
-    hint = request_grouping_hint(
-        settings=settings,
-        input_path=input_path,
-        model=grouping_model,
-        call_log=llm_calls,
-    )
-    grouping_wall_ms = _elapsed_ms(grouping_started_at)
+    # Layout detection is image-only too and ~30-80ms warm, so it runs on a worker thread while
+    # the multi-second VLM call blocks here — its wall-clock cost hides entirely behind the hint.
+    # Collected right before align (the only consumer); a failure yields [] (see detect_layout_regions).
+    layout_timing: dict[str, float] = {}
+
+    def _timed_layout() -> list[dict[str, Any]]:
+        layout_started_at = time.perf_counter()
+        regions = detect_layout_regions(input_path)
+        layout_timing["wall_ms"] = _elapsed_ms(layout_started_at)
+        return regions
+
+    with ThreadPoolExecutor(max_workers=1) as layout_executor:
+        layout_future = layout_executor.submit(_timed_layout)
+        grouping_started_at = time.perf_counter()
+        hint = request_grouping_hint(
+            settings=settings,
+            input_path=input_path,
+            model=grouping_model,
+            call_log=llm_calls,
+        )
+        grouping_wall_ms = _elapsed_ms(grouping_started_at)
+        layout_regions = layout_future.result()
+    layout_wall_ms = layout_timing.get("wall_ms", 0.0)
 
     checkpoint()
     ocr_language = resolve_ocr_language(settings.ocr, hint.units)
@@ -109,6 +126,7 @@ def run_translate_image_pipeline(
         cells=cells,
         hint=hint,
         model=grouping_model,
+        layout_regions=layout_regions or None,
     )
     align_wall_ms = _elapsed_ms(align_started_at)
 
@@ -152,7 +170,7 @@ def run_translate_image_pipeline(
     erase_fill_mode = str(request.get("erase_fill_mode") or "inpaint").strip() or "inpaint"
     width_fit_mode = str(request.get("width_fit_mode") or "footprint").strip() or "footprint"
     size_metric_mode = str(request.get("size_metric_mode") or "extent").strip() or "extent"
-    size_cohort_mode = str(request.get("size_cohort_mode") or "off").strip() or "off"
+    size_cohort_mode = str(request.get("size_cohort_mode") or "vlm").strip() or "vlm"
     # Opt-in: feed the geometry-adjusted hints (a `|` injected where a column gap shows the VLM
     # missed a rule-3/4 boundary) instead of the raw VLM hints. Same translation path, different input.
     hint_units_for_translation = hint_units_adjusted if use_geometry_columns else grouping.hint_units
@@ -249,6 +267,7 @@ def run_translate_image_pipeline(
                 "replacement": replacement_wall_ms,
                 "ocr_overlay": ocr_overlay_wall_ms,
                 "grouping_overlay": grouping_overlay_wall_ms,
+                "layout": layout_wall_ms,
             },
         },
         "grouping": {
@@ -298,6 +317,10 @@ def run_translate_image_pipeline(
         "translation_source": "llm_pool",
         "translation_input": sent_input,
         "translation_instructions": sent_instructions,
+        # The layout evidence align ran with — persisted so a regression capture can freeze it
+        # (replay must feed align the same regions) and the workbench can inspect the gate.
+        "layout_regions": layout_regions,
+        "layout_gate_open": bool(grouping.metrics.get("layout_gate_open")),
         "note": "Returns OCR cells, VLM grouping, per-unit translations, and a Tier-1 re-placement rendering (model-free simple replace).",
     }
     if projected_overlay_debug is not None:
@@ -328,6 +351,10 @@ def run_translate_image_pipeline(
         metrics={
             "ocr_wall_ms": ocr_wall_ms,
             "grouping_wall_ms": grouping_wall_ms,
+            "layout_wall_ms": layout_wall_ms,
+            "layout_gate_open": bool(grouping.metrics.get("layout_gate_open")),
+            "layout_preserved_cell_count": int(grouping.metrics.get("layout_preserved_cell_count") or 0),
+            "layout_column_count": int(grouping.metrics.get("layout_column_count") or 0),
             "align_wall_ms": align_wall_ms,
             "translation_wall_ms": translation_wall_ms,
             "replacement_wall_ms": replacement_wall_ms,

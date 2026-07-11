@@ -447,6 +447,137 @@ def test_parse_grouping_output_strips_bullet_sentinel_and_captures_marker() -> N
         assert hint.bullet_markers[0] == expected_marker, line
 
 
+def test_parse_dangling_star_bullet_label_strips_and_flags() -> None:
+    # On a bullet line g4 opens the star wrapper but writes the "|@blt" element where the closing
+    # star (and often the colon) belong, so si never closes: "*b|CM|12pt|400|l:|@blt|@•|item" (colon,
+    # no closing star) and "*b|CM|12pt|400|l|@blt|@•|item" (no colon either — the residual variant).
+    # The closed form "*...l:*|@blt|..." is covered above. Without eating that leading "*" the whole
+    # line — label + sentinel + text — leaked into the unit and rode into the translation. Both must
+    # strip to a clean bullet with marker, level and font parsed exactly as the closed form.
+    cases = [
+        ("*b|CM|12pt|400|l:|@blt|@•|First item", "First item", True, "•"),
+        ("*b|CM|12pt|400|l|@blt|@•|First item", "First item", True, "•"),
+        ("*b|CM|12pt|400|l|@blt|■|Second item", "Second item", True, "■"),
+        ("*b|CM|12pt|400|l|@blt|1. First item", "1. First item", True, None),
+    ]
+    for line, expected_text, expected_bullet, expected_marker in cases:
+        hint = parse_grouping_output(line)
+        assert hint.units[0] == expected_text, line
+        assert hint.bullets[0] is expected_bullet, line
+        assert hint.bullet_markers[0] == expected_marker, line
+        assert hint.levels[0] == "body", line
+        assert hint.font_families[0] == "CM", line
+
+
+def test_two_column_wrapped_tail_rescued_onto_its_paragraph() -> None:
+    # Two-column page: the left column's cells interleave with the right column in reading
+    # order, so the anchored positions drag the right paragraph's trailing line toward the
+    # left column's hint indices — the position guard then rejects every text candidate
+    # (including the true one) and the tail orphans: its words render twice (the hint-fed
+    # translation of its paragraph already carries them). The rescue binds a leftover cell
+    # to the label of the cell geometrically directly above it in its own column when its
+    # tokens clear the bind threshold on that line.
+    hints = [
+        "Kolomtitel alfa bravo charlie delta",   # 0: right-column paragraph, wraps over 3 lines
+        "Linksregel een", "Linksregel twee", "Linksregel drie", "Linksregel vier",
+        "Linksregel vijf", "Linksregel zes", "Linksregel zeven", "Linksregel acht",
+        "Slotwoord charlie delta elders",        # 9: far line that also carries the tail's tokens
+    ]
+    cells = [
+        {"id": 1, "text": "Kolomtitel alfa", "bbox": {"left": 300, "top": 100, "width": 200, "height": 20}},
+        {"id": 2, "text": "Linksregel een", "bbox": {"left": 40, "top": 110, "width": 150, "height": 20}},
+        {"id": 3, "text": "bravo", "bbox": {"left": 300, "top": 130, "width": 90, "height": 20}},
+        {"id": 4, "text": "Linksregel twee", "bbox": {"left": 40, "top": 132, "width": 150, "height": 20}},
+        {"id": 5, "text": "Linksregel drie", "bbox": {"left": 40, "top": 150, "width": 150, "height": 20}},
+        {"id": 6, "text": "charlie delta", "bbox": {"left": 300, "top": 160, "width": 150, "height": 20}},
+        {"id": 7, "text": "Linksregel vier", "bbox": {"left": 40, "top": 170, "width": 150, "height": 20}},
+        {"id": 8, "text": "Linksregel vijf", "bbox": {"left": 40, "top": 190, "width": 150, "height": 20}},
+        {"id": 9, "text": "Linksregel zes", "bbox": {"left": 40, "top": 210, "width": 150, "height": 20}},
+        {"id": 10, "text": "Linksregel zeven", "bbox": {"left": 40, "top": 230, "width": 150, "height": 20}},
+        {"id": 11, "text": "Linksregel acht", "bbox": {"left": 40, "top": 250, "width": 150, "height": 20}},
+        # a REPEATED print of the tail, stacked right below it: contributes no uncovered token,
+        # so the rescue must leave it alone — its own leftover unit, translated at its own spot
+        # (gluing it on would get it consolidation-dropped and leave the second print original)
+        {"id": 13, "text": "charlie delta", "bbox": {"left": 300, "top": 188, "width": 150, "height": 20}},
+        {"id": 12, "text": "Slotwoord charlie delta elders", "bbox": {"left": 40, "top": 400, "width": 260, "height": 20}},
+    ]
+    result = build_units_from_hint(cells=cells, hint_units=hints, model="qwen")
+    by_hint = {u.hint_index: [m.text for m in u.members] for u in result.units}
+    assert by_hint.get(0) == ["Kolomtitel alfa", "bravo", "charlie delta"]
+    # the far line that shares the tail's tokens keeps only its own cell
+    assert by_hint.get(9) == ["Slotwoord charlie delta elders"]
+    leftovers = [[m.text for m in u.members] for u in result.units if u.hint_index is None]
+    assert leftovers == [["charlie delta"]]  # the repeat: own unit, not glued, not dropped
+
+
+def test_layout_columns_bind_the_two_column_tail_directly() -> None:
+    # The same two-column shape, now WITH layout evidence: the columns get their own anchor
+    # chains, the tail's expected position lands on its paragraph, and it binds through the
+    # ordinary matcher — no rescue needed, no leftovers at all.
+    hints = [
+        "Kolomtitel alfa bravo charlie delta",
+        "Linksregel een", "Linksregel twee", "Linksregel drie", "Linksregel vier",
+        "Linksregel vijf", "Linksregel zes", "Linksregel zeven", "Linksregel acht",
+        "Slotwoord charlie delta elders",
+    ]
+    cells = [
+        {"id": 1, "text": "Kolomtitel alfa", "bbox": {"left": 300, "top": 100, "width": 200, "height": 20}},
+        {"id": 2, "text": "Linksregel een", "bbox": {"left": 40, "top": 110, "width": 150, "height": 20}},
+        {"id": 3, "text": "bravo", "bbox": {"left": 300, "top": 130, "width": 90, "height": 20}},
+        {"id": 4, "text": "Linksregel twee", "bbox": {"left": 40, "top": 132, "width": 150, "height": 20}},
+        {"id": 5, "text": "Linksregel drie", "bbox": {"left": 40, "top": 150, "width": 150, "height": 20}},
+        {"id": 6, "text": "charlie delta", "bbox": {"left": 300, "top": 160, "width": 150, "height": 20}},
+        {"id": 7, "text": "Linksregel vier", "bbox": {"left": 40, "top": 170, "width": 150, "height": 20}},
+        {"id": 8, "text": "Linksregel vijf", "bbox": {"left": 40, "top": 190, "width": 150, "height": 20}},
+        {"id": 9, "text": "Linksregel zes", "bbox": {"left": 40, "top": 210, "width": 150, "height": 20}},
+        {"id": 10, "text": "Linksregel zeven", "bbox": {"left": 40, "top": 230, "width": 150, "height": 20}},
+        {"id": 11, "text": "Linksregel acht", "bbox": {"left": 40, "top": 250, "width": 150, "height": 20}},
+        {"id": 12, "text": "Slotwoord charlie delta elders", "bbox": {"left": 40, "top": 400, "width": 200, "height": 20}},
+    ]
+    regions = [
+        {"label": "text", "score": 0.95, "coordinate": [290, 90, 520, 200]},    # right column
+        {"label": "text", "score": 0.93, "coordinate": [30, 100, 250, 280]},    # left column
+        {"label": "text", "score": 0.91, "coordinate": [30, 390, 260, 430]},    # left column, bottom
+    ]
+    result = build_units_from_hint(cells=cells, hint_units=hints, model="qwen",
+                                   layout_regions=regions)
+    by_hint = {u.hint_index: [m.text for m in u.members] for u in result.units}
+    assert by_hint.get(0) == ["Kolomtitel alfa", "bravo", "charlie delta"]
+    assert by_hint.get(9) == ["Slotwoord charlie delta elders"]
+    assert all(u.hint_index is not None for u in result.units)
+
+
+def test_layout_preserve_routes_chart_cells_to_ignored() -> None:
+    # A document page with a chart: the chart's inner labels keep their original pixels —
+    # align routes them to ignored_cell_ids (not erased, not translated, not a leftover
+    # unit) — while the flow text around it binds normally.
+    hints = ["Rapportkop over resultaten", "Toelichting bij de grafiek onderaan"]
+    cells = [
+        {"id": 1, "text": "Rapportkop over resultaten", "bbox": {"left": 40, "top": 30, "width": 400, "height": 24}},
+        {"id": 2, "text": "Toelichting bij de grafiek onderaan", "bbox": {"left": 40, "top": 700, "width": 420, "height": 22}},
+        {"id": 3, "text": "42%", "bbox": {"left": 200, "top": 300, "width": 50, "height": 16}},
+        {"id": 4, "text": "Legenda-item", "bbox": {"left": 220, "top": 400, "width": 90, "height": 14}},
+    ]
+    regions = [
+        {"label": "paragraph_title", "score": 0.95, "coordinate": [30, 20, 460, 70]},
+        {"label": "text", "score": 0.93, "coordinate": [30, 680, 480, 740]},
+        {"label": "figure_title", "score": 0.90, "coordinate": [30, 750, 480, 790]},
+        {"label": "chart", "score": 0.92, "coordinate": [100, 100, 500, 600]},
+    ]
+    result = build_units_from_hint(cells=cells, hint_units=hints, model="qwen",
+                                   layout_regions=regions)
+    assert sorted(result.ignored_cell_ids) == [3, 4]
+    texts = [m.text for u in result.units for m in u.members]
+    assert "42%" not in texts and "Legenda-item" not in texts
+    assert result.metrics["layout_gate_open"] is True
+    assert result.metrics["layout_preserved_cell_count"] == 2
+
+    # gate closed (no regions): the same cells become ordinary leftovers — nothing preserved
+    plain = build_units_from_hint(cells=cells, hint_units=hints, model="qwen")
+    assert plain.ignored_cell_ids == []
+    assert plain.metrics["layout_gate_open"] is False
+
+
 def test_parse_grouping_output_extracts_category_and_units() -> None:
     raw = (
         "CATEGORY: Restaurant Menu\n"

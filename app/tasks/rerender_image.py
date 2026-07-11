@@ -47,7 +47,7 @@ def run_rerender_image_pipeline(
     erase_fill_mode = str(request.get("erase_fill_mode") or "inpaint").strip() or "inpaint"
     width_fit_mode = str(request.get("width_fit_mode") or "footprint").strip() or "footprint"
     size_metric_mode = str(request.get("size_metric_mode") or "extent").strip() or "extent"
-    size_cohort_mode = str(request.get("size_cohort_mode") or "off").strip() or "off"
+    size_cohort_mode = str(request.get("size_cohort_mode") or "vlm").strip() or "vlm"
     rendered_units = _units_for_preserve_heuristic_text(
         units, preserve_heuristic_text=preserve_heuristic_text
     )

@@ -28,7 +28,12 @@ def replay_fixture(
     grouping/align) and ``render_ms``."""
     group_started = time.perf_counter()
     hint = parse_grouping_output(fixture.raw_hint)
-    grouping = group_cells_into_units(cells=fixture.cells, hint=hint, model=fixture.grouping_model)
+    grouping = group_cells_into_units(
+        cells=fixture.cells,
+        hint=hint,
+        model=fixture.grouping_model,
+        layout_regions=fixture.layout_regions or None,
+    )
 
     # Re-apply preserve_heuristic_text BEFORE building the compared unit list: capture froze the
     # snapshot from the post-filter units (response.ocr.translation_units), so the align diff must

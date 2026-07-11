@@ -54,7 +54,12 @@ class GroupingHint:
 # "t|...:" importance code + fields (the code may be a single letter t/h/b/m OR spelled out —
 # "title|"/"header|"/"body|"/"metadata|" — since the model sometimes writes the word the prompt
 # names instead of the letter), or a "fmt" typography label whose importance code was dropped ("|Roboto|16pt|400|
-# l:") — anchored on a "|<digits>pt|" field so an ordinary "word | value" row is never one. A
+# l:") — anchored on a "|<digits>pt|" field so an ordinary "word | value" row is never one. The bare
+# and fmt runs tolerate a dangling opening "*": on a bullet line g4 opens the wrapper but writes the
+# "|@blt" element where the closing "*" (and often the ":") belong — "*b|Arial|11pt|400|l|@blt|…" or
+# "*b|…l:|@blt|…" — so si never closes and, without eating that leading "*", the whole label+sentinel
+# leaked into the text (16/20 runs on a bullet flyer). The bare/fmt runs still stop at ":" and "@",
+# so the "|@blt" item stays in the text for _BULLET_SENTINEL to strip. A
 # a stray "'" from a quoted template is tolerated both before the label and right after the colon
 # ("'t|..c:' text"); a model that wraps the WHOLE "'label:text'" line in one quote pair is unwrapped
 # earlier, in parse_grouping_output (both quote habits occur run to run). The bare/fmt field runs
@@ -64,8 +69,8 @@ _LABELED_LINE = re.compile(
     r"^\s*'?\s*(?:"
     r"\*\*(?P<st>(?:(?!\*\*).)+?)\*\*"
     r"|[*|](?P<si>[^*\n]+?):\s*\*"
-    r"|(?P<bare>(?:title|header|body|metadata|footer|[thbm])\s*\|[^:\[\]\n@]*)"
-    r"|(?P<fmt>\|\s*[^:|\[\]\n]*\|\s*\d{1,3}\s*pt\s*\|[^:\[\]\n@]*)"
+    r"|\*?\s*(?P<bare>(?:title|header|body|metadata|footer|[thbm])\s*\|[^:\[\]\n@]*)"
+    r"|\*?\s*(?P<fmt>\|\s*[^:|\[\]\n]*\|\s*\d{1,3}\s*pt\s*\|[^:\[\]\n@]*)"
     r")\s*'?\s*:?\s*'?\s*\**\s*(?P<rest>.*)$",
     re.IGNORECASE,
 )
