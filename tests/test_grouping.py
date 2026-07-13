@@ -60,8 +60,8 @@ def test_garbled_continuation_claim_merges_instead_of_dropping() -> None:
         {"id": 1, "text": "AHNEDAARBEI extra", "bbox": {"left": 0, "top": 0, "width": 200, "height": 20}},
         {"id": 2, "text": "kortlng", "bbox": {"left": 205, "top": 0, "width": 70, "height": 20}},
     ]
-    kept, dropped = _resolve_claim_clusters(0, [[0], [1]], cells, ["AHNEDAARBEI extra korting"])
-    assert dropped == []
+    kept, demoted, dropped = _resolve_claim_clusters(0, [[0], [1]], cells, ["AHNEDAARBEI extra korting"])
+    assert dropped == [] and demoted == []
     assert sorted(kept[0]) == [0, 1]
 
 
@@ -72,8 +72,8 @@ def test_redundant_garbled_stray_still_drops() -> None:
         {"id": 1, "text": "AHNEDAARBEI extra korting", "bbox": {"left": 0, "top": 0, "width": 260, "height": 20}},
         {"id": 2, "text": "AHNEDAARBEl", "bbox": {"left": 0, "top": 25, "width": 120, "height": 20}},
     ]
-    kept, dropped = _resolve_claim_clusters(0, [[0], [1]], cells, ["AHNEDAARBEI extra korting"])
-    assert kept == [[0]]
+    kept, demoted, dropped = _resolve_claim_clusters(0, [[0], [1]], cells, ["AHNEDAARBEI extra korting"])
+    assert kept == [[0]] and demoted == []
     assert dropped == [1]
 
 
@@ -510,6 +510,34 @@ def test_two_column_wrapped_tail_rescued_onto_its_paragraph() -> None:
     assert leftovers == [["charlie delta"]]  # the repeat: own unit, not glued, not dropped
 
 
+def test_split_logo_fragment_prefers_its_contiguous_line_over_position() -> None:
+    # Letterhead archetype: a two-line logo lockup left, a contact block right, interleaved in
+    # reading order. The lockup's second line shares its tokens with a right-column line that
+    # happens to sit at the same y, so the interpolated position prefers THAT line by a hair —
+    # the fragment then gets icon-dropped there (redundant + detached) and its original pixels
+    # survive untranslated. The phrase tie-break must bind it to the line that contains it as a
+    # contiguous run (its own lockup) instead of the scattered same-token line.
+    hints = [
+        "Merknaam van Kwaliteit",                    # 0: the logo lockup, wrapped over two lines
+        "De Weledele",
+        "Naam Persoon",
+        "Directeur & Hoofd van Afdeling Kwaliteit",  # 3: scatter-carries "van" + "Kwaliteit"
+    ]
+    cells = [
+        {"id": 1, "text": "De Weledele", "bbox": {"left": 1220, "top": 147, "width": 300, "height": 40}},
+        {"id": 2, "text": "Merknaam", "bbox": {"left": 133, "top": 183, "width": 190, "height": 65}},
+        {"id": 3, "text": "Naam Persoon", "bbox": {"left": 1220, "top": 200, "width": 300, "height": 40}},
+        {"id": 4, "text": "van Kwaliteit", "bbox": {"left": 132, "top": 238, "width": 230, "height": 58}},
+        {"id": 5, "text": "Directeur & Hoofd", "bbox": {"left": 1220, "top": 241, "width": 300, "height": 40}},
+        {"id": 6, "text": "van Afdeling Kwaliteit", "bbox": {"left": 1222, "top": 285, "width": 309, "height": 42}},
+    ]
+    result = build_units_from_hint(cells=cells, hint_units=hints, model="qwen")
+    by_hint = {u.hint_index: [m.text for m in u.members] for u in result.units}
+    assert by_hint.get(0) == ["Merknaam", "van Kwaliteit"]
+    assert by_hint.get(3) == ["Directeur & Hoofd", "van Afdeling Kwaliteit"]
+    assert result.ignored_cell_ids == []
+
+
 def test_layout_columns_bind_the_two_column_tail_directly() -> None:
     # The same two-column shape, now WITH layout evidence: the columns get their own anchor
     # chains, the tail's expected position lands on its paragraph, and it binds through the
@@ -655,6 +683,60 @@ def test_parse_continuation_lines_inherit_block_level_and_block() -> None:
     hint = parse_grouping_output(raw)
     assert hint.levels == ["body", "body", "body", "body"]
     assert hint.block_ids == [0, 0, 1, 1]
+
+
+def test_parse_embedded_degraded_label_splits_two_elements() -> None:
+    # Two elements fused onto one line, the second's label mid-line and degraded (pipes ->
+    # spaces, weight dropped) or fully piped: the fragment must not leak into the text and
+    # opens its own element, with its typography recovered.
+    raw = (
+        "*b|Sans|16pt|400|l:* Alpha Corp *b Sans 18pt r:* $23.5 billion spend in 2025\n"
+        "*b|Sans|16pt|400|l:* Beta Ltd *b|Sans|18pt|400|r:* €14.1 billion spend in 2025\n"
+    )
+    hint = parse_grouping_output(raw)
+    assert hint.units == [
+        "Alpha Corp", "$23.5 billion spend in 2025", "Beta Ltd", "€14.1 billion spend in 2025",
+    ]
+    assert hint.levels == ["body", "body", "body", "body"]
+    assert hint.block_ids == [0, 1, 2, 3]
+    assert hint.font_sizes == [16, 18, 16, 18]
+
+
+def test_parse_label_broken_across_newline_leaks_neither_half() -> None:
+    # The fused second label can even break at the newline: the stranded opener ("*b") at the
+    # first line's end and the code-less tail ("Sans 18pt r:*") opening the next line both strip.
+    raw = (
+        "*b|Sans|16pt|400|l:* Alpha Corp *b\n"
+        "Sans 18pt r:* $23.5 billion spend in 2025\n"
+    )
+    hint = parse_grouping_output(raw)
+    assert hint.units == ["Alpha Corp", "$23.5 billion spend in 2025"]
+    assert hint.font_families == ["Sans", "Sans"]
+    assert hint.font_sizes == [16, 18]
+
+
+def test_parse_line_start_spaced_label_recovers_typography() -> None:
+    # A line-start label with the pipes degraded to spaces was already stripped (si run); the
+    # pipe-normalization now also recovers its level and typography.
+    hint = parse_grouping_output("*b Sans 18pt r:* $9.2 billion spend FY2025\n")
+    assert hint.units == ["$9.2 billion spend FY2025"]
+    assert hint.levels == ["body"]
+    assert hint.font_families == ["Sans"]
+    assert hint.font_sizes == [18]
+
+
+def test_parse_pt_mention_in_content_stays_text() -> None:
+    # Ordinary content mentioning pt sizes (no star-opener before, no star after the colon)
+    # must never be taken for a label fragment.
+    raw = (
+        "b|Serif|16pt|400|l: Beschikbaar in 10pt, 12pt en 14pt: alle kleuren\n"
+        "Vraag naar 12pt formaat: gratis proefdruk\n"
+    )
+    hint = parse_grouping_output(raw)
+    assert hint.units == [
+        "Beschikbaar in 10pt, 12pt en 14pt: alle kleuren",
+        "Vraag naar 12pt formaat: gratis proefdruk",
+    ]
 
 
 def test_parse_single_star_colon_inside_label_is_the_locked_format() -> None:
@@ -884,3 +966,68 @@ def test_geometry_skips_an_all_numeric_row_with_no_translatable_field() -> None:
     adjusted, changes = geometry_adjusted_hints([unit], ["15°"])
     assert adjusted == ["15°"]
     assert changes == []
+
+
+def test_symbol_leftover_absorbed_into_its_line_and_translated() -> None:
+    # OCR splits a styled '&' off a byline into its own cell; no tokens -> it can never bind by
+    # matching, orphans as a leftover, keeps its pixels, and the line's translation renders the
+    # '&' AGAIN next to them. It must fold back into the element whose printed line it sits on
+    # (word-gap adjacency + the hint line carries the symbol) with translate=True so it is
+    # erased. A symbol the hint does NOT carry (a decorative dingbat) stays its own leftover.
+    hints = ["by Alpha Beta, & Gamma Delta"]
+    cells = [
+        {"id": 1, "text": "by Alpha Beta,", "bbox": {"left": 100, "top": 100, "width": 300, "height": 30}},
+        {"id": 2, "text": "&", "bbox": {"left": 100, "top": 140, "width": 30, "height": 30}},
+        {"id": 3, "text": "Gamma Delta", "bbox": {"left": 136, "top": 140, "width": 260, "height": 30}},
+        {"id": 4, "text": "◆", "bbox": {"left": 100, "top": 400, "width": 30, "height": 30}},
+    ]
+    result = build_units_from_hint(cells=cells, hint_units=hints, model="qwen")
+    by_hint = {u.hint_index: u for u in result.units}
+    members = {m.cell_id: m for m in by_hint[0].members}
+    assert set(members) == {1, 2, 3}
+    assert members[2].translate is True  # erased; the hint translation carries the '&'
+    leftovers = [[m.text for m in u.members] for u in result.units if u.hint_index is None]
+    assert leftovers == [["◆"]]  # not in the hint text -> keeps its own pixels, as before
+
+
+def test_exact_second_print_demotes_to_leftover_instead_of_ignored() -> None:
+    # A redundant claim that is EXACT-clean and spatially apart from the kept claim is a
+    # genuine OTHER print of duplicated text (a checkbox label repeated per column, a wrapped
+    # tail a short header line full-match-stole): it must become its own leftover unit —
+    # translated and rendered at its own spot — not ignored original pixels. A garbled
+    # double-read (fuzzy-bound) still drops (see the stray test above).
+    cells = [
+        {"id": 1, "text": "Part D", "bbox": {"left": 100, "top": 100, "width": 90, "height": 24}},
+        {"id": 2, "text": "Andere regel ertussen", "bbox": {"left": 100, "top": 400, "width": 300, "height": 24}},
+        {"id": 3, "text": "Part D", "bbox": {"left": 900, "top": 700, "width": 90, "height": 24}},
+    ]
+    kept, demoted, dropped = _resolve_claim_clusters(
+        0, [[0], [2]], cells, ["Part D"]
+    )
+    assert kept == [[0]]
+    assert demoted == [[2]]
+    assert dropped == []
+    # end-to-end: the demoted print surfaces as a leftover unit, not in ignored
+    result = build_units_from_hint(
+        cells=cells, hint_units=["Part D", "Andere regel ertussen"], model="qwen"
+    )
+    assert result.ignored_cell_ids == []
+    leftovers = [[m.cell_id for m in u.members] for u in result.units if u.hint_index is None]
+    assert leftovers == [[3]]
+
+
+def test_parse_pipe_opened_embedded_label_splits_table_columns() -> None:
+    # A two-column table row where the model writes the second column's typography label
+    # straight after the row's field separator: the "|" opens the label (no star). The label
+    # must strip, the second column becomes its own element, and the separator itself must
+    # not leak into the first column's text.
+    raw = (
+        "*h|Serif|14pt|700|l:* Covered | h|Serif|14pt|700|r:* Not Covered\n"
+        "*b|Serif|11pt|400|l:* You may be covered if X. | b|Serif|11pt|400|r:* ...but not if Y.\n"
+    )
+    hint = parse_grouping_output(raw)
+    assert hint.units == [
+        "Covered", "Not Covered", "You may be covered if X.", "...but not if Y.",
+    ]
+    assert hint.levels == ["header", "header", "body", "body"]
+    assert hint.font_sizes == [14, 14, 11, 11]

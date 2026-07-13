@@ -20,6 +20,23 @@ _CONDENSE_FLOOR = 0.75
 # pt size (re-wrapping) — so the source size (and the header/body hierarchy) is preserved
 # unless the line genuinely cannot fit the box within the slack.
 _WIDTH_SLACK = 1.04
+# ...but the slack is only spendable over VERIFIED clean background: on axis-aligned flat
+# groups the planner measures the pixels right of each plane (same scan as the "extend" width
+# fit) and stores the verified run as ``plane["slack_px"]`` — a colour step (a newsletter's
+# sidebar panel), another unit's cell or any ink caps it. Without that evidence (tilt, centered
+# groups, planes built in tests) the plain 4% stands: 4% of a page-wide line is tens of pixels,
+# which crossed visibly into an adjacent layout panel the original kept a margin to.
+
+
+def _allowed_width(plane: dict[str, Any], plane_width: float) -> float:
+    """The width a rendered line may occupy on this plane before pt is spent: the plane width
+    plus the 4% slack, capped at the plane's verified-clean right run when the planner
+    measured one."""
+    slack = plane_width * (_WIDTH_SLACK - 1.0)
+    verified = plane.get("slack_px")
+    if verified is not None:
+        slack = min(slack, float(verified))
+    return plane_width + slack
 
 def _fit_group(
     text: str,
@@ -39,7 +56,7 @@ def _fit_group(
 def _raw_condense(font: Any, lines: list[str], planes: list[dict[str, Any]]) -> float:
     """Unclamped horizontal scale needed to bring every line within its plane width + slack.
 
-    Per line: ``plane width * _WIDTH_SLACK / natural rendered width``; the group takes the
+    Per line: ``_allowed_width(plane) / natural rendered width``; the group takes the
     tightest (smallest) line factor. ``>= 1.0`` means the lines already fit within the slack;
     below ``_CONDENSE_FLOOR`` means even maximum condensation leaves a line more than the slack
     too wide (the caller then reduces the pt size)."""
@@ -49,7 +66,7 @@ def _raw_condense(font: Any, lines: list[str], planes: list[dict[str, Any]]) -> 
             continue
         natural = font.getlength(line)
         if natural > 0:
-            factors.append(planes[index]["width"] * _WIDTH_SLACK / natural)
+            factors.append(_allowed_width(planes[index], float(planes[index]["width"])) / natural)
     return min(factors) if factors else 1.0
 
 def _condense_scale(font: Any, lines: list[str], planes: list[dict[str, Any]]) -> float:

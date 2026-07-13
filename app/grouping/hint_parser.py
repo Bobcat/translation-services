@@ -59,8 +59,11 @@ class GroupingHint:
 # "|@blt" element where the closing "*" (and often the ":") belong — "*b|Arial|11pt|400|l|@blt|…" or
 # "*b|…l:|@blt|…" — so si never closes and, without eating that leading "*", the whole label+sentinel
 # leaked into the text (16/20 runs on a bullet flyer). The bare/fmt runs still stop at ":" and "@",
-# so the "|@blt" item stays in the text for _BULLET_SENTINEL to strip. A
-# a stray "'" from a quoted template is tolerated both before the label and right after the colon
+# so the "|@blt" item stays in the text for _BULLET_SENTINEL to strip.
+# A fifth shape, "cont", catches the tail of a label broken across a newline ("Roboto 18pt r:*
+# text" — no opener, no code): anchored on "<n>pt" + ":" + a REQUIRED closing "*", the only
+# label-ness such a fragment has left (see _EMBEDDED_LABEL for the full degradation story).
+# A stray "'" from a quoted template is tolerated both before the label and right after the colon
 # ("'t|..c:' text"); a model that wraps the WHOLE "'label:text'" line in one quote pair is unwrapped
 # earlier, in parse_grouping_output (both quote habits occur run to run). The bare/fmt field runs
 # stop at "@" so a colon-less bullet line ("...|l|@bullet|item") keeps its item in the text
@@ -71,9 +74,66 @@ _LABELED_LINE = re.compile(
     r"|[*|](?P<si>[^*\n]+?):\s*\*"
     r"|\*?\s*(?P<bare>(?:title|header|body|metadata|footer|[thbm])\s*\|[^:\[\]\n@]*)"
     r"|\*?\s*(?P<fmt>\|\s*[^:|\[\]\n]*\|\s*\d{1,3}\s*pt\s*\|[^:\[\]\n@]*)"
+    r"|(?P<cont>[^:\[\]\n@]{0,40}?\d{1,3}\s*pt\b[^:\[\]\n@]{0,20}?):\s*\*"
     r")\s*'?\s*:?\s*'?\s*\**\s*(?P<rest>.*)$",
     re.IGNORECASE,
 )
+
+# A typography-label FRAGMENT midway through a line: the model sometimes fuses two elements onto
+# one line, giving the second its own label with the pipes degraded to spaces and the weight
+# dropped ("Amazon *b Roboto 18pt r:* $23.5 billion …") — observed live; the label then leaked
+# verbatim into the render. The opener is a "*" run OR a field "|": on a two-column table the
+# model writes the second column's label straight after the row's field separator
+# ("…property. | b|Helvetica|11pt|400|r:* …but not if…") — the "|" is consumed with the match so
+# no dangling separator leaks into the preceding text. Anchored on the full chain opener +
+# importance code + "<n>pt" + ":" so ordinary text that merely mentions a pt size ("10pt, 12pt
+# en 14pt: …", star after the colon, no opener before) can never match. The piped form
+# ("*b|Roboto|18pt|400|r:*") matches too via the [^:\n] runs. The closing "*" is optional — the
+# degraded form drops decoration unpredictably.
+# The same degradation at LINE START has two shapes: with its opener ("*b Roboto 18pt r:* text",
+# already stripped by the "si" run) or as the TAIL of a label broken across a newline
+# ("…l:* Amazon *b" ↵ "Roboto 18pt r:* $…") — no opener, no code, so the "cont" run above matches
+# it on "<n>pt" + ":*" (closing star REQUIRED there: without opener and code it is the only
+# label-ness left). The stranded opener "… *b" left at the previous line's end is stripped by
+# _DANGLING_LABEL_OPEN.
+_EMBEDDED_LABEL = re.compile(
+    r"\s(?:\*+|\|)\s*(?P<lbl>[thbm]\b[^:\n]{0,60}?\d{1,3}\s*pt\b[^:\n]{0,30}?):\s*\**\s*",
+    re.IGNORECASE,
+)
+_DANGLING_LABEL_OPEN = re.compile(r"\s\*+[thbm]\s*$", re.IGNORECASE)
+# A "<n>pt" token — proof a pipeless label is a degraded typography label, not a wrapped word.
+_PT_TOKEN = re.compile(r"\d{1,3}\s*pt\b", re.IGNORECASE)
+
+
+def _split_embedded_labels(text: str) -> list[tuple[str | None, str]]:
+    """``(label, text)`` segments of a line that may carry label fragments mid-line. The first
+    segment's label is ``None`` (it belongs to the line's own leading label, handled by the
+    caller); each further segment opens a new element under its embedded label."""
+    segments: list[tuple[str | None, str]] = []
+    label: str | None = None
+    pos = 0
+    for match in _EMBEDDED_LABEL.finditer(text):
+        # A field row's '|' right before the fragment ("Amazon | *b|…r:* $23,5 …") separated the
+        # two fields; with the second field now its own element the dangling separator goes too.
+        segments.append((label, text[pos:match.start()].strip().rstrip("|").strip()))
+        label = match.group("lbl").strip("*' ").strip()
+        pos = match.end()
+    segments.append((label, text[pos:].strip()))
+    return segments
+
+
+def _pipe_normalized(label: str) -> str:
+    """A degraded space-separated typography label ("b Roboto 18pt r") rewritten to the
+    pipe-separated form the field parsers understand. Only applied when the "<n>pt" token proves
+    label-ness; a pipe-carrying or pt-less label is returned unchanged. A fragment without an
+    importance code ("Roboto 18pt r", the broken-label tail) gets an empty first field so the
+    field parsers do not eat the family as the code."""
+    if "|" in label or not _PT_TOKEN.search(label):
+        return label
+    tokens = label.split()
+    if tokens and tokens[0].lower() not in _LEVEL_BY_CODE and tokens[0].lower() not in _LEVEL_BY_WORD:
+        tokens.insert(0, "")
+    return "|".join(tokens)
 
 # Alignment values. The prompt asks for a single-letter l/c/r field, but tolerate the spelled
 # words and both British/American "centre"/"center"/"centred"/"centered" spellings. Only
@@ -200,15 +260,18 @@ def parse_grouping_output(output_text: str) -> GroupingHint:
         match = _LABELED_LINE.match(line)
         if match:
             label = (match.group("st") or match.group("si")
-                     or match.group("bare") or match.group("fmt") or "").strip()
+                     or match.group("bare") or match.group("fmt")
+                     or match.group("cont") or "").strip()
             text = match.group("rest").strip()
             if not text and ":" in label:  # a label that carries its text after a ":" inside it
                 label, text = (part.strip() for part in label.split(":", 1))
+            label = _pipe_normalized(label)
             level = _level_of(label)
             # A bare/fmt pipe label or a single-star "*...:*" label is unmistakably a label even
             # when no level is read (some models drop the importance code) — strip it so it cannot
             # leak into the text; the level then falls back to None for that element.
-            pipe_label = bool(match.group("bare") or match.group("fmt") or match.group("si"))
+            pipe_label = bool(match.group("bare") or match.group("fmt")
+                              or match.group("si") or match.group("cont"))
             # But a BARE match with no text can also be a content row whose first field happens to
             # be a level word/letter (a receipt tax row "B | 1,69", a table row "Title | Mr").
             # A real standalone label shows its label-ness: several |-fields, a "<n>pt" size, or
@@ -230,23 +293,36 @@ def parse_grouping_output(output_text: str) -> GroupingHint:
         if not category and not units and line.lower().startswith("category:"):
             category = line.split(":", 1)[1].strip()
             continue
-        # Strip a leading markdown bullet/heading marker only when whitespace follows it: a bare
-        # "- Alpha" is decoration, but the "-" of "-2,00 korting" is the amount's sign and must
-        # reach the translation. (The .strip("*") after still unwraps "*emphasis*"/"**bold**".)
-        cleaned = _MARKDOWN_LEAD.sub("", line).strip().strip("*").strip()
-        bullet, marker, cleaned = _bullet_of(cleaned)
-        if not cleaned or _is_separator(cleaned):
-            continue
-        units.append(cleaned)
-        levels.append(level)
-        block_ids.append(block)
-        alignments.append(block_alignment)
-        font_families.append(block_family)
-        font_weights.append(block_weight)
-        font_sizes.append(block_size)
-        bullets.append(bullet)
-        bullet_markers.append(marker)
-        block_open = True
+        # A line may carry a second, degraded label mid-line (two elements fused onto one line —
+        # see _EMBEDDED_LABEL); each fragment opens a new element exactly as a labeled line would.
+        for seg_label, seg_text in _split_embedded_labels(line):
+            if seg_label is not None:
+                close_block()
+                seg_label = _pipe_normalized(seg_label)
+                block_level = _level_of(seg_label)
+                block_alignment = _alignment_of(seg_label)
+                block_family, block_weight, block_size = _parse_label_fonts(seg_label)
+                level = block_level
+            if not seg_text:
+                continue
+            # Strip a leading markdown bullet/heading marker only when whitespace follows it: a bare
+            # "- Alpha" is decoration, but the "-" of "-2,00 korting" is the amount's sign and must
+            # reach the translation. (The .strip("*") after still unwraps "*emphasis*"/"**bold**".)
+            cleaned = _MARKDOWN_LEAD.sub("", seg_text).strip().strip("*").strip()
+            cleaned = _DANGLING_LABEL_OPEN.sub("", cleaned).strip()
+            bullet, marker, cleaned = _bullet_of(cleaned)
+            if not cleaned or _is_separator(cleaned):
+                continue
+            units.append(cleaned)
+            levels.append(level)
+            block_ids.append(block)
+            alignments.append(block_alignment)
+            font_families.append(block_family)
+            font_weights.append(block_weight)
+            font_sizes.append(block_size)
+            bullets.append(bullet)
+            bullet_markers.append(marker)
+            block_open = True
     return GroupingHint(
         category=category,
         units=units,

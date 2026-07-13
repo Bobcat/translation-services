@@ -4,7 +4,11 @@ Per-image findings from running the pipeline on `testset/` screenshots: what goe
 the diagnosed cause, and whether it is fixed or parked. Each entry names the test image so a
 fix can be re-checked against it.
 
-Last updated: 2026-07-07.
+Last updated: 2026-07-13.
+
+The `docpack-NN` sections below name the page by its docpack index; the fixture dir is named after
+the source image stem (`docpack-07` = fixture `07_handbook_covered_not_covered_table_fema_2024`,
+etc. — prefix dropped 2026-07-13 so a UI capture of the source image lands on the same node).
 
 ---
 
@@ -771,3 +775,139 @@ anything reaching toward a group's OUTER edge can hit non-text image content the
 box for. The residue stays a named flat-fill limit; a real fix needs an inpaint-grade erase (so
 over-reach is reconstructed, not destroyed) — which is exactly why the big tools inpaint or
 overlay opaque cards.
+
+---
+
+## `docpack-04` (brochure: icon margin with captions + content rows, en→nl)
+
+Archetype: a table whose first column is a MERGED cell per group (icon + caption spanning
+2–5 rows). The grouping VLM "unmerges" it, in a different shape per run (three seen): every
+row as `Caption | content`; caption only on the first row with `| content` continuations;
+caption as its own line. All shapes are defensible — the deterministic layers must handle
+each. One group in the 2026-07-13 run (caption cell became its own unit) rendered exactly
+right end-to-end: caption translated under the icon, rows clean — that is the target state
+for every group.
+
+### Fixed (2026-07-13)
+
+- **Caption translation prepended to every row (+ mini-font rows).** Row units without
+  caption cells still carried the caption as an unplaceable `|` field; the split gave up and
+  reflowed the WHOLE translation (caption included) over the content cell.
+  Fix: `tables._split_table_row` drops a field only on sibling evidence (its source matches a
+  member of ANOTHER unit at ≥0.8 near-containment, and no own member ≥0.5) — without that
+  evidence the cautious reflow stands so text is never deleted (an OCR-garbled order code, a
+  repo URL prefix proved that bar necessary).
+- **Caption column glued onto the content column.** `_merge_close_table_cells` gauged its gap
+  against the cells' UNION height; a caption wrapped over two lines doubled it and the merge
+  swallowed the column gap. Fix: gauge on line height (median member box). Windfall: a
+  stacked-table header elsewhere in the set now renders per column instead of one smear.
+
+### Open / parked (2026-07-13 — parked to continue the fixture review; agreed order below)
+
+Verified in the live-run data (`llm_calls` + grouping of the 12:36 run):
+
+1. **Caption cells get pulled into a (sometimes wrong) row unit via word overlap** — the
+   caption word occurring in a row's text ("Launch *advert* on CS Jobs.", "*pre-employment*
+   check outcome") binds the caption cell there; the render then reflows one text across the
+   column gap, dropping the row's tail text under the icon ("Jobs.", a Dutch fragment).
+2. **Translated caption still leaks into column 2 on some rows** — the field-drop is blocked
+   two ways: (a) `printed_here` is a false positive when the caption WORD occurs in the row
+   text; (b) no sibling evidence exists when the caption cells were dropped to `ignored`.
+3. **Some caption cells end in `ignored`** → original English pixels survive under the icon
+   ("Fully Automated" / "Tests", "Checking and" / "On-boarding"). Which gate drops them
+   (icon-fragment vs claim consolidation) is NOT yet traced — first step when picked up.
+4. **Icon-inner text**: the closed-sign's own text got a caption translation reflowed into it.
+   DECISION (user): icon-inner text should be TRANSLATED (e.g. a closed-sign reads
+   "Gesloten"), whatever the translator makes of it — not preserved.
+5. **Underlying render mechanism**: one text flow reflows across x-disjoint member clusters
+   (an ~800px column gap). Text must never be spread across a column gap — this is the
+   cell-level "unravel merged cells downstream" rule still missing.
+6. **Row-size wobble** (mini-font rows next to normal ones): likely a consequence of 1/2;
+   reassess after those fixes, do not fix separately.
+
+Agreed order: trace 3 (why captions drop to ignored) → 5/1 (column-gap principle: a cluster
+hanging onto a unit only across a column gap becomes its own render column) → 2 (make
+`printed_here` direction-aware: a field is printed here only when a member carries the FIELD,
+not when the row text happens to contain the caption word) → reassess 6; 4 is a small
+separate change. A second live run (same day) already rendered much better: remaining visible
+issue was ~3 captions whose translation repeats in column 2.
+
+---
+
+## `docpack-05` (public report, two columns over diagonal colour-band graphic, en→nl)
+
+Text and bullets render correctly. The visible defect is in the "inpaint" erase: lighter
+plates and wrong-band colours around erased lines that sit on the diagonal band boundaries.
+
+### Diagnosed (2026-07-13), parked with constraint
+
+Measured per job (route + ring-vs-fill colour): the ground router sends the clear
+boundary-straddling lines to LaMa correctly (all three page surfaces lie within the
+own-surface delta, so the spread trigger sees them); **the smears are the LaMa fills
+themselves** — worst cases ring-white→fill-lilac (Δ53), ring-white→fill-teal (Δ37). Cause:
+the 1.5 Mpx inpaint pixel budget on a 9.4 Mpx page downscales the context so far that the
+band-boundary geometry goes soft and the model drags the neighbouring band's colour into the
+hole. A/B with a 6 Mpx budget removes the large plates almost entirely (verified on crops).
+Two smaller plates remain in BOTH variants: flat-routed jobs whose ring looks uniform but
+whose fill area touches a band corner — a router blind spot, separate from the budget.
+
+Parked plan (user-approved): one task, two parts —
+1. ADAPTIVE pixel budget: raise the budget ONLY for jobs whose context window contains a
+   hard colour-step boundary; every other image keeps the 1.5 Mpx path bit-for-bit.
+2. Router: a flat-routed job whose fill area meets a designed boundary (ring segments on
+   opposite sides belong to different surfaces) routes to the model instead.
+
+HARD CONSTRAINT (user): no extra VRAM use and no extra latency on images without such
+boundaries — the adaptive gate must provably keep the old path for them. The measurement
+harness for this (route probe + ring-vs-fill delta table + budget A/B) is in the session
+notes of 2026-07-13 and is cheap to rebuild from this entry.
+
+---
+
+## `docpack-06` (handbook, side-by-side comparison columns with checkbox labels, en→nl)
+
+### Fixed (2026-07-13)
+
+- **Untranslated remnants of duplicated text** — a checkbox label repeated per column ("Part
+  D" stayed English in column 2), the wrapped tail of a sentence whose text equals a heading
+  elsewhere ("Original Medicare." repeated untranslated at the column bottom), and a
+  re-occurring word inside its own line ("Insurance)."). All three were dropped to `ignored`
+  by the claim consolidation's redundancy rule: a duplicate's tokens are already covered, and
+  the rule assumed a garbled OCR double-read (receipt case) where leaving original pixels is
+  right. These are genuine OTHER prints.
+  Fix in `align._resolve_claim_clusters`: a redundant claim that is EXACT-clean (no fuzzy
+  garble needed to bind) and spatially apart from every kept claim demotes to a LEFTOVER —
+  its own unit, translated and rendered at its own spot (the repeated-prints doctrine) —
+  instead of ignored. Garbled double-reads still drop.
+- **Wrapped tail glued back onto its sentence** (`align._merge_leftover_tails`): the
+  post-consolidation twin of the leftover rescue. A demoted single-cell leftover directly
+  below a labeled group's member (same column), clearing the bind threshold on that line AND
+  contributing an uncovered token, is that line's wrapped tail and merges in — "Go to page
+  57 … / Original Medicare." now reflows as ONE sentence, no repeat. Same gates as the
+  rescue, so repeated prints stay their own units. Windfall: a stacked-chart title's 4th
+  wrapped line joined its title on another fixture.
+
+### Named limit
+
+- A wrapped tail whose tokens ALL re-occur inside its own line ("… (Hospital Insurance) and
+  Part B (Medical / Insurance).") cannot pass the contributes-uncovered-token gate (coverage
+  is set-based, not multiset): it stays a leftover and renders its own translation at its
+  spot — translated now, but still a visible duplicate line. A multiset-aware coverage would
+  fix it; parked (invasive, and the set-based gate is what protects repeated prints).
+
+---
+
+## `docpack-07` (handbook, covered / not-covered two-column table, en→nl)
+
+### Fixed (2026-07-13)
+
+- **Pipe-opened mid-line typography labels leaked into text AND into the frozen
+  translations.** On this two-column table the VLM writes the second column's label straight
+  after the row's field separator ("…enters your property... | b|Helvetica|11pt|400|r:*
+  ...but not if…"). The embedded-label splitter required a star opener, so the label survived
+  into the unit text, was translated verbatim ("Gedekt h Helvetica 14pt r:* Niet gedekt"),
+  and poisoned the captured baseline beyond replay repair.
+  Fix: `_EMBEDDED_LABEL` accepts a field-"|" opener besides "*" (the "|" is consumed with the
+  match, so no dangling separator leaks into the preceding column's text). The fixture was
+  re-captured live: headers and scenario pairs now split per column, no junk. Only this
+  image's hints carried the shape — parser change no-op on the other 41 by construction.

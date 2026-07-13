@@ -21,6 +21,7 @@ from app.replacement.text.angle import _baseline_angle
 from app.replacement.text.wrap import _fit_group
 from app.replacement.text.wrap import _raw_condense
 from app.replacement.text.wrap import _condense_scale
+from app.replacement.text.wrap import _WIDTH_SLACK
 from app.replacement.text.wrap import _CONDENSE_FLOOR
 from app.replacement.text.fit import fold_lone_fullwidth_punctuation
 from app.replacement.text.fit import is_cjk_text
@@ -83,6 +84,7 @@ def _plan_group(
     base_arr: np.ndarray | None = None,
     protected_boxes: list[dict[str, Any]] | None = None,
     sweep_ok: bool | None = None,
+    document_member_texts: list[tuple[Any, str]] | None = None,
 ) -> list[_Job]:
     # The read-only pixel view is materialised ONCE per render (in render_translated_image)
     # and threaded in: np.asarray(base) copies the whole frame, and _plan_group runs per
@@ -94,7 +96,11 @@ def _plan_group(
     if sweep_ok is None:
         sweep_ok = _hint_covers_undetected_text(units)
     if len(units) == 1:
-        cells = _split_table_row(units[0])
+        other_texts = [
+            text for unit_id, text in (document_member_texts or [])
+            if unit_id != units[0].get("id")
+        ]
+        cells = _split_table_row(units[0], other_texts)
         if cells is not None:
             return [
                 job
@@ -111,6 +117,7 @@ def _plan_group(
                     base_arr=base_arr,
                     protected_boxes=protected_boxes,
                     sweep_ok=sweep_ok,
+                    document_member_texts=document_member_texts,
                 )
             ]
 
@@ -267,6 +274,16 @@ def _plan_group(
     if width_fit_mode == "extend" and angle == 0.0 and not centered:
         for plane, (bg, _fg) in zip(planes, colors):
             plane["width"] += _clean_right_extension(base_arr, plane, bg, protected_boxes or [])
+    elif angle == 0.0 and not centered:
+        # Footprint mode: the 4% width slack (wrap._WIDTH_SLACK) must not carry a line INTO an
+        # adjacent panel — clamp it at a WALL: a colour step inside the slack window that stays
+        # non-background through the window's end (a newsletter's sidebar panel). Ink that clears
+        # again within the window (a neighbour column's glyph, a thin frame line) does not clamp,
+        # so signage/receipt behaviour is untouched. Tilted and centered groups keep the plain 4%
+        # (the scan is axis-aligned and right-only — same honest limit as the extend fit).
+        for plane, (bg, _fg) in zip(planes, colors):
+            plane["slack_px"] = _wall_bounded_slack(
+                base_arr, plane, bg, plane["width"] * (_WIDTH_SLACK - 1.0))
 
     # The whole group renders at ONE size = the original's source size (true line height),
     # NOT a size chosen to fit the width. So a heading keeps heading size and body keeps
@@ -404,6 +421,32 @@ def _member_erase_quad(quad: list, dx: float, dy: float) -> list[tuple[int, int]
         _ipoint(geo.to_image(xmax, ymax, x_axis, y_axis)),
         _ipoint(geo.to_image(xmin, ymax, x_axis, y_axis)),
     ]
+
+def _wall_bounded_slack(
+    base_px: np.ndarray,
+    plane: dict[str, Any],
+    bg: tuple[int, int, int],
+    window_px: float,
+) -> float:
+    """The width-slack window, zeroed when it contains a WALL: a column from which the pixels
+    stay non-background through the window's end — a colour step that never returns (an
+    adjacent panel edge, or a block the window ends inside). Against a panel the original's own
+    margin is the layout's intent, so no slack is spent at all: the line stays within its plane
+    width instead of creeping toward the panel. Ink that clears again within the window (a
+    neighbour glyph, a thin rule) yields the full window: overrunning ACROSS such marks is the
+    long-standing 4% behaviour, and clamping on it would reflow every receipt row that sits
+    left of a price column."""
+    _x_axis, _y_axis, xmin, xmax, ymin, ymax = plane["frame"]
+    height, width = base_px.shape[:2]
+    y0, y1 = max(0, int(ymin)), min(height, int(ymax) + 1)
+    x0 = int(round(xmax))
+    x1 = min(width, x0 + int(round(window_px)) + 1)
+    if x0 >= x1 or y0 >= y1:
+        return window_px
+    strip = base_px[y0:y1, x0:x1].astype(np.int16)
+    non_bg = (np.abs(strip - np.asarray(bg, dtype=np.int16)).max(axis=2) >= _INK_DELTA).all(axis=0)
+    return 0.0 if len(non_bg) and non_bg[-1] else window_px
+
 
 def _clean_right_extension(
     base_px: np.ndarray,

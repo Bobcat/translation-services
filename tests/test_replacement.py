@@ -1168,3 +1168,64 @@ def test_render_skips_units_without_translation(tmp_path) -> None:
     out = np.asarray(Image.open(BytesIO(png)).convert("RGB"))
     # nothing translatable rendered -> image stays the solid dark colour
     assert out.max() <= 10
+
+
+def test_allowed_width_spends_slack_only_over_verified_clean_background() -> None:
+    # The 4% width slack is only spendable over pixels the planner VERIFIED as clean background
+    # (plane["slack_px"], measured by the extend-fit scan): 4% of a page-wide line is tens of
+    # pixels, enough to cross into an adjacent layout panel the original kept a margin to. A
+    # clean margin (or no measurement — tilt, centered, tests) keeps the full 4%.
+    from app.replacement.text.wrap import _allowed_width
+
+    assert _allowed_width({}, 1100.0) == pytest.approx(1144.0)                  # unmeasured: 4%
+    assert _allowed_width({"slack_px": 44.0}, 1100.0) == pytest.approx(1144.0)  # clean: full 4%
+    assert _allowed_width({"slack_px": 17.0}, 1100.0) == pytest.approx(1117.0)  # panel at 17px
+    assert _allowed_width({"slack_px": 0.0}, 1100.0) == pytest.approx(1100.0)   # ink right away
+
+
+def test_split_table_row_drops_field_printed_in_another_unit() -> None:
+    # The VLM unmerges a repeated table column (an icon-margin caption emitted as field 1 of
+    # EVERY row) while the caption's cells exist once, in another unit: a row unit without
+    # caption members must render ONLY its own column — prepending the caption translation to
+    # every row was the bug. The drop needs POSITIVE evidence the field is printed in another
+    # unit; without it (a merged-box order code garbled past the match threshold) the cautious
+    # reflow stands, so text is never dropped from the image.
+    from app.replacement.layout.tables import _split_table_row
+
+    row = {
+        "translated_text": "Bijschrift vertaald Inhoud vertaald.",
+        "field_translations": [
+            ("Icon Caption Title", "Bijschrift vertaald"),
+            ("The actual row content text.", "Inhoud vertaald."),
+        ],
+        "members": [{
+            "cell_id": 1, "text": "The actual row content text.", "translate": True,
+            "bbox": {"left": 400, "top": 100, "width": 600, "height": 30},
+        }],
+    }
+    cells = _split_table_row(row, ["Icon Caption", "Title"])  # caption cells live elsewhere
+    assert cells is not None and len(cells) == 1
+    assert cells[0]["translated_text"] == "Inhoud vertaald."
+    # no sibling evidence (a garbled merged-box code): no split, the old reflow renders ALL fields
+    assert _split_table_row(row, []) is None
+
+
+def test_wrapped_caption_column_does_not_merge_into_content_column() -> None:
+    # The close-cells merge gauges its gap on a LINE height: a caption column wrapped over two
+    # lines doubles its union height, which used to double the allowed gap and glue the caption
+    # onto the content column beside it. Single-line pairs (date | weekday) keep merging.
+    from app.replacement.layout.tables import _should_merge_table_cells
+
+    def cell(members):
+        return {"members": members}
+
+    wrapped_caption = cell([
+        {"bbox": {"left": 140, "top": 1000, "width": 210, "height": 30}},
+        {"bbox": {"left": 210, "top": 1032, "width": 80, "height": 30}},
+    ])
+    content = cell([{"bbox": {"left": 390, "top": 1010, "width": 700, "height": 30}}])
+    assert _should_merge_table_cells(wrapped_caption, content) is False  # gap 40 > 0.75x30
+
+    date = cell([{"bbox": {"left": 100, "top": 100, "width": 80, "height": 30}}])
+    weekday = cell([{"bbox": {"left": 195, "top": 100, "width": 50, "height": 30}}])
+    assert _should_merge_table_cells(date, weekday) is True  # gap 15 <= 0.75x30

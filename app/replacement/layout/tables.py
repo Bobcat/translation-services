@@ -12,8 +12,15 @@ from app.grouping.heuristics import _is_nontranslatable
 # not split into cells (the renderer reflows it instead) — a wrong field/cell match would
 # place text in the wrong column, worse than a reflow.
 _FIELD_MATCH_MIN = 0.5
+# Evidence bar for DROPPING an unplaceable field because it is printed in another unit: near
+# containment, not mere similarity — a short field key ("github") reaches 0.5 on one accidental
+# 3-char run in unrelated prose, and a dropped field is text deleted from the render.
+_FIELD_ELSEWHERE_MIN = 0.8
 
-def _split_table_row(unit: dict[str, Any]) -> list[dict[str, Any]] | None:
+def _split_table_row(
+    unit: dict[str, Any],
+    other_texts: tuple[str, ...] | list[str] = (),
+) -> list[dict[str, Any]] | None:
     """A table row (the VLM hint carried '|' fields) becomes one pseudo-unit per rendered
     COLUMN, so the renderer places each at its own x instead of reflowing the joined line over
     the row's union — which would collapse the column gaps and shift the spend text left, right
@@ -77,6 +84,23 @@ def _split_table_row(unit: dict[str, Any]) -> list[dict[str, Any]] | None:
             if score > best_score:
                 best_field, best_score = field, score
         if best_field is None or best_score < _FIELD_MATCH_MIN:
+            # The field's source matches no placed column. Drop it from this unit ONLY on
+            # positive evidence that its text is printed in ANOTHER unit (``other_texts``) and
+            # not in this one — the VLM unmerges a repeated table column (an icon-margin caption
+            # emitted as the first field of EVERY row while its cells exist once, in the unit
+            # beside the icon): rendering it here would prepend the caption's translation to
+            # every row. Without that evidence the cautious old reflow stands: a merged-box
+            # field whose member text is OCR-garbled past the threshold (an order code) is
+            # printed HERE, and dropping it would erase text from the image.
+            printed_here = any(
+                _field_overlap(source, str(member.get("text") or "")) >= _FIELD_MATCH_MIN
+                for member in unit.get("members") or []
+            )
+            printed_elsewhere = any(
+                _field_overlap(source, text) >= _FIELD_ELSEWHERE_MIN for text in other_texts
+            )
+            if printed_elsewhere and not printed_here:
+                continue
             return None
         column_texts[best_field].append((index, translated))
     cells: list[dict[str, Any]] = []
@@ -117,7 +141,21 @@ def _should_merge_table_cells(left_cell: dict[str, Any], right_cell: dict[str, A
     if y_overlap < 0.5 * height:
         return False
     gap = right[0] - left[2]
-    return gap <= 0.75 * height
+    # Gauge the gap against a LINE height (median member box), not the cells' union height: a
+    # column whose text WRAPS (an icon-margin caption of two lines) doubles its union height and
+    # would double the allowed gap — merging the caption into the content column it sits beside.
+    # Single-line fields (a date/weekday pair) keep exactly the old gauge.
+    line_height = max(_median_member_height(left_cell), _median_member_height(right_cell), 1.0)
+    return gap <= 0.75 * line_height
+
+
+def _median_member_height(cell: dict[str, Any]) -> float:
+    heights = sorted(
+        float((member.get("bbox") or {}).get("height") or 0.0)
+        for member in (cell.get("members") or [])
+        if member.get("bbox")
+    )
+    return heights[len(heights) // 2] if heights else 0.0
 
 def _cell_axis_box(cell: dict[str, Any]) -> tuple[float, float, float, float]:
     boxes = [(member.get("bbox") or {}) for member in (cell.get("members") or []) if member.get("bbox")]

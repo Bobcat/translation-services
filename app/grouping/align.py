@@ -59,6 +59,10 @@ def build_units_from_hint(
     layout_regions: list[dict[str, Any]] | None = None,
 ) -> GroupingResult:
     hint_token_sets = [set(_tokens(text)) for text in hint_units]
+    # The ordered token sequences feed the phrase tie-break in _pick_hint: a cell whose tokens
+    # appear as a CONTIGUOUS run of one candidate line is that line's own fragment (a wrapped
+    # logo/title line), where the same tokens merely scattered over another line are coincidence.
+    hint_token_seqs = [_tokens(text) for text in hint_units]
     # The fuzzy fallback scans the UNFOLDED hint tokens: ligature folding is for the exact
     # match only (see tokens._FOLD), so a ligature misread cannot ratio-match onto a line.
     hint_fuzzy_sets = [set(_fuzzy_tokens(text)) for text in hint_units]
@@ -81,6 +85,7 @@ def build_units_from_hint(
             hint_token_sets,
             _candidate_hints(cell, token_to_hints),
             fuzzy_sets=hint_fuzzy_sets,
+            token_seqs=hint_token_seqs,
         )
         for index, cell in enumerate(cells)
     ]
@@ -158,8 +163,10 @@ def build_units_from_hint(
 
     groups = _group_consecutive(labels)
     groups, ignored_indices = _consolidate_hint_claims(groups, cells, hint_units)
+    groups = _merge_leftover_tails(groups, cells, hint_units, hint_token_sets, hint_fuzzy_sets)
     groups, icon_indices = _drop_icon_fragments(groups, cells, hint_units)
     ignored_indices = list(ignored_indices) + icon_indices
+    groups = _absorb_symbol_leftovers(groups, cells, hint_units, preserved)
     if preserved:
         # Preserve routing: a preserved cell has an empty match, so it always arrives here as
         # its own leftover group — move it to ignored (original pixels: not erased, not
@@ -241,10 +248,17 @@ def _consolidate_hint_claims(
         if len(claim_lists) == 1:
             out.append((label, claim_lists[0]))
             continue
-        kept_clusters, dropped = _resolve_claim_clusters(label, claim_lists, cells, hint_units)
+        kept_clusters, demoted, dropped = _resolve_claim_clusters(label, claim_lists, cells, hint_units)
         for members in kept_clusters:
             out.append((
                 label,
+                sorted(members, key=lambda i: (cells[i]["bbox"]["top"], cells[i]["bbox"]["left"])),
+            ))
+        for members in demoted:
+            # A genuine second print of duplicated text: its own LEFTOVER unit (translated and
+            # rendered at its own spot) instead of ignored original pixels.
+            out.append((
+                None,
                 sorted(members, key=lambda i: (cells[i]["bbox"]["top"], cells[i]["bbox"]["left"])),
             ))
         ignored.extend(dropped)
@@ -291,6 +305,7 @@ def _resolve_claim_clusters(
 
     order = sorted(range(len(claim_lists)), key=lambda k: len(tokens_of(claim_lists[k])), reverse=True)
     kept: list[list[int]] = []
+    demoted: list[list[int]] = []
     dropped: list[int] = []
     covered_tokens: set[str] = set()
     covered_fields: set[int] = set()
@@ -304,6 +319,16 @@ def _resolve_claim_clusters(
             covered_fields |= fields_of(tokens)
         elif tokens - covered_tokens:
             to_merge.append(k)                               # adds new content -> merge into its line
+        elif _is_second_print(members, kept, cells, line_tokens):
+            # Redundant but EXACT-clean and spatially apart from every kept claim: a genuine
+            # second print whose text duplicates line tokens — a label repeated per column
+            # ("Part D" twice), a wrapped tail a short header line full-match-stole ("Original
+            # Medicare."), a word re-occurring inside its own line ("… Insurance)."). Ignoring
+            # it leaves an untranslated original in the render; instead it becomes a LEFTOVER
+            # (own unit, translated and rendered at its own spot — the repeated-prints
+            # doctrine). A garbled double-read stays dropped: it binds only via fuzzy, and the
+            # kept claim erases the very print it garbles.
+            demoted.append(list(members))
         else:
             dropped.extend(members)                          # redundant stray / mismatch
 
@@ -333,7 +358,92 @@ def _resolve_claim_clusters(
         to_merge = still
     for k in to_merge:
         dropped.extend(claim_lists[k])                       # never reached a kept group -> detached stray
-    return kept, dropped
+    return kept, demoted, dropped
+
+
+def _merge_leftover_tails(
+    groups: list[tuple[int | None, list[int]]],
+    cells: list[dict[str, Any]],
+    hint_units: list[str],
+    hint_token_sets: list[set[str]],
+    hint_fuzzy_sets: list[set[str]],
+) -> list[tuple[int | None, list[int]]]:
+    """The post-consolidation twin of the leftover rescue: a single-cell LEFTOVER that sits
+    geometrically directly below a labeled group's member (same column — ``_is_continuation``),
+    clears the bind threshold on that group's line AND contributes a token its members do not
+    cover yet, is that line's wrapped tail — merge it in so the line's translation reflows over
+    both printed lines. The pre-grouping rescue cannot reach these: a tail whose text duplicates
+    a short line elsewhere gets LABELED there (full match), consolidation demotes it back to a
+    leftover, and only now is its true home decidable. Same gates as the rescue, so a repeated
+    print (contributes nothing uncovered) still stays its own unit."""
+    labeled = [(label, indices) for label, indices in groups if label is not None]
+    out: list[tuple[int | None, list[int]]] = []
+    for label, indices in groups:
+        if label is not None or len(indices) != 1:
+            out.append((label, indices))
+            continue
+        index = indices[0]
+        cell_tokens = _tokens(str(cells[index].get("text") or ""))
+        merged = False
+        for target_label, target_indices in labeled:
+            if not cell_tokens or not any(
+                _is_continuation(cells[j], cells[index]) for j in target_indices
+            ):
+                continue
+            on_line = sum(
+                _token_score(token, hint_token_sets[target_label], hint_fuzzy_sets[target_label])
+                for token in cell_tokens
+            )
+            if on_line / len(cell_tokens) < _MATCH_THRESHOLD:
+                continue
+            covered = {
+                token for j in target_indices for token in _tokens(str(cells[j].get("text") or ""))
+            }
+            if not any(token not in covered for token in cell_tokens):
+                continue  # a repeated print: contributes nothing -> stays its own unit
+            target_indices.append(index)
+            target_indices.sort(key=lambda i: (cells[i]["bbox"]["top"], cells[i]["bbox"]["left"]))
+            merged = True
+            break
+        if not merged:
+            out.append((label, indices))
+    return out
+
+
+def _is_second_print(
+    members: list[int],
+    kept: list[list[int]],
+    cells: list[dict[str, Any]],
+    line_tokens: set[str],
+) -> bool:
+    """Whether a redundant claim is a genuine OTHER print of duplicated text (see the demote
+    branch): every cell token sits EXACTLY in the line (a fuzzy-bound claim is a garbled
+    double-read of a print the kept claim already covers) and its box overlaps no kept claim
+    (an overlapping clean double-read is the same print, whose pixels the kept claim erases)."""
+    for i in members:
+        for token in _tokens(str(cells[i].get("text") or "")):
+            if token not in line_tokens:
+                return False
+    box = _members_bbox(members, cells)
+    return not any(_bbox_overlap(box, _members_bbox(group, cells)) for group in kept)
+
+
+def _members_bbox(members: list[int], cells: list[dict[str, Any]]) -> tuple[float, float, float, float]:
+    boxes = [cells[i].get("bbox") or {} for i in members]
+    return (
+        min(float(b.get("left", 0.0)) for b in boxes),
+        min(float(b.get("top", 0.0)) for b in boxes),
+        max(float(b.get("left", 0.0)) + float(b.get("width", 0.0)) for b in boxes),
+        max(float(b.get("top", 0.0)) + float(b.get("height", 0.0)) for b in boxes),
+    )
+
+
+def _bbox_overlap(a: tuple[float, float, float, float], b: tuple[float, float, float, float]) -> bool:
+    """Whether the intersection covers a meaningful share (30%) of the smaller box."""
+    ix = max(0.0, min(a[2], b[2]) - max(a[0], b[0]))
+    iy = max(0.0, min(a[3], b[3]) - max(a[1], b[1]))
+    smaller = min((a[2] - a[0]) * (a[3] - a[1]), (b[2] - b[0]) * (b[3] - b[1]))
+    return smaller > 0 and ix * iy > 0.3 * smaller
 
 
 def _drop_icon_fragments(
@@ -362,6 +472,65 @@ def _drop_icon_fragments(
     return out, dropped
 
 
+def _absorb_symbol_leftovers(
+    groups: list[tuple[int | None, list[int]]],
+    cells: list[dict[str, Any]],
+    hint_units: list[str],
+    preserved: set[int],
+) -> list[tuple[int | None, list[int]]]:
+    """Fold a token-less single-cell leftover (a pure symbol — '&', '+', '±') back into the
+    element whose printed line it sits on. OCR often splits a styled glyph off its line into its
+    own cell; token matching cannot bind it (no tokens), so it orphans as a leftover, keeps its
+    original pixels, and the element's hint translation renders the symbol AGAIN next to them (a
+    byline's '&' doubled). Absorbed — so its pixels are erased — only when all three hold: the
+    cell sits within a word gap of one of the group's members on the same line, the group's hint
+    line carries the symbol (the translation really covers it), and the cell is not
+    layout-preserved. '|' never absorbs: in hint text it is the field separator, not a printed
+    glyph. A symbol the hint does NOT carry (a decorative dingbat) stays its own leftover with
+    its original pixels, exactly as before."""
+    out: list[tuple[int | None, list[int]]] = []
+    for label, indices in groups:
+        if label is not None or len(indices) != 1 or indices[0] in preserved:
+            out.append((label, indices))
+            continue
+        index = indices[0]
+        text = str(cells[index].get("text") or "").strip()
+        if not text or text == "|" or _tokens(text):
+            out.append((label, indices))
+            continue
+        target: list[int] | None = None
+        for other_label, other_indices in groups:
+            if other_label is None or text not in str(hint_units[other_label] or ""):
+                continue
+            if any(_word_gap_neighbour(cells[index], cells[j]) for j in other_indices):
+                target = other_indices
+                break
+        if target is None:
+            out.append((label, indices))
+            continue
+        target.append(index)
+        target.sort()
+    return out
+
+
+def _word_gap_neighbour(cell: dict[str, Any], other: dict[str, Any]) -> bool:
+    """Whether ``other`` sits on ``cell``'s printed line within a word gap — the same
+    vertical-overlap and gap rules as ``_line_anchor`` (tilt-tolerant, a column gap is too wide)."""
+    box = cell.get("bbox") or {}
+    other_box = other.get("bbox") or {}
+    left, top = float(box.get("left", 0.0)), float(box.get("top", 0.0))
+    height = float(box.get("height", 0.0)) or 1.0
+    right, bottom = left + float(box.get("width", 0.0)), top + height
+    other_left, other_top = float(other_box.get("left", 0.0)), float(other_box.get("top", 0.0))
+    other_height = float(other_box.get("height", 0.0)) or 1.0
+    other_right = other_left + float(other_box.get("width", 0.0))
+    other_bottom = other_top + other_height
+    if (min(bottom, other_bottom) - max(top, other_top)) <= _LINE_VOVERLAP_RATIO * min(height, other_height):
+        return False
+    gap = max(other_left - right, left - other_right)  # negative when boxes overlap
+    return gap <= _LINE_GAP_RATIO * height
+
+
 def _member_translate_flags(texts: list[str], hint_line: str | None) -> list[bool]:
     """Base rule: a member translates unless its own text is nontranslatable (a bare number,
     URL, price). Field inheritance on top: OCR often splits a phrase's number into its own
@@ -376,6 +545,14 @@ def _member_translate_flags(texts: list[str], hint_line: str | None) -> list[boo
     flags = [not _is_nontranslatable(text) for text in texts]
     if not hint_line:
         return flags
+    # A token-less symbol member ('&') the hint line carries verbatim: the line's translation
+    # renders the symbol, so preserving the member's own pixels would print it twice (the
+    # absorbed-leftover case — see _absorb_symbol_leftovers). '|' is the field separator in hint
+    # text, never proof of a printed glyph.
+    for index, text in enumerate(texts):
+        stripped = str(text).strip()
+        if stripped and stripped != "|" and not _tokens(stripped) and stripped in str(hint_line):
+            flags[index] = True
     fields = [
         (set(_tokens(part)), not _is_nontranslatable(part))
         for part in str(hint_line).split("|")
@@ -435,6 +612,11 @@ class _Match:
     score: float           # best matched-token mass / cell token count
     full: tuple[int, ...] = ()  # of those, the lines the cell fully accounts for (every token)
     full_alpha: tuple[int, ...] = ()  # full matches for cells carrying alphabetic text
+    # Of the candidates, the lines whose token SEQUENCE contains the cell's tokens as a contiguous
+    # run (>= 2 tokens; a single token is trivially contiguous everywhere and discriminates
+    # nothing). A wrapped fragment is a contiguous run of its own line; the same tokens scattered
+    # over another line are coincidence — used as the tie-break of last resort in _pick_hint.
+    phrase: tuple[int, ...] = ()
 
 
 def _build_hint_index(hint_token_sets: list[set[str]]) -> dict[str, set[int]]:
@@ -467,6 +649,7 @@ def _match_scores(
     hint_token_sets: list[set[str]],
     candidate_indices: set[int] | None = None,
     fuzzy_sets: list[set[str]] | None = None,
+    token_seqs: list[list[str]] | None = None,
 ) -> _Match:
     cell_tokens = _tokens(str(cell.get("text") or ""))
     if not cell_tokens:
@@ -497,7 +680,7 @@ def _match_scores(
     # untouched, and an all-garble cell arrives here with ``candidate_indices`` None already — so
     # this fires only for the mixed case, which stays rare enough to keep the match near-linear.
     if candidate_indices is not None and best_matched / len(cell_tokens) < _MATCH_THRESHOLD:
-        return _match_scores(cell, hint_token_sets, None, fuzzy_sets)
+        return _match_scores(cell, hint_token_sets, None, fuzzy_sets, token_seqs)
     candidates = [index for index, matched in matched_by_index if matched == best_matched]
     # ``full`` means "the cell carries every token of the line", so it is recounted on DISTINCT
     # cell tokens: the raw mass above counts duplicates separately, and per-character CJK tokens
@@ -513,11 +696,30 @@ def _match_scores(
         >= len(hint_token_sets[index])
     )
     has_alpha = any(any(ch.isalpha() for ch in token) for token in cell_tokens)
+    # Contiguity is judged on EXACT tokens only (no fuzzy): a garbled cell falls back to the
+    # existing paths rather than phrase-matching a line it merely resembles.
+    phrase = tuple(
+        index for index in candidates
+        if token_seqs is not None and len(cell_tokens) >= 2
+        and _contains_run(token_seqs[index], cell_tokens)
+    )
     return _Match(
         candidates=candidates,
         score=best_matched / len(cell_tokens),
         full=full,
         full_alpha=full if has_alpha else (),
+        phrase=phrase,
+    )
+
+
+def _contains_run(sequence: list[str], run: list[str]) -> bool:
+    """Whether ``run`` occurs as a contiguous slice of ``sequence``."""
+    if not run or len(run) > len(sequence):
+        return False
+    first = run[0]
+    return any(
+        sequence[start] == first and sequence[start:start + len(run)] == run
+        for start in range(len(sequence) - len(run) + 1)
     )
 
 
@@ -563,6 +765,13 @@ def _pick_hint(
     # position alone is a coin flip near an element boundary); otherwise bind to the nearest hint.
     if sticky is not None and sticky in candidates:
         return sticky
+    # Phrase contiguity beats the position coin-flip: on an interleaved page (a letterhead's
+    # split logo left, a contact block right) the position interpolation puts a wrapped fragment
+    # nearer the OTHER column's line, while the fragment reads verbatim in its own line. Only
+    # narrows — several phrase lines (two dishes ending "en frites") still go to position.
+    phrase = [index for index in match.phrase if index in candidates]
+    if phrase:
+        candidates = phrase
     return min(candidates, key=lambda index: abs(index - preferred_index))
 
 

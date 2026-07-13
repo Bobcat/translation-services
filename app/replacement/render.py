@@ -95,6 +95,13 @@ def render_translated_image(
         for member in (unit.get("members") or [])
         if member.get("bbox")
     ]
+    # Every member text with its unit id: the table split needs to know whether an unplaceable
+    # '|' field is printed in ANOTHER unit (an unmerged repeated column) before dropping it.
+    document_member_texts = [
+        (unit.get("id"), str(member.get("text") or ""))
+        for unit in translation_units
+        for member in (unit.get("members") or [])
+    ]
     band_ratio = _document_band_ratio(base, translation_units) if size_metric_mode == "band" else None
     angle_field = _document_angle_field(translation_units)
     size_cohorts = _document_size_cohorts(translation_units) if size_cohort_mode == "vlm" else None
@@ -111,6 +118,7 @@ def render_translated_image(
                 size_cohorts=size_cohorts,
                 base_arr=base_arr,
                 protected_boxes=protected_boxes,
+                document_member_texts=document_member_texts,
             )
         )
 
