@@ -283,16 +283,25 @@ def create_app(settings_path: str | Path | None = None) -> FastAPI:
     async def regression_add_testset(body: dict[str, Any] = Body(default_factory=dict)) -> JSONResponse:
         request_id = str(body.get("request_id") or "").strip()
         name = str(body.get("name") or "").strip()
+        # Optional destination subdir (the workbench picker); '' = flat testset root.
+        subdir = str(body.get("subdir") or "").strip().strip("/")
         if not request_id or not name:
             return _error(400, code="REGRESSION_BAD_REQUEST", message="request_id and name are required", retryable=False)
-        # ``name`` lands in a filesystem path — same resolve/relative_to guard as every sibling
-        # regression endpoint, so "../" or an absolute name cannot write outside the testset.
+        # ``name``/``subdir`` land in a filesystem path — same resolve/relative_to guard as every
+        # sibling regression endpoint, so "../" or an absolute name cannot write outside the testset.
+        rel = f"{subdir}/{name}" if subdir else name
         testset_root = regression_capture.TESTSET_ROOT.resolve()
-        dest = (regression_capture.TESTSET_ROOT / f"{name}.x").resolve()
+        dest = (regression_capture.TESTSET_ROOT / f"{rel}.x").resolve()
         try:
             dest.relative_to(testset_root)
         except ValueError:
             return _error(400, code="REGRESSION_BAD_NAME", message="name must stay inside the testset", retryable=False)
+        # Unique-stem invariant: a stem may live at exactly one place in the testset tree, else the
+        # fixture mirror is ambiguous. The workbench also disables Add when in_testset, this is the guard.
+        existing = regression_capture.testset_image(name)
+        if existing is not None:
+            return _error(409, code="REGRESSION_DUPLICATE_STEM",
+                          message=f"stem {name!r} is already in the testset at {existing}", retryable=False)
         status_code, lifecycle = await runtime.get_request(request_id)
         if int(status_code) != 200:
             return JSONResponse(status_code=int(status_code), content=lifecycle)
@@ -300,7 +309,7 @@ def create_app(settings_path: str | Path | None = None) -> FastAPI:
         input_path = Path(str((dict((response.get("artifacts") or {}).get("input") or {})).get("path") or ""))
         if not input_path.exists():
             return _error(404, code="REGRESSION_INPUT_MISSING", message="input artifact not available", retryable=False)
-        dest = regression_capture.TESTSET_ROOT / f"{name}{input_path.suffix or '.png'}"
+        dest = regression_capture.TESTSET_ROOT / f"{rel}{input_path.suffix or '.png'}"
 
         def _copy_input() -> None:
             dest.parent.mkdir(parents=True, exist_ok=True)
@@ -357,23 +366,30 @@ def create_app(settings_path: str | Path | None = None) -> FastAPI:
                     retryable=False,
                 )
             response = regression_capture.graft_grouping_inputs(response, grouping_response)
-        out = await anyio.to_thread.run_sync(
-            lambda: regression_capture.capture(
-                settings.ocr, response=response, rendered_png=rendered,
-                source_bytes=source_path.read_bytes(), source_suffix=source_path.suffix or ".png",
-                name=name, variant=variant, allow_duplicate=allow_duplicate,
+        try:
+            out = await anyio.to_thread.run_sync(
+                lambda: regression_capture.capture(
+                    settings.ocr, response=response, rendered_png=rendered,
+                    source_bytes=source_path.read_bytes(), source_suffix=source_path.suffix or ".png",
+                    name=name, variant=variant, allow_duplicate=allow_duplicate,
+                )
             )
-        )
+        except ValueError as exc:  # the source stem is not unique in the testset (mirror is ambiguous)
+            return _error(409, code="REGRESSION_AMBIGUOUS_STEM", message=str(exc), retryable=False)
         return JSONResponse(status_code=200, content={**out, **regression_capture.status(name)})
 
     @app.get("/v1/regression/fixtures")
     async def regression_list() -> JSONResponse:
         return JSONResponse(status_code=200, content={"images": regression_capture.list_fixtures()})
 
+    @app.get("/v1/regression/subdirs")
+    async def regression_subdirs() -> JSONResponse:
+        return JSONResponse(status_code=200, content={"subdirs": regression_capture.list_subdirs()})
+
     @app.get("/v1/regression/fixtures/{name}/{lang}/{variant}/{artifact}")
     async def regression_variant_artifact(name: str, lang: str, variant: str, artifact: str):
         root = regression_capture.REGRESSION_ROOT.resolve()
-        variant_path = (root / name / lang / variant).resolve()
+        variant_path = (regression_capture.resolve_fixture_root(name) / lang / variant).resolve()
         try:
             variant_path.relative_to(root)
         except ValueError:
@@ -397,7 +413,7 @@ def create_app(settings_path: str | Path | None = None) -> FastAPI:
         if not (name and lang and variant):
             return _error(400, code="REGRESSION_BAD_REQUEST", message="name, lang and variant are required", retryable=False)
         root = regression_capture.REGRESSION_ROOT.resolve()
-        variant_path = (root / name / lang / variant).resolve()
+        variant_path = (regression_capture.resolve_fixture_root(name) / lang / variant).resolve()
         try:
             variant_path.relative_to(root)
         except ValueError:
@@ -417,7 +433,7 @@ def create_app(settings_path: str | Path | None = None) -> FastAPI:
         if not (name and lang and variant):
             return _error(400, code="REGRESSION_BAD_REQUEST", message="name, lang and variant are required", retryable=False)
         root = regression_capture.REGRESSION_ROOT.resolve()
-        variant_path = (root / name / lang / variant).resolve()
+        variant_path = (regression_capture.resolve_fixture_root(name) / lang / variant).resolve()
         try:
             variant_path.relative_to(root)
         except ValueError:

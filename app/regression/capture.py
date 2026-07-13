@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import re
 import shutil
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -22,12 +23,83 @@ REGRESSION_ROOT = Path("testset/_regression")
 _IMAGE_SUFFIXES = (".jpg", ".jpeg", ".png", ".webp")
 
 
+def _iter_source_images(testset_root: Path) -> Iterator[Path]:
+    """Every source image under ``testset_root`` at any depth, pruning ``_``-prefixed dirs
+    (``_regression`` / ``_regression_archive`` hold fixtures and archives, not sources)."""
+    if not testset_root.is_dir():
+        return
+    stack = [testset_root]
+    while stack:
+        for child in stack.pop().iterdir():
+            if child.is_dir():
+                if not child.name.startswith("_"):
+                    stack.append(child)
+            elif child.suffix.lower() in _IMAGE_SUFFIXES:
+                yield child
+
+
+def find_testset_images(name: str, *, testset_root: Path = TESTSET_ROOT) -> list[Path]:
+    """All source images whose stem is ``name``. More than one violates the unique-stem invariant."""
+    return sorted(p for p in _iter_source_images(testset_root) if p.stem == name)
+
+
 def testset_image(name: str, *, testset_root: Path = TESTSET_ROOT) -> Path | None:
-    for suffix in _IMAGE_SUFFIXES:
-        candidate = testset_root / f"{name}{suffix}"
-        if candidate.exists():
-            return candidate
-    return None
+    """The source image for ``name`` anywhere in the testset tree (the flat root or a subset subdir
+    like ``docpack/``), or ``None``. Stems are unique across the tree, so the first match is it."""
+    matches = find_testset_images(name, testset_root=testset_root)
+    return matches[0] if matches else None
+
+
+def source_reldir(name: str, *, testset_root: Path = TESTSET_ROOT) -> str:
+    """The dir of ``name``'s source image relative to the testset root (``''`` = flat root), so a
+    fixture can mirror it under ``_regression`` (``docpack/07_…`` -> ``_regression/docpack/07_…``).
+    Raises ``ValueError`` when the stem is not unique — the invariant the capture flow enforces;
+    returns ``''`` when the source isn't in the testset yet (a fresh upload lands at the root)."""
+    matches = find_testset_images(name, testset_root=testset_root)
+    if len(matches) > 1:
+        joined = ", ".join(str(p.relative_to(testset_root)) for p in matches)
+        raise ValueError(f"stem {name!r} is not unique in the testset ({joined})")
+    if not matches:
+        return ""
+    rel = str(matches[0].parent.relative_to(testset_root))
+    return "" if rel == "." else rel
+
+
+def resolve_fixture_root(
+    name: str, *, regression_root: Path = REGRESSION_ROOT, testset_root: Path = TESTSET_ROOT
+) -> Path:
+    """The on-disk fixture dir for stem ``name``, nested to mirror its source
+    (``_regression/docpack/07_…``). Prefers the source-mirrored location; if the source is gone,
+    locates the (unique) name dir by walking the fixture tree; falls back to the flat root when no
+    fixture exists yet (a first capture)."""
+    try:
+        reldir = source_reldir(name, testset_root=testset_root)
+    except ValueError:
+        reldir = ""
+    candidate = (regression_root / reldir / name) if reldir else (regression_root / name)
+    if candidate.exists():
+        return candidate
+    if regression_root.exists():
+        for fixture_file in regression_root.rglob("fixture.json"):
+            name_dir = fixture_file.parent.parent.parent
+            if name_dir.name == name:
+                return name_dir
+    return candidate
+
+
+def list_subdirs(*, testset_root: Path = TESTSET_ROOT) -> list[str]:
+    """Existing non-underscore subdirectories under the testset root (relative paths, any depth), for
+    the Add-to-testset destination picker. Empty dirs are included so a fresh page can be filed."""
+    out: list[str] = []
+    if not testset_root.is_dir():
+        return out
+    stack = [testset_root]
+    while stack:
+        for child in stack.pop().iterdir():
+            if child.is_dir() and not child.name.startswith("_"):
+                out.append(str(child.relative_to(testset_root)))
+                stack.append(child)
+    return sorted(out)
 
 
 def _raw_hint(llm_calls: list[dict[str, Any]]) -> str:
@@ -175,14 +247,19 @@ def capture(
     variant: str | None = None,
     allow_duplicate: bool = False,
     regression_root: Path = REGRESSION_ROOT,
+    testset_root: Path = TESTSET_ROOT,
 ) -> dict[str, Any]:
-    """Build and persist a self-contained fixture under ``<name>/<target_lang>/<variant>``: the
-    frozen inputs, the snapshot, the approved render, AND the exact ``source.<ext>`` the render ran
-    on (the canonical upload). Replay renders on that source, so the fixture never depends on the
-    ``testset/`` file matching what was captured. ``variant`` is auto-assigned when not given."""
+    """Build and persist a self-contained fixture under ``<reldir>/<name>/<target_lang>/<variant>``:
+    the frozen inputs, the snapshot, the approved render, AND the exact ``source.<ext>`` the render
+    ran on (the canonical upload). Replay renders on that source, so the fixture never depends on the
+    ``testset/`` file matching. The fixture is nested to mirror its source image's location
+    (``docpack/07_…`` -> ``_regression/docpack/07_…``); ``variant`` is auto-assigned when not given."""
     fixture = build_fixture(response, source_bytes=source_bytes)
     lang = fixture.target_lang or "unknown"
-    lang_dir = regression_root / name / lang
+    # Mirror the source's subdir under _regression; source_reldir raises if the stem is not unique.
+    reldir = source_reldir(name, testset_root=testset_root)
+    name_root = (regression_root / reldir / name) if reldir else (regression_root / name)
+    lang_dir = name_root / lang
     # A capture that replays identically to an existing variant is flagged as a duplicate (the check
     # runs before the re-OCR, so it costs nothing) — the caller then decides whether to add it anyway.
     # ``allow_duplicate`` forces the add; an explicit ``variant`` forces a (re-)write.
@@ -217,6 +294,16 @@ def capture(
     # The exact image the render ran on, so replay is faithful regardless of testset/.
     suffix = source_suffix if source_suffix.startswith(".") else f".{source_suffix or 'png'}"
     (variant_path / f"source{suffix}").write_bytes(source_bytes)
+    # Forensics-only sidecar: the raw grouping + translation LLM calls (prompt + response) of the
+    # run that produced this fixture. NOT consumed by replay or the fixture-identity hash — the
+    # deterministic chain re-parses raw_hint and reuses the frozen translations; this is here so a
+    # later "why did this fixture render like this" can read the exact prompts (the translation
+    # prompt lives nowhere else) instead of the work-dir copy the record TTL sweeps after minutes.
+    # Payloads carry no image, so this is a couple of KB per fixture.
+    (variant_path / "llm_calls.json").write_text(
+        json.dumps(response.get("llm_calls") or [], ensure_ascii=False, indent=1),
+        encoding="utf-8",
+    )
     return {
         "path": str(variant_path),
         "name": name,
@@ -235,7 +322,7 @@ def status(
     testset_root: Path = TESTSET_ROOT,
 ) -> dict[str, Any]:
     """Whether the image is in the testset and its fixtures per target language — the workbench badges."""
-    name_dir = regression_root / name
+    name_dir = resolve_fixture_root(name, regression_root=regression_root, testset_root=testset_root)
     langs: dict[str, list[str]] = {}
     if name_dir.exists():
         for lang_dir in sorted(p for p in name_dir.iterdir() if p.is_dir()):
@@ -263,7 +350,11 @@ def list_fixtures(
     out: list[dict[str, Any]] = []
     if not regression_root.exists():
         return out
-    for name_dir in sorted(p for p in regression_root.iterdir() if p.is_dir()):
+    # A fixture name-dir is any dir holding ``<lang>/<variant>/fixture.json``, at any depth — subset
+    # subdirs (docpack/…) are mirrored from the testset tree, so name/lang/variant are always the last
+    # three path levels regardless of how deep the reldir is.
+    name_dirs = {f.parent.parent.parent for f in regression_root.rglob("fixture.json")}
+    for name_dir in sorted(name_dirs, key=str):
         langs: dict[str, list[dict[str, Any]]] = {}
         for lang_dir in sorted(p for p in name_dir.iterdir() if p.is_dir()):
             variants: list[dict[str, Any]] = []
@@ -284,8 +375,10 @@ def list_fixtures(
             if variants:
                 langs[lang_dir.name] = variants
         if langs:
+            reldir = str(name_dir.parent.relative_to(regression_root))
             out.append({
                 "name": name_dir.name,
+                "reldir": "" if reldir == "." else reldir,
                 "in_testset": testset_image(name_dir.name, testset_root=testset_root) is not None,
                 "langs": langs,
             })
@@ -299,10 +392,12 @@ def delete_path(
     *,
     regression_root: Path = REGRESSION_ROOT,
 ) -> bool:
-    """Cascade-delete a name / lang / variant dir. Refuses to escape ``regression_root`` or to
+    """Cascade-delete a name / lang / variant dir. ``name`` is the (unique) stem; the fixture is
+    located wherever it is nested under ``_regression``. Refuses to escape ``regression_root`` or to
     delete the root itself."""
-    segments = [name, *([lang] if lang else []), *([variant] if variant else [])]
-    target = regression_root.joinpath(*segments).resolve()
+    base = resolve_fixture_root(name, regression_root=regression_root)
+    segments = [*([lang] if lang else []), *([variant] if variant else [])]
+    target = base.joinpath(*segments).resolve()
     root = regression_root.resolve()
     try:
         target.relative_to(root)

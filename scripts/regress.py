@@ -20,13 +20,16 @@ from app.regression.run import run_variant
 
 
 def _variant_dirs(root: Path) -> list[tuple[str, str, Path]]:
-    """``(name, label, path)`` for every ``<name>/<lang>/<variant>`` holding a fixture+snapshot."""
+    """``(name, label, path)`` for every ``<…>/<lang>/<variant>`` holding a fixture+snapshot, at any
+    depth — subset subdirs (``docpack/…``) mirror the testset tree, so name/lang/variant are always
+    the last three path levels. ``name`` is the reldir-qualified name (``docpack/07_…``)."""
     out: list[tuple[str, str, Path]] = []
-    for name_dir in sorted(p for p in root.iterdir() if p.is_dir()):
-        for lang_dir in sorted(p for p in name_dir.iterdir() if p.is_dir()):
-            for variant_dir in sorted(p for p in lang_dir.iterdir() if p.is_dir()):
-                if (variant_dir / "fixture.json").exists() and (variant_dir / "snapshot.json").exists():
-                    out.append((name_dir.name, f"{lang_dir.name}/{variant_dir.name}", variant_dir))
+    for fixture_file in sorted(root.rglob("fixture.json")):
+        variant_dir = fixture_file.parent
+        if not (variant_dir / "snapshot.json").exists():
+            continue
+        name = str(variant_dir.parent.parent.relative_to(root))
+        out.append((name, f"{variant_dir.parent.name}/{variant_dir.name}", variant_dir))
     return out
 
 
