@@ -972,6 +972,82 @@ def test_sample_region_colors_light_bg_gets_black_fg() -> None:
     assert fg == (0, 0, 0)
 
 
+def test_chromatic_ink_renders_in_its_measured_color() -> None:
+    image = Image.new("RGB", (40, 40), (255, 255, 255))
+    image.paste((180, 30, 40), (10, 10, 30, 30))  # brand-red glyph block
+    bg, fg = sample_region_colors(image, {"left": 0, "top": 0, "width": 40, "height": 40})
+    assert bg == (255, 255, 255)
+    assert fg == (180, 30, 40)
+
+
+def test_antialiased_edge_majority_does_not_wash_the_core_ink() -> None:
+    # Thin strokes: washed edge pixels OUTNUMBER the pure stroke cores (360 vs 270 here). A
+    # median over every deviating pixel would land on the washed edge colour; core selection
+    # is relative to the polarity extreme, so the pure ink survives.
+    image = Image.new("RGB", (60, 60), (255, 255, 255))
+    for y in (10, 25, 40):
+        image.paste((165, 177, 233), (14, y, 44, y + 7))      # washed stroke envelope
+        image.paste((30, 60, 200), (14, y + 2, 44, y + 5))    # pure stroke core
+    _bg, fg = sample_region_colors(image, {"left": 0, "top": 0, "width": 60, "height": 60})
+    assert fg == (30, 60, 200)
+
+
+def test_achromatic_grey_ink_keeps_its_measured_level() -> None:
+    # Mid-grey ink (shadowed receipt print) renders as soft neutral grey at its own level,
+    # not hard black — the tint is dropped, the level survives.
+    image = Image.new("RGB", (40, 40), (255, 255, 255))
+    image.paste((70, 70, 80), (10, 10, 30, 30))
+    _bg, fg = sample_region_colors(image, {"left": 0, "top": 0, "width": 40, "height": 40})
+    assert fg == (71, 71, 71)  # luminance of the measured ink, neutralised
+
+
+def test_near_black_document_ink_still_snaps_to_pure_black() -> None:
+    # Laser-print black measures ~L20: within the pole margin, so clean documents keep
+    # crisp pure black instead of a pointless (20,20,20).
+    image = Image.new("RGB", (40, 40), (255, 255, 255))
+    image.paste((20, 20, 25), (10, 10, 30, 30))
+    _bg, fg = sample_region_colors(image, {"left": 0, "top": 0, "width": 40, "height": 40})
+    assert fg == (0, 0, 0)
+
+
+def test_dark_blob_in_the_cell_cannot_hijack_light_grey_text_to_black() -> None:
+    # Reply-bar archetype: light-grey placeholder text shares its bbox with a dark avatar
+    # blob (an 11% pixel minority in the real cell). The blob is thick, text strokes are
+    # thin; the shape filter drops the blob so the text keeps its own soft grey level.
+    image = Image.new("RGB", (120, 60), (255, 255, 255))
+    for y in (18, 28, 38):  # three thin grey "text" strokes
+        image.paste((143, 143, 143), (34, y, 110, y + 3))
+    image.paste((20, 20, 20), (6, 16, 30, 40))  # dark avatar blob
+    _bg, fg = sample_region_colors(image, {"left": 0, "top": 0, "width": 120, "height": 60})
+    assert fg == (143, 143, 143)
+
+
+def test_bimodal_ink_votes_by_mass_not_by_extreme() -> None:
+    # Reply-bar "+" archetype: a bold BLACK glyph (stroke-shaped, so the blob filter keeps
+    # it) beside light-grey placeholder text. Two real inks in one cell: the 76% grey mass
+    # wins and sets the level; the black minority no longer drags the line to (0,0,0).
+    image = Image.new("RGB", (120, 60), (255, 255, 255))
+    for y in (18, 28, 38):  # grey placeholder strokes (~76% of the ink mass)
+        image.paste((143, 143, 143), (40, y, 116, y + 3))
+    image.paste((10, 10, 10), (10, 27, 34, 31))  # black "+": horizontal bar
+    image.paste((10, 10, 10), (20, 17, 24, 41))  # black "+": vertical bar
+    _bg, fg = sample_region_colors(image, {"left": 0, "top": 0, "width": 120, "height": 60})
+    assert fg == (143, 143, 143)
+
+
+def test_bg_gradient_blob_is_dropped_even_as_the_ink_majority() -> None:
+    # Shiny dark box: the border ring samples the darkest corner, so a brighter box-gradient
+    # PATCH (5x the glyph mass) also "deviates" and would drag any population vote onto the
+    # box. The patch is a thick blob, the glyphs are thin strokes: the shape filter drops the
+    # patch whole and the dim-white text renders at its own soft level.
+    image = Image.new("RGB", (100, 60), (20, 20, 20))
+    image.paste((80, 60, 45), (10, 10, 46, 46))  # glossy gradient patch (blob, majority mass)
+    for y in (18, 28, 38):                       # dim-white glyph strokes beside it
+        image.paste((200, 200, 200), (52, y, 94, y + 3))
+    _bg, fg = sample_region_colors(image, {"left": 0, "top": 0, "width": 100, "height": 60})
+    assert fg == (200, 200, 200)
+
+
 def test_fit_text_single_line_fits_box() -> None:
     fitted = fit_text("Exit", max_width=200, max_height=40, wrap=False)
     assert fitted.lines == ["Exit"]

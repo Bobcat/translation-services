@@ -236,10 +236,16 @@ def _plan_group(
     if len(colors) > 1:
         median_bg = tuple(int(median(bg[channel] for bg, _ in colors)) for channel in range(3))
         if all(max(abs(bg[c] - median_bg[c]) for c in range(3)) <= _BG_SNAP_DELTA for bg, _ in colors):
-            # Snap the fg by majority too: the per-plane fg is ink-evidence (not derived from
-            # bg), so recomputing it from the snapped bg would throw that evidence away.
+            # Snap the fg too when the per-plane ink samples agree within tolerance (measurement
+            # noise on one ink), to their median — the fg is ink-evidence (not derived from bg),
+            # so recomputing it from the snapped bg would throw that evidence away. A genuinely
+            # different-coloured line (an accent line inside the element) keeps its own ink.
             fgs = [fg for _, fg in colors]
-            colors = [(median_bg, max(set(fgs), key=fgs.count))] * len(colors)
+            median_fg = tuple(int(median(fg[channel] for fg in fgs)) for channel in range(3))
+            if all(max(abs(fg[c] - median_fg[c]) for c in range(3)) <= _BG_SNAP_DELTA for fg in fgs):
+                colors = [(median_bg, median_fg)] * len(colors)
+            else:
+                colors = [(median_bg, fg) for fg in fgs]
 
     # "band" size metric: clamp each plane's size target to its ink band scaled by the
     # document's own extent/band norm — a line whose polygon is stretched by sparse tall
