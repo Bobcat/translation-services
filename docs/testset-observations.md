@@ -778,6 +778,23 @@ overlay opaque cards.
 
 ---
 
+## `docpack-02` (newsletter, main story + teal sidebar, en→nl) — issue line unreadable: VLM weight miss
+
+The "ISSUE 12 • SUMMER 2024" line on the teal band renders in its correct measured orange
+(237,139,0) but is unreadable: the source is heavy bold caps (stroke mass carries the readability —
+orange-on-teal has ΔL≈49, chroma-only contrast), while the VLM labels the line `400` (the big
+"IN THIS ISSUE:" in the same palette gets `800`, so it is a ROLE prior — small marginal line →
+regular — not a colour-perception issue). The bold machinery exists (`fit.py` picks the bold cut at
+weight ≥ 600) but is fed 400. **Measured (2026-07-13): grayscaling the input does NOT fix it** —
+grouping call replayed 3× colour + 3× grayscale via the fixture's `llm_calls.json` prompt: the
+issue line stays 400 in all six runs, and grayscale flips the weight on 3 OTHER lines (consistent
+across runs — systematic input sensitivity, direction unvetted). Idea rejected. PARKED fix
+direction: deterministic stroke-width backstop — thickness relative to glyph height measured on
+the source pixels (region is already cropped for colour sampling) overrides an implausible VLM
+weight; no prompt change.
+
+---
+
 ## `docpack-04` (brochure: icon margin with captions + content rows, en→nl)
 
 Archetype: a table whose first column is a MERGED cell per group (icon + caption spanning
