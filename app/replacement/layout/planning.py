@@ -31,6 +31,7 @@ from app.replacement.layout.tables import _reproduced_in
 from app.replacement.layout.markers import _cell_marker
 from app.replacement.layout.markers import _prepend_marker
 from app.replacement.layout.markers import _strip_leading_glyph
+from app.replacement.layout.markers import _strip_unprinted_lead
 from app.replacement.layout.markers import _bullet_geometry
 from app.replacement.layout.sweep import _sweep_stray_ink
 from app.replacement.layout.sweep import _column_mask
@@ -139,6 +140,7 @@ def _plan_group(
     own_boxes: list[dict[str, Any]] = []  # members this group ERASES — sweep-eligible ground
     for unit in units:
         translated = fold_lone_fullwidth_punctuation(str(unit.get("translated_text") or "").strip())
+        translated = _strip_unprinted_lead(translated, unit)
         # Empty or an OCR-noise single char -> leave the original alone. A single CJK character
         # is a full word ("PUSH" -> "推"), not noise, and must render.
         if not translated or (len(translated) == 1 and not is_cjk_text(translated)):

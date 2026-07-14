@@ -11,6 +11,7 @@ from PIL import ImageDraw
 import math
 
 from app.replacement.ground.color import sample_region_colors
+from app.replacement.layout.markers import _strip_unprinted_lead
 from app.replacement.ground.inpaint import border_pads
 from app.replacement.ground.inpaint import budget_scale
 from app.replacement.ground.inpaint import context_window
@@ -1046,6 +1047,25 @@ def test_bg_gradient_blob_is_dropped_even_as_the_ink_majority() -> None:
         image.paste((200, 200, 200), (52, y, 94, y + 3))
     _bg, fg = sample_region_colors(image, {"left": 0, "top": 0, "width": 100, "height": 60})
     assert fg == (200, 200, 200)
+
+
+def test_badge_number_and_arrow_unprinted_by_members_are_stripped() -> None:
+    # "2 Tile Tabs" / "4 → Go To Arrow": the VLM transcribes the badge digit (and leader
+    # arrow) into the heading's hint line while the badge graphic stays in the image — the
+    # translation must not print them again next to the intact badge.
+    unit = {"level": "header", "members": [{"text": "Tile Tabs"}]}
+    assert _strip_unprinted_lead("2 Tegel-tabbladen", unit) == "Tegel-tabbladen"
+    unit = {"level": "header", "members": [{"text": "Go To Arrow"}]}
+    assert _strip_unprinted_lead("4 → Ga Naar Pijl", unit) == "Ga Naar Pijl"
+
+
+def test_printed_enumerator_and_body_numbers_stay() -> None:
+    # A number a member actually prints stays (a step heading whose big digit OCR'd), and
+    # body-level text is never touched (a translator may digitise a written number there).
+    unit = {"level": "header", "members": [{"text": "2"}, {"text": "Lever je pakket in"}]}
+    assert _strip_unprinted_lead("2 Lever je pakket in", unit) == "2 Lever je pakket in"
+    unit = {"level": "body", "members": [{"text": "twee weken de tijd"}]}
+    assert _strip_unprinted_lead("2 weken de tijd", unit) == "2 weken de tijd"
 
 
 def test_fit_text_single_line_fits_box() -> None:

@@ -54,6 +54,35 @@ def _prepend_marker(units: list[dict[str, Any]], marker: str) -> list[dict[str, 
     return out
 
 
+# A numbered BADGE or leader arrow the VLM transcribes into a heading's hint line ("2 Tile
+# Tabs", "4 → Go To Arrow") while the badge graphic itself stays intact in the image: the
+# unit's own members never printed the token, so rendering the translation would print it
+# AGAIN next to the badge. Strip such leading tokens from header/title units when NO member
+# carries them. Self-limiting twice over: a printed enumerator is a member (stays), and a
+# printed number OCR missed is not erased either, so stripping stays visually right. The
+# header/title gate keeps body prose out (a translator may legitimately digitise a written
+# number there).
+_LEAD_BADGE_TOKEN = re.compile(r"^\s*([0-9]{1,2}[.)]?|[→←↑↓])(?:\s+|$)")
+
+
+def _strip_unprinted_lead(translated: str, unit: dict[str, Any]) -> str:
+    """``translated`` without leading badge-number/arrow tokens its members never printed."""
+    if unit.get("level") not in ("header", "title") or unit.get("bullet"):
+        return translated
+    member_text = " ".join(str(m.get("text") or "") for m in (unit.get("members") or []))
+    member_tokens = set(re.findall(r"[0-9]{1,4}|[→←↑↓]", member_text))
+    out = translated
+    while True:
+        match = _LEAD_BADGE_TOKEN.match(out)
+        if not match:
+            return out
+        token = match.group(1).rstrip(".)")
+        remainder = out[match.end():]
+        if not remainder.strip() or token in member_tokens:
+            return out
+        out = remainder
+
+
 # A glyph marker ("•"/"*"/"-"/"◊"...) that may lead the translated text. The ink-scan path keeps the
 # ORIGINAL glyph in the image, so a glyph still in the text would render twice — strip one leading glyph
 # (plus its space) before the inset. Alphanumeric markers take the redraw path (_prepend_marker) instead.
