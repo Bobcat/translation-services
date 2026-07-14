@@ -47,7 +47,23 @@ def diff_reocr(
     multiset) means a change in how the render groups or splits a line IS caught ("ah pizza" as one
     segment vs "ah" + "pizza" is a real difference), not normalised away. The few px absorb sub-pixel
     anti-aliasing."""
+    diffs, _boxes = reocr_mismatches(expected, actual, max_shift=max_shift)
+    return diffs
+
+
+def reocr_mismatches(
+    expected: list[dict[str, Any]],
+    actual: list[dict[str, Any]],
+    *,
+    max_shift: float = 3.0,
+) -> tuple[list[str], list[dict[str, Any]]]:
+    """``(diffs, boxes)`` — the mismatch strings of :func:`diff_reocr` plus one box per
+    mismatched segment for the reviewer's image-side view: a missing or moved segment is boxed
+    where it sat in the SNAPSHOT, an extra segment where it sits in the ACTUAL (both renders
+    share the source geometry, so that box still marks the place to look on the snapshot).
+    Each box: ``{kind: missing|moved|extra, left, top, width, height}``."""
     diffs: list[str] = []
+    boxes: list[dict[str, Any]] = []
 
     exp_text = Counter(_norm(row["text"]) for row in expected if _norm(row["text"]))
     act_text = Counter(_norm(row["text"]) for row in actual if _norm(row["text"]))
@@ -58,10 +74,22 @@ def diff_reocr(
     if extra:
         diffs.append(f"extra rendered segments: {dict(extra)}")
 
-    exp_seg = [(_norm(r["text"]), *_centroid(r)) for r in expected if _norm(r["text"])]
+    def _box_rows(counter: Counter, rows: list[dict[str, Any]], kind: str) -> None:
+        budget = dict(counter)
+        for row in rows:
+            token = _norm(row["text"])
+            if budget.get(token, 0) > 0:
+                budget[token] -= 1
+                boxes.append({"kind": kind, "left": row["left"], "top": row["top"],
+                              "width": row["width"], "height": row["height"]})
+
+    _box_rows(missing, expected, "missing")
+    _box_rows(extra, actual, "extra")
+
+    exp_seg = [(_norm(r["text"]), *_centroid(r), r) for r in expected if _norm(r["text"])]
     act_seg = [(_norm(r["text"]), *_centroid(r)) for r in actual if _norm(r["text"])]
     remaining = list(act_seg)
-    for token, ex, ey in exp_seg:
+    for token, ex, ey, row in exp_seg:
         candidates = [(i, a) for i, a in enumerate(remaining) if a[0] == token]
         if not candidates:
             continue
@@ -69,5 +97,7 @@ def diff_reocr(
         shift = ((hit[1] - ex) ** 2 + (hit[2] - ey) ** 2) ** 0.5
         if shift > max_shift:
             diffs.append(f"'{token}' moved {shift:.0f}px (> {max_shift:.0f}px)")
+            boxes.append({"kind": "moved", "left": row["left"], "top": row["top"],
+                          "width": row["width"], "height": row["height"]})
         remaining.pop(index)
-    return diffs
+    return diffs, boxes

@@ -260,6 +260,8 @@ testset/_regression/<image>/<lang>/<variant>/
   snapshot.png     # the approved render (inspection; not used in the diff)
   source.<ext>     # the exact canonical image the render ran on
   actual.png       # only after a failed run — the current render, for snapshot-vs-actual
+  snapshot_diff.png # only after a failed run — the snapshot with a box around each mismatched
+                   # re-OCR segment (red = missing/moved, orange = extra), for finding the diff
 ```
 **gitignored** — the source image and re-OCR text carry real PII.
 
@@ -313,8 +315,8 @@ Browses and manages existing fixtures by **replay** (no pipeline). It is a persi
 "Run all" survives sidebar navigation. Endpoints:
 
 - `GET /v1/regression/fixtures` — the inventory tree (name → lang → variant + light metadata).
-- `GET …/fixtures/{name}/{lang}/{variant}/{snapshot.png,actual.png,source}` — the rendered images
-  and the fixture's own captured source image.
+- `GET …/fixtures/{name}/{lang}/{variant}/{snapshot.png,actual.png,snapshot_diff.png,source}` —
+  the rendered images and the fixture's own captured source image.
 - `POST /v1/regression/run {name,lang,variant}` — replay + diff one variant →
   `{passed, diffs, has_actual, timings}`. `timings` is the per-stage replay wall-clock
   (`group_ms` = parse hint + grouping/align, `render_ms`, `reocr_ms`), shown after the variant in

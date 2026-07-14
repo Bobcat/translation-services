@@ -394,7 +394,7 @@ def create_app(settings_path: str | Path | None = None) -> FastAPI:
             variant_path.relative_to(root)
         except ValueError:
             return _error(400, code="REGRESSION_PATH_INVALID", message="invalid path", retryable=False)
-        if artifact in {"snapshot.png", "actual.png"}:
+        if artifact in {"snapshot.png", "actual.png", "snapshot_diff.png"}:
             path, media_type = variant_path / artifact, "image/png"
         elif artifact == "source":  # the fixture's own captured image (variable extension)
             sources = sorted(variant_path.glob("source.*"))
