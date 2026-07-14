@@ -928,3 +928,87 @@ notes of 2026-07-13 and is cheap to rebuild from this entry.
   match, so no dangling separator leaks into the preceding column's text). The fixture was
   re-captured live: headers and scenario pairs now split per column, no junk. Only this
   image's hints carried the shape — parser change no-op on the other 41 by construction.
+
+---
+
+## `docpack-08` (software quickguide, front: circles + embedded screenshot, en→nl) — the designed-surface class
+
+The heaviest image of the set; the footprint-faithful pipeline degenerates here (106 units: 30
+hint-bound, 76 leftovers, 12 ignored). Root mechanics, diagnosed 2026-07-14:
+
+1. **Title + section header untranslated (ignored pixels).** "Shared Care Record V4" and "New
+   Home Page" exist as hint lines, but their words ALSO occur in body prose; the body claim wins
+   the cluster resolution and the display-cells claim is dropped as redundant. The second-print
+   demote cannot rescue it: the OCR reads display text as word-fragment cells with ±5px y-jitter,
+   align's raw (top,left) member sort scrambles them ("Shared Record Care"), and the demote's
+   exact-clean test fails on the scrambled concat → drop instead of demote. OPEN small fix
+   (not yet approved): token-multiset exactness for `_is_second_print` → title demotes to a
+   translated leftover at its own spot.
+2. **Overlapping text soup in the green circle.** Same fragment-OCR: paragraph binding to its
+   hint line stops partway (28 of ~45 cells, scrambled member order), the sentence tail falls
+   apart into per-word leftovers each translated and rendered at its own bbox — a mixed NL/EN
+   word salad on top of the group reflow.
+3. **Ordering cannot be fixed globally**: dry-run of line-clustered (line, x) member ordering
+   changed the order of 119 units across ~25 fixtures (every photo has same-line y-jitter) —
+   rejected ungated; any ordering change needs an image-level degeneracy gate.
+
+**Agreed direction (design ratified 2026-07-14, recorded in memory `project-region-first-mode`,
+nothing built): a second, region-first render mode for this class** — surfaces segmented from
+pixels (ink-free downscale + colour clustering; background model per surface), widgets (the
+screenshot) by dual evidence (complex-texture + layout-model box) keeping the existing
+cell-faithful route inside, text blocks formed within one surface only, and per designed surface
+erase-the-frame + re-typeset the translated block. Self-gating: a surface qualifies exactly when
+its background is trivially modellable, so photos/receipts never enter the mode. A reference
+render of this page by a major translation service shows the same architecture from the other
+side (paragraphs re-set with different line breaks; but per-element artifacts inside the
+screenshot and a re-typeset, mangled logo wordmark) — mode choice per class, not secret sauce.
+
+---
+
+## `docpack-09` (software quickguide, back: white page, many blocks + screenshots, en→nl)
+
+Same class as docpack-08 at the root — align even MORE degenerate (217 cells → 133 units, only 26
+hint-bound, 107 leftovers, 36 ignored) — but the white background masks it: per-cell replacement
+of line-level leftovers on white is accidentally near-correct, so the render LOOKS far better
+than 08. A reference render by a major translation service is also mediocre here (confirms class
+difficulty). Findings + two shipped fixes (2026-07-14):
+
+1. **FIXED — LaTeX-glyph leak**: the VLM read an arrow glyph as `$\rightarrow$` ("4 $\rightarrow$
+   Go To Arrow"), the translator copied it, the render printed it literally. `hint_parser` now
+   normalises the four arrow forms to their glyph (`_LATEX_GLYPH`).
+2. **FIXED — detached second prints dropped instead of demoted** (also the docpack-08 title
+   class): a display title whose words re-occur in body prose claims the body's hint line, becomes
+   a merge candidate (its tokens look new at first), the merge is refused for non-adjacency — and
+   that refusal path never consulted the second-print verdict. Both refusal sites in
+   `_resolve_claim_clusters` now demote a claim that is token-covered after the merges AND
+   exact-clean + spatially apart. Windfalls measured: docpack-05 'NHS.' footer and docpack-07's
+   English 'property...' residue (now absorbed + translated, column re-wraps cleanly); 08's
+   'leaflet to/on/reverse.' English residues erased.
+3. **Translator escape (parked, translator-side)**: 'Shared Care Record' bound no hint line
+   (anchor sparsity), became a leftover, and the translator kept it as a proper name — the
+   docpack-03 footer class.
+4. **FIXED (2026-07-14, user review round 2) — badge number/arrow duplicated**: the VLM
+   transcribes the numbered badge disc and leader arrow into the heading's hint line ("2 Tile
+   Tabs", "4 → Go To Arrow") while the badge graphic stays intact; the translation printed them
+   again beside it. `markers._strip_unprinted_lead` (called in planning) strips leading
+   number/arrow tokens from header/title units when no member printed them. Self-limiting twice:
+   a printed enumerator is a member (stays — return-shipment steps), and a printed number OCR
+   missed is not erased either, so stripping stays visually right (verified on docpack-10's
+   "1 Introduction": printed serif 1 untouched + clean "Introductie"). Body level untouched (a
+   translator may digitise a written number there — named limit).
+5. **PARKED — logo lockup re-typeset**: the VLM emits the logo wordmark as a text line
+   (hint[0] 'Graphnet Transforming Care'), cells bind cleanly, the unit erases + re-sets the
+   brand lockup ("beheaded"/re-split per run). An honest fix needs a brand-lockup preserve
+   heuristic (icon-adjacent + short + title-ish) — deferred; note the reference service mangles
+   this too ("Grafnet").
+6. **PARKED — callout starts inside the screenshot**: a screenshot UI cell ('High Contrast',
+   left=1770) is stolen into the callout unit (left≈1993) by token match, dragging the reflow
+   frame into the image. Binding-sparsity class → region-first.
+7. The rest (binding sparsity, fused per-line translations) = the designed-surface class → see
+   § docpack-08 / memory `project-region-first-mode`. Fixture note: the frozen translation of
+   the arrow line still carries the literal `$\rightarrow$` (captured before the parser fix);
+   live runs are clean — only a re-capture would refresh it.
+
+Baseline note: 05/07/08/09 re-baselined for the demote change; 08/09 snapshots must be frozen
+IN-SEQUENCE (see the LaMa-drift recipe — the re-OCR of a smear segment is context-sensitive too,
+a standalone-process reocr of the same PNG bytes can read 'dl' where in-sequence runs read 'dil').
