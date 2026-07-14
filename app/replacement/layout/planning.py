@@ -23,13 +23,16 @@ from app.replacement.text.wrap import _raw_condense
 from app.replacement.text.wrap import _condense_scale
 from app.replacement.text.wrap import _WIDTH_SLACK
 from app.replacement.text.wrap import _CONDENSE_FLOOR
+from app.replacement.text.fit import draw_text
 from app.replacement.text.fit import fold_lone_fullwidth_punctuation
 from app.replacement.text.fit import is_cjk_text
+from app.replacement.ground.color import _CHROMA_SNAP_SPREAD
 from app.replacement.ground.color import sample_oriented_colors
 from app.replacement.layout.tables import _split_table_row
 from app.replacement.layout.tables import _reproduced_in
 from app.replacement.layout.markers import _cell_marker
 from app.replacement.layout.markers import _prepend_marker
+from app.replacement.layout.markers import _restore_printed_lead_marker
 from app.replacement.layout.markers import _strip_leading_glyph
 from app.replacement.layout.markers import _strip_unprinted_lead
 from app.replacement.layout.markers import _bullet_geometry
@@ -112,6 +115,70 @@ def _justify_overhang_width(natural_w: float, condense: float, plane_width: floa
 # line falls back to ragged left — a near-empty last-but-one line must not become a river.
 _JUSTIFY_MAX_EXTRA = 1.5
 _JUSTIFY_MAX_SHRINK = 0.25
+# Rendered lines anchor on their plane's measured TOP; OCR quads wobble a few px, and one
+# sparse tall glyph (an emoji, a math bracket) inflates a single line's top by a third of a
+# line height — on a uniformly-leaded source paragraph the render then shows visibly uneven
+# leading, down to near-collisions. When the source lines demonstrably sit on one uniform
+# grid, each plane's top snaps onto that grid. The grid is a TRIMMED least-squares fit of
+# index -> top: fit, and while the worst top misses the grid by more than noise, retire it
+# (within a small budget, shared with _JUSTIFY_SOFT_FRACTION, granted from 6 lines up) and
+# refit. A retired top must then be EXPLAINED by its own line's glyph extent: a sparse tall
+# glyph pulls a top UP by that line's height surplus over the group's median — residual
+# ~= -(height - median height) — and only that. Real structure has no such alibi and the
+# group is left untouched WHOLE (no half-snapped blocks): a paragraph gap displaces a line
+# withOUT extra height (a leaflet's two stacked paragraphs in one group — numerically the
+# closest false-friend: residual -8.4 vs a 3px height surplus), an extra OCR plane shifts
+# every later index and never converges, a ToC's designed gaps scatter throughout. Noise
+# tolerance measured across the document-testset body paragraphs: quad wobble <= ~0.13x
+# line height.
+_PITCH_SNAP_MIN_LINES = 3
+_PITCH_SNAP_NOISE_RATIO = 0.2  # top-residual tolerance, x line height
+
+
+def _snap_line_pitch(planes: list[dict[str, Any]]) -> None:
+    """Snap plane tops onto the group's uniform line grid (see the _PITCH_SNAP_* rationale).
+    Mutates only each frame's ymin — the erase quads keep hugging the true ink; only the
+    rendered line's anchor moves. No-op whenever the grid evidence fails."""
+    if len(planes) < _PITCH_SNAP_MIN_LINES:
+        return
+    tops = [plane["frame"][4] for plane in planes]
+    if any(below <= above for above, below in zip(tops, tops[1:])):
+        return  # not a top-to-bottom stack of lines (side-by-side clusters)
+    line_h = median(plane["true_height"] for plane in planes)
+    tolerance = _PITCH_SNAP_NOISE_RATIO * line_h
+    budget = len(planes) // _JUSTIFY_SOFT_FRACTION if len(planes) >= 6 else 0
+    active = dict(enumerate(tops))
+    trimmed: list[int] = []
+    for _ in range(budget + 1):
+        if len(active) < _PITCH_SNAP_MIN_LINES:
+            return
+        pitch, anchor = _ls_line(active)
+        if pitch < 0.5 * line_h:
+            return  # tighter than stacked text lines can sit
+        worst_index = max(active, key=lambda i: abs(active[i] - (anchor + pitch * i)))
+        if abs(active[worst_index] - (anchor + pitch * worst_index)) > tolerance:
+            del active[worst_index]  # retire the worst top and refit
+            trimmed.append(worst_index)
+            continue
+        for index in trimmed:  # every retired top needs the glyph-extent alibi
+            residual = tops[index] - (anchor + pitch * index)
+            surplus = planes[index]["true_height"] - line_h
+            if residual > tolerance or abs(residual + surplus) > tolerance:
+                return
+        for index, plane in enumerate(planes):
+            x_axis, y_axis, xmin, xmax, _ymin, ymax = plane["frame"]
+            plane["frame"] = (x_axis, y_axis, xmin, xmax, anchor + pitch * index, ymax)
+        return
+
+
+def _ls_line(points: dict[int, float]) -> tuple[float, float]:
+    """Least-squares ``(slope, intercept)`` through ``{index: value}``."""
+    count = len(points)
+    mean_i = sum(points) / count
+    mean_v = sum(points.values()) / count
+    denominator = sum((i - mean_i) ** 2 for i in points)
+    slope = sum((i - mean_i) * (v - mean_v) for i, v in points.items()) / denominator
+    return slope, mean_v - slope * mean_i
 
 
 def _planes_justified(planes: list[dict[str, Any]]) -> bool:
@@ -181,11 +248,32 @@ def _justified_text_image(
     draw = ImageDraw.Draw(image)
     x = 0.0
     for word in words[:-1]:
-        draw.text((x, 0), word, font=font, fill=fg + (255,))
+        draw_text(draw, (x, 0), word, font, fg + (255,))
         x += font.getlength(word) + space_w + per_gap
     # anchor the last word's right edge on the target so rounding drift cannot fray the margin
-    draw.text((target_w - font.getlength(words[-1]), 0), words[-1], font=font, fill=fg + (255,))
+    draw_text(draw, (target_w - font.getlength(words[-1]), 0), words[-1], font, fg + (255,))
     return image
+
+def _translation_preserves_source(translated: str, source: str) -> bool:
+    """Whether the "translation" is the source text unchanged — names, emails, URLs, an
+    untranslated affiliation line. Words (letter/digit runs) must match exactly and in
+    order; symbol and punctuation differences are ignored: OCR reads an affiliation's
+    marker symbols as noise or not at all, while the VLM transcribes varying lookalikes
+    (⋆/♠/✦ swap run to run) — symbol inequality is no evidence that the WORDS changed.
+    A line without any letter (a bare price/number, whose decimal separator may localize)
+    requires exact equality instead of word equality."""
+    src = " ".join(str(source or "").split())
+    tr = " ".join(str(translated or "").split())
+    if not src:
+        return False
+    if tr == src:
+        return True
+    src_words = re.findall(r"[^\W_]+", src)
+    tr_words = re.findall(r"[^\W_]+", tr)
+    if not src_words or src_words != tr_words:
+        return False
+    return any(ch.isalpha() for word in src_words for ch in word)
+
 
 def _plan_group(
     base: Image.Image,
@@ -201,6 +289,7 @@ def _plan_group(
     protected_boxes: list[dict[str, Any]] | None = None,
     sweep_ok: bool | None = None,
     document_member_texts: list[tuple[Any, str]] | None = None,
+    preserve_unchanged_text: bool = False,
 ) -> list[_Job]:
     # The read-only pixel view is materialised ONCE per render (in render_translated_image)
     # and threaded in: np.asarray(base) copies the whole frame, and _plan_group runs per
@@ -234,6 +323,7 @@ def _plan_group(
                     protected_boxes=protected_boxes,
                     sweep_ok=sweep_ok,
                     document_member_texts=document_member_texts,
+                    preserve_unchanged_text=preserve_unchanged_text,
                 )
             ]
 
@@ -260,6 +350,21 @@ def _plan_group(
         # is a full word ("PUSH" -> "推"), not noise, and must render.
         if not translated or (len(translated) == 1 and not is_cjk_text(translated)):
             continue
+        # Under the preserve_unchanged_text flag (the translation layer's whitespace/case
+        # check, extended here with word-level symbol tolerance): untranslated content
+        # (names, emails, an affiliation line whose marker symbols OCR and VLM read
+        # differently) keeps its original print — skip the unit whole (no erase, no draw).
+        # Re-typesetting identical text can only degrade it: approximate font and weight,
+        # lost superscripts/small caps, erase residue from marks outside the OCR quads.
+        if preserve_unchanged_text and _translation_preserves_source(
+            translated, str(unit.get("source_text") or "")
+        ):
+            continue
+        # Footnote-style lead marker the parse/translation lost ("*Equal contributions." ->
+        # "Gelijke bijdragen.") — re-add the PRINTED marker; the bullet paths above handle
+        # their own glyphs and stay out of this.
+        if not cell_marker and not loose_glyph:
+            translated = _restore_printed_lead_marker(translated, unit)
         members = [
             m for m in (unit.get("members") or [])
             if m.get("bbox") and (m.get("translate") or _reproduced_in(m, translated))
@@ -370,6 +475,22 @@ def _plan_group(
             else:
                 colors = [(median_bg, fg) for fg in fgs]
 
+    # Inline-accent colour cannot be re-placed: the fg is sampled per SOURCE line, but the
+    # translation re-wraps over the planes, so a chromatic span's line index no longer marks
+    # the same words — a blue citation run starts a line early or bleeds into the following
+    # prose. In body prose a mix of chromatic and achromatic line inks therefore demotes to
+    # the achromatic ink (the running text's): colour on the wrong words is worse than a
+    # dropped accent. No-ops: an element whose EVERY line is the accent colour (nothing
+    # mixed), and title/header/footer levels — a two-tone heading is per-line by design.
+    # NAMED LIMIT: faithful inline colour needs span-level colours through translation
+    # (the parked accent-spans follow-up); until then prose accents are dropped, not moved.
+    if len(colors) > 1 and all(u.get("level") == "body" for u in units):
+        fgs = [fg for _, fg in colors]
+        achromatic = [fg for fg in fgs if max(fg) - min(fg) <= _CHROMA_SNAP_SPREAD]
+        if achromatic and any(max(fg) - min(fg) > _CHROMA_SNAP_SPREAD for fg in fgs):
+            base_fg = tuple(int(median(fg[channel] for fg in achromatic)) for channel in range(3))
+            colors = [(bg, base_fg) for bg, _ in colors]
+
     # "band" size metric: clamp each plane's size target to its ink band scaled by the
     # document's own extent/band norm — a line whose polygon is stretched by sparse tall
     # glyphs sinks to the size its band says, everything else stays on the extent path
@@ -386,7 +507,12 @@ def _plan_group(
     # renders at the cohort's shared OCR-median size, so a list the VLM judged one size renders
     # uniform instead of each item at its own noisy per-line measurement. A short-line item then
     # sizes UP to the cohort and re-wraps over its available planes (keeping the size instead of
-    # collapsing to one small line). Only when the cohort passed the agreement gate.
+    # collapsing to one small line). Only when the cohort passed the agreement gate. The clamp is
+    # deliberately two-sided: an element measuring ABOVE the cohort is usually diacritic/glyph
+    # inflation (an accented name's quad reads ~25% taller than its unaccented siblings), so a
+    # measured-high exemption breaks list uniformity — tried and reverted; a genuinely larger
+    # element mislabeled with the cohort's pt (an affiliation line labeled body-pt) stays the
+    # named limit, mitigated by the unchanged-text preserve on document categories.
     if size_cohorts and angle == 0.0:
         pt = next((u.get("font_size") for u in units if u.get("font_size") is not None), None)
         cohort_height = size_cohorts.get(int(pt)) if pt is not None else None
@@ -470,6 +596,10 @@ def _plan_group(
         if body and (len(body) - feasible) > max(1, len(body) // _JUSTIFY_SOFT_FRACTION):
             justified = False
 
+    # After every consumer of the measured frames (colour sampling, slack/extend scans,
+    # justify evidence): regularise the RENDER anchors onto the source's uniform line grid.
+    _snap_line_pitch(planes)
+
     jobs: list[_Job] = []
     for index, plane in enumerate(planes):
         x_axis, y_axis, xmin, xmax, ymin, ymax = plane["frame"]
@@ -497,7 +627,7 @@ def _plan_group(
             if text_img is None:
                 text_w_nat = max(1, int(font.getlength(line)))
                 text_img = Image.new("RGBA", (text_w_nat, text_h), (0, 0, 0, 0))
-                ImageDraw.Draw(text_img).text((0, 0), line, font=font, fill=fg + (255,))
+                draw_text(ImageDraw.Draw(text_img), (0, 0), line, font, fg + (255,))
             text_w_nat = text_img.width
             text_w = max(1, int(round(text_w_nat * condense)))
             if justified and index < last_text_index:

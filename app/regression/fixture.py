@@ -61,6 +61,12 @@ class Fixture:
         return str(self.request_flags.get("erase_fill_mode") or "flat")
 
     @property
+    def preserve_unchanged_text(self) -> bool:
+        # Same rule: the flag also gates the render-layer identity-preserve, so replay must
+        # reproduce it. Fixtures captured before default to False (everything re-renders).
+        return bool(self.request_flags.get("preserve_unchanged_text", False))
+
+    @property
     def width_fit_mode(self) -> str:
         # Same rule again; fixtures captured before the flag existed rendered "footprint".
         return str(self.request_flags.get("width_fit_mode") or "footprint")

@@ -43,6 +43,7 @@ def run_rerender_image_pipeline(
     # that was translated and rendered. The flag is carried over from the source request by
     # submit_rerender — the body cannot override it (that would need a re-translate).
     preserve_heuristic_text = _bool_request_flag(request, "preserve_heuristic_text", default=True)
+    preserve_unchanged_text = _bool_request_flag(request, "preserve_unchanged_text", default=False)
     render_size_mode = str(request.get("render_size_mode") or "median").strip() or "median"
     erase_fill_mode = str(request.get("erase_fill_mode") or "inpaint").strip() or "inpaint"
     width_fit_mode = str(request.get("width_fit_mode") or "footprint").strip() or "footprint"
@@ -78,6 +79,8 @@ def run_rerender_image_pipeline(
         width_fit_mode=width_fit_mode,
         size_metric_mode=size_metric_mode,
         size_cohort_mode=size_cohort_mode,
+        preserve_unchanged_text=preserve_unchanged_text,
+        image_category=str(source_grouping.get("category") or ""),
     )
     replacement_wall_ms = _elapsed_ms(replacement_started)
 

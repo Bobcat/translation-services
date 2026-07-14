@@ -108,6 +108,12 @@ def _split_table_row(
         cell = dict(unit)
         cell["translated_text"] = " ".join(text for _, text in sorted(column_texts[field]))
         cell["members"] = cell_members
+        # The cell's own translatable member texts, NOT the parent row's (dict(unit) copied
+        # that): the renderer's identity-preserve compares a cell's translation against its
+        # source, and against the whole row every split field would read as changed.
+        cell["source_text"] = " ".join(
+            str(m.get("text") or "") for m in cell_members if m.get("translate") and m.get("text")
+        )
         cell["field_translations"] = None  # already split — don't re-enter
         cells.append(cell)
     return _merge_close_table_cells(cells)
@@ -128,6 +134,9 @@ def _merge_close_table_cells(cells: list[dict[str, Any]]) -> list[dict[str, Any]
         previous = dict(merged[-1])
         previous["translated_text"] = " ".join(
             part for part in (previous.get("translated_text"), cell.get("translated_text")) if part
+        )
+        previous["source_text"] = " ".join(
+            part for part in (previous.get("source_text"), cell.get("source_text")) if part
         )
         previous["members"] = list(previous.get("members") or []) + list(cell.get("members") or [])
         merged[-1] = previous

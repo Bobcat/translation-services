@@ -83,6 +83,35 @@ def _strip_unprinted_lead(translated: str, unit: dict[str, Any]) -> str:
         out = remainder
 
 
+# Footnote-style lead marker ("*Equal contributions.", "†note") — a symbol of this class
+# directly before a word. The hint parse can eat a leading "*" as markdown noise (and the
+# translator may drop the symbol), after which nothing re-draws it while the erase wipes the
+# printed one: the footnote loses its mark. The OCR member text is the PRINT evidence — when
+# it leads with such a marker and the translation lost every leading symbol, the printed
+# marker is re-added. No-op when the translation still carries a marker of its own (also a
+# VLM-lookalike variant: the class covers the suit/star swaps).
+_LEAD_MARKER_CHARS = "*†‡§¶⋆✦◊⋄♠♣♥♦♡♢"
+# Print side: the marker must sit DIRECTLY on the word (footnote typography, "*Equal") — a
+# detached "* word" is a bullet, which has its own paths.
+_PRINTED_LEAD_MARKER = re.compile(rf"^([{re.escape(_LEAD_MARKER_CHARS)}])(?=\w)")
+
+
+def _restore_printed_lead_marker(translated: str, unit: dict[str, Any]) -> str:
+    """``translated`` with the unit's PRINTED lead marker re-added when the translation lost it
+    (see _PRINTED_LEAD_MARKER). The marker comes from the first member's OCR text — print
+    evidence, not the hint — and is attached the way the print attaches it (no space)."""
+    members = unit.get("members") or []
+    first_text = str(members[0].get("text") or "").lstrip() if members else ""
+    printed = _PRINTED_LEAD_MARKER.match(first_text)
+    if not printed:
+        return translated
+    out = str(translated or "")
+    # The translation kept a marker of its own (attached or spaced, incl. a lookalike variant).
+    if not out.strip() or out.lstrip()[0] in _LEAD_MARKER_CHARS:
+        return out
+    return printed.group(1) + out
+
+
 # A glyph marker ("•"/"*"/"-"/"◊"...) that may lead the translated text. The ink-scan path keeps the
 # ORIGINAL glyph in the image, so a glyph still in the text would render twice — strip one leading glyph
 # (plus its space) before the inset. Alphanumeric markers take the redraw path (_prepend_marker) instead.

@@ -130,6 +130,8 @@ def run_retranslate_image_pipeline(
         width_fit_mode=width_fit_mode,
         size_metric_mode=size_metric_mode,
         size_cohort_mode=size_cohort_mode,
+        preserve_unchanged_text=preserve_unchanged_text,
+        image_category=image_category,
     )
     replacement_wall_ms = _elapsed_ms(replacement_started)
 

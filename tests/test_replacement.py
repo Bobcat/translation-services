@@ -1396,3 +1396,149 @@ def test_wrapped_caption_column_does_not_merge_into_content_column() -> None:
     date = cell([{"bbox": {"left": 100, "top": 100, "width": 80, "height": 30}}])
     weekday = cell([{"bbox": {"left": 195, "top": 100, "width": 50, "height": 30}}])
     assert _should_merge_table_cells(date, weekday) is True  # gap 15 <= 0.75x30
+
+
+def _pitch_plane(top: float, bottom: float, height: float) -> dict:
+    return {"frame": ((1.0, 0.0), (0.0, 1.0), 0.0, 100.0, top, bottom), "true_height": height}
+
+
+def test_snap_line_pitch_regularises_wobble_and_a_glyph_inflated_top() -> None:
+    # A uniformly-leaded paragraph measured with quad wobble, plus ONE line whose top the
+    # quad inflated by a sparse tall glyph — its extra true_height is the alibi. Every top
+    # must land on one uniform grid, including the inflated one (whose render otherwise
+    # near-collides with the line above it).
+    from app.replacement.layout.planning import _snap_line_pitch
+
+    noise = [0, 1, -2, 1, -1, -14, 0]  # index 5: inflated by a tall glyph
+    heights = [30, 30, 30, 30, 30, 44, 30]
+    planes = [
+        _pitch_plane(100 + 40 * i + n, 100 + 40 * i + n + h, h)
+        for i, (n, h) in enumerate(zip(noise, heights))
+    ]
+    _snap_line_pitch(planes)
+    tops = [plane["frame"][4] for plane in planes]
+    deltas = [b - a for a, b in zip(tops, tops[1:])]
+    assert max(deltas) - min(deltas) < 0.01  # one uniform pitch
+    assert tops[5] - (100 + 200 - 14) > 10   # the inflated top moved back down onto the grid
+
+
+def test_snap_line_pitch_leaves_designed_structure_untouched() -> None:
+    # Two false-friends of the tall-glyph case, both with normal line heights (no alibi):
+    # a paragraph gap inside one group (a leaflet's two stacked paragraphs) and an extra
+    # OCR plane squeezed between grid lines. Both must no-op WHOLE.
+    from app.replacement.layout.planning import _snap_line_pitch
+
+    for tops in ([100, 140, 180, 244, 284, 324], [100, 140, 180, 200, 240, 280]):
+        planes = [_pitch_plane(top, top + 30, 30) for top in tops]
+        _snap_line_pitch(planes)
+        assert [plane["frame"][4] for plane in planes] == tops
+
+
+_GF_TINOS = __import__("pathlib").Path.home() / ".local/share/fonts/gf/Tinos-Regular.ttf"
+
+
+@pytest.mark.skipif(not _GF_TINOS.exists(), reason="mapped family fonts not provisioned")
+def test_load_font_falls_back_per_character_for_uncovered_symbols() -> None:
+    # The mapped family faces cover Latin but not the misc-symbol blocks — an academic
+    # paper's affiliation markers (⋄, ⋆) rendered as tofu boxes. Such characters must draw
+    # in DejaVu (which covers them) while the words keep the family face; a covered-only
+    # line must keep the plain single-face path.
+    from pathlib import Path
+    from app.replacement.text.fit import FallbackFont
+
+    font = load_font(20, "Aakanksha Naik ⋄ Pao ⋆", family="Times New Roman", weight=400)
+    assert isinstance(font, FallbackFont)
+    faces = {Path(getattr(face, "path", "")).name for face, _ in font.runs("Naik ⋄")}
+    assert faces == {"Tinos-Regular.ttf", "DejaVuSans.ttf"}
+    assert font.getlength("Naik ⋄") > font.getlength("Naik ")
+
+    plain = load_font(20, "Aakanksha Naik", family="Times New Roman", weight=400)
+    assert not isinstance(plain, FallbackFont)
+
+
+def test_mixed_ink_body_prose_demotes_accent_lines_to_the_base_ink(tmp_path) -> None:
+    # A body paragraph whose last source line is a chromatic citation run: the translation
+    # re-wraps over the planes, so per-line colour would land on the wrong words — the group
+    # renders in its achromatic base ink instead. The same mix on a header-level element
+    # keeps its per-line inks (a two-tone heading is per-line by design).
+    def blue_ink(level):
+        img = Image.new("RGB", (460, 200), (255, 255, 255))
+        draw = ImageDraw.Draw(img)
+        rows = [(30, (0, 0, 0)), (70, (0, 0, 0)), (110, (0, 0, 150))]
+        for top, color in rows:
+            for x in range(40, 380, 14):
+                draw.rectangle((x, top, x + 6, top + 22), fill=color)
+        path = tmp_path / f"{level}.png"
+        img.save(path)
+        unit = {"translated_text": "vertaalde alinea met heel wat woorden erin en nog meer",
+                "block_id": 1, "level": level,
+                "members": [
+                    # bbox margins keep the border-ring bg sample on white paper
+                    {"cell_id": i, "text": f"regel {i}", "translate": True,
+                     "bbox": {"left": 30, "top": top - 5, "width": 366, "height": 33}}
+                    for i, (top, _) in enumerate(rows)
+                ]}
+        png = render_translated_image(path, [unit])
+        arr = np.asarray(Image.open(BytesIO(png)).convert("RGB")).astype(int)
+        return int(((arr[:, :, 2] - arr[:, :, 0] > 60) & (arr[:, :, 2] > 90)).sum())
+
+    assert blue_ink("body") == 0
+    assert blue_ink("header") > 0
+
+
+def test_translation_preserving_source_skips_the_render_and_keeps_the_original() -> None:
+    # Untranslated content — names with affiliation symbols the OCR read differently (or not
+    # at all), emails, a bare identical line — must match on WORDS and leave the original
+    # print standing. Number-only lines localize their separators, so they need exact
+    # equality; genuinely translated text must keep rendering.
+    from app.replacement.layout.planning import _translation_preserves_source
+
+    assert _translation_preserves_source("Benjamin Newman*⋆ Yoonjoo Lee ⋆",
+                                         "* Benjamin Newman * Yoonjoo Lee") is True
+    assert _translation_preserves_source("⋆ University of Washington ⋄ KAIST",
+                                         "University of Washington KAIST") is True
+    assert _translation_preserves_source("a@b.edu, c@d.kr", "a@b.edu, c@d.kr") is True
+    assert _translation_preserves_source("58,41", "58,41") is True   # exact number: preserved
+    assert _translation_preserves_source("58.41", "58,41") is False  # localized separator: renders
+    assert _translation_preserves_source("Universiteit van Washington",
+                                         "University of Washington") is False
+    assert _translation_preserves_source("iets", "") is False
+
+
+def test_split_table_row_cells_carry_their_own_field_source() -> None:
+    # After a '|' field split each cell must compare its translation against ITS OWN members'
+    # source (the parent row's source_text would make every split field read as changed and
+    # defeat the identity-preserve on untranslated fields).
+    unit = {
+        "source_text": "Benjamin Newman Yoonjoo Lee",
+        "field_translations": [
+            ("Benjamin Newman", "Benjamin Newman*⋆"),
+            ("Yoonjoo Lee", "Yoonjoo Lee ⋆"),
+        ],
+        "members": [
+            {"cell_id": 1, "text": "Benjamin Newman", "translate": True,
+             "bbox": {"left": 100, "top": 50, "width": 220, "height": 30}},
+            {"cell_id": 2, "text": "Yoonjoo Lee", "translate": True,
+             "bbox": {"left": 600, "top": 50, "width": 180, "height": 30}},
+        ],
+    }
+    cells = _split_table_row(unit, ())
+    assert cells is not None and len(cells) == 2
+    sources = sorted(cell["source_text"] for cell in cells)
+    assert sources == ["Benjamin Newman", "Yoonjoo Lee"]
+
+
+def test_restore_printed_lead_marker_readds_a_lost_footnote_star() -> None:
+    # The hint parse eats a leading "*" as markdown noise and the translator may drop the
+    # symbol; the OCR member text is the print evidence, so the printed marker comes back.
+    # A translation that kept a marker of its own (also a lookalike variant) stays untouched,
+    # and a unit whose print has no lead marker never gains one.
+    from app.replacement.layout.markers import _restore_printed_lead_marker
+
+    footnote = {"members": [{"text": "*Equal contributions."}]}
+    assert _restore_printed_lead_marker("Gelijke bijdragen.", footnote) == "*Gelijke bijdragen."
+    assert _restore_printed_lead_marker("⋆Gelijke bijdragen.", footnote) == "⋆Gelijke bijdragen."
+    plain = {"members": [{"text": "Equal contributions."}]}
+    assert _restore_printed_lead_marker("Gelijke bijdragen.", plain) == "Gelijke bijdragen."
+    starred_word = {"members": [{"text": "* niet aan een woord vast"}]}
+    assert _restore_printed_lead_marker("los sterretje", starred_word) == "los sterretje"

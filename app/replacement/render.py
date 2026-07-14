@@ -66,6 +66,18 @@ from app.replacement.ground.erase import _needs_model_fill
 from app.replacement.ground.erase import _swallow_erase_residue
 
 
+# Image categories (the VLM's free-text classification) whose unchanged units preserve by
+# default. Keyword match, not exact string — the wording drifts run to run ("academic
+# paper", "Academic paper page") but the discriminating word is stable. Extend as
+# categories prove themselves.
+_PRESERVE_UNCHANGED_CATEGORY_HINTS = ("academic",)
+
+
+def _category_preserves_unchanged(category: str) -> bool:
+    lowered = str(category or "").lower()
+    return any(hint in lowered for hint in _PRESERVE_UNCHANGED_CATEGORY_HINTS)
+
+
 def render_translated_image(
     input_path: Path,
     translation_units: list[dict[str, Any]],
@@ -75,6 +87,8 @@ def render_translated_image(
     width_fit_mode: str = "footprint",
     size_metric_mode: str = "extent",
     size_cohort_mode: str = "off",
+    preserve_unchanged_text: bool = False,
+    image_category: str = "",
 ) -> bytes:
     opened = Image.open(input_path)
     # Carry the source's ICC colour profile onto the output. ``convert("RGB")`` keeps the raw pixel
@@ -82,6 +96,14 @@ def render_translated_image(
     # shows the replacement as plain sRGB — the whole image reads duller/darker than the original.
     icc_profile = opened.info.get("icc_profile")
     base = opened.convert("RGB")
+
+    # Identity-preserve is on for image categories where unchanged text is a consistent
+    # BLOCK (an academic paper's author/affiliation/email block — re-typesetting it only
+    # degrades superscripts, weight and symbols), besides the explicit request flag. On
+    # mixed-content categories (a receipt translated to English: some product names change,
+    # others don't) per-unit preserving yields a patchy half-original half-retypeset image,
+    # so those stay on the flag (default off).
+    preserve_unchanged = preserve_unchanged_text or _category_preserves_unchanged(image_category)
 
     jobs: list[_Job] = []
     groups = _groups(translation_units)
@@ -119,6 +141,7 @@ def render_translated_image(
                 base_arr=base_arr,
                 protected_boxes=protected_boxes,
                 document_member_texts=document_member_texts,
+                preserve_unchanged_text=preserve_unchanged,
             )
         )
 

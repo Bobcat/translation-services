@@ -9,7 +9,9 @@ import unicodedata
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
+from typing import Any
 
+from PIL import Image
 from PIL import ImageFont
 
 
@@ -189,6 +191,111 @@ def _load_script_font(text: str, size: int) -> ImageFont.FreeTypeFont | None:
         return None
 
 
+@lru_cache(maxsize=8)
+def _coverage_probe(path: str) -> ImageFont.FreeTypeFont | None:
+    try:
+        return ImageFont.truetype(path, 32)
+    except Exception:
+        return None
+
+
+@lru_cache(maxsize=4096)
+def _covers(path: str, ch: str) -> bool:
+    """Whether the face at ``path`` has a real glyph for ``ch``, probed by comparing its
+    rendered bitmap against the face's .notdef box (U+0378 is permanently unassigned, so it
+    always renders .notdef) — no cmap parser or font-lib dependency. A face that maps a
+    missing char to a BLANK glyph (instead of the box) reads as covered and renders blank;
+    that face would never have shown a tofu box either, so nothing is lost."""
+    probe = _coverage_probe(path)
+    if probe is None:
+        return True  # unprobeable: assume covered, keeping the previous behaviour
+    try:
+        notdef = Image.Image()._new(probe.getmask("͸"))
+        mask = Image.Image()._new(probe.getmask(ch))
+    except Exception:
+        return True
+    return mask.size != notdef.size or mask.tobytes() != notdef.tobytes()
+
+
+class FallbackFont:
+    """A primary face plus a fallback face for the characters the primary has no glyph for.
+
+    The mapped family faces (Tinos/Arimo/Cousine) cover Latin but not the misc-symbol
+    blocks — the ⋆ ⋄ ✦ ♡ affiliation markers of an academic paper render as tofu boxes.
+    DejaVu covers them, so those characters draw in DejaVu while the words around them keep
+    the family face. Quacks like FreeTypeFont for the renderer's call sites (``getlength`` /
+    ``getmetrics`` / ``.size``); ``draw_text`` consumes ``runs`` to draw each segment in its
+    own face. Constructed by ``load_font`` only when the text actually carries uncovered
+    characters, so covered-only text keeps the exact previous single-face path."""
+
+    def __init__(self, primary: ImageFont.FreeTypeFont, fallback: ImageFont.FreeTypeFont):
+        self.primary = primary
+        self.fallback = fallback
+
+    @property
+    def size(self) -> int:
+        return self.primary.size
+
+    def getmetrics(self) -> tuple[int, int]:
+        return self.primary.getmetrics()
+
+    def runs(self, text: str) -> list[tuple[ImageFont.FreeTypeFont, str]]:
+        """Maximal consecutive segments, each with the face that has its glyphs."""
+        out: list[list] = []
+        for ch in str(text):
+            face = self.fallback if self._needs_fallback(ch) else self.primary
+            if out and out[-1][0] is face:
+                out[-1][1] += ch
+            else:
+                out.append([face, ch])
+        return [(face, segment) for face, segment in out]
+
+    def _needs_fallback(self, ch: str) -> bool:
+        if ord(ch) < 128:  # ASCII is covered by every mapped face
+            return False
+        primary_path = getattr(self.primary, "path", None)
+        fallback_path = getattr(self.fallback, "path", None)
+        if not primary_path or not fallback_path or _covers(primary_path, ch):
+            return False
+        return _covers(fallback_path, ch)
+
+    def getlength(self, text: str) -> float:
+        return sum(face.getlength(segment) for face, segment in self.runs(text))
+
+
+def draw_text(draw: Any, xy: tuple[float, float], text: str, font: Any, fill: Any) -> None:
+    """``draw.text`` that understands ``FallbackFont``: each run draws in its own face,
+    x-advanced by the run's width and baseline-aligned to the primary (the faces' ascents
+    differ a few px at the same pt size). A plain font takes the plain path."""
+    if not isinstance(font, FallbackFont):
+        draw.text(xy, text, font=font, fill=fill)
+        return
+    x, y = xy
+    primary_ascent = font.primary.getmetrics()[0]
+    for face, segment in font.runs(text):
+        draw.text((x, y + primary_ascent - face.getmetrics()[0]), segment, font=face, fill=fill)
+        x += face.getlength(segment)
+
+
+def _with_symbol_fallback(font: ImageFont.FreeTypeFont, text: str, size: int) -> Any:
+    """Wrap ``font`` in a ``FallbackFont`` when ``text`` carries characters the face has no
+    glyph for and the DejaVu fallback does; otherwise return ``font`` unchanged (the no-op
+    path for every covered-only line)."""
+    path = getattr(font, "path", None)
+    if not path:
+        return font
+    missing = {ch for ch in str(text) if ord(ch) >= 128 and not _covers(path, ch)}
+    if not missing:
+        return font
+    fallback = _first_loadable(_FONT_NAMES, size)
+    fallback_path = getattr(fallback, "path", None)
+    if not fallback_path or fallback_path == path:
+        return font
+    if not any(_covers(fallback_path, ch) for ch in missing):
+        return font
+    return FallbackFont(font, fallback)
+
+
 @dataclass(frozen=True)
 class FittedText:
     font: ImageFont.FreeTypeFont
@@ -203,7 +310,9 @@ def load_font(
     CJK font; a complex script (Arabic/Devanagari/Bengali/Thai/Hebrew/Tamil) uses its Noto Sans
     face — all override the family, which has no such glyphs. Otherwise the VLM ``family``/
     ``weight`` map to an installed face (bold cut at high weight); with no family hint, or a missing
-    mapped file, we fall back to DejaVu — preserving the previous behaviour for unlabeled lines."""
+    mapped file, we fall back to DejaVu — preserving the previous behaviour for unlabeled lines.
+    A mapped face missing glyphs the text needs (misc symbols) gets a per-character DejaVu
+    fallback (``FallbackFont``) instead of tofu boxes."""
     size = max(_MIN_SIZE, int(size))
     if _has_hangul(text):
         korean = _load_korean_font(size)
@@ -218,7 +327,7 @@ def load_font(
         return script
     mapped = _load_mapped_font(family, weight, size)
     if mapped is not None:
-        return mapped
+        return _with_symbol_fallback(mapped, text, size)
     return _first_loadable(_FONT_NAMES, size)
 
 
