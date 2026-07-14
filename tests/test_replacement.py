@@ -16,8 +16,13 @@ from app.replacement.ground.inpaint import border_pads
 from app.replacement.ground.inpaint import budget_scale
 from app.replacement.ground.inpaint import context_window
 from app.replacement.ground.inpaint import work_scale
+from app.replacement.layout.planning import _justified_text_image
+from app.replacement.layout.planning import _justify_feasible
+from app.replacement.layout.planning import _justify_overhang_width
+from app.replacement.layout.planning import _planes_justified
 from app.replacement.text.fit import _dominant_script
 from app.replacement.text.fit import fit_text
+from app.replacement.text.fit import load_font
 from app.replacement.text.fit import fold_lone_fullwidth_punctuation
 from app.replacement.text.fit import is_cjk_text
 from app.replacement.text.angle import _baseline_angle
@@ -1066,6 +1071,72 @@ def test_printed_enumerator_and_body_numbers_stay() -> None:
     assert _strip_unprinted_lead("2 Lever je pakket in", unit) == "2 Lever je pakket in"
     unit = {"level": "body", "members": [{"text": "twee weken de tijd"}]}
     assert _strip_unprinted_lead("2 weken de tijd", unit) == "2 weken de tijd"
+
+
+def _frame(xmin: float, xmax: float, ymin: float, ymax: float) -> tuple:
+    return ((1.0, 0.0), (0.0, 1.0), xmin, xmax, ymin, ymax)
+
+
+def test_planes_justified_needs_flush_edges_last_line_exempt() -> None:
+    # A LaTeX paragraph: left edges flush, right edges flush except the short last line.
+    flush = [{"frame": _frame(100, 1450 + d, 30 * i, 30 * i + 24)} for i, d in enumerate((0, 3, -2, 4))]
+    flush.append({"frame": _frame(100, 900, 150, 174)})  # short last line
+    assert _planes_justified(flush) is True
+    # Ragged-right body text: right edges scatter by whole words.
+    ragged = [{"frame": _frame(100, 1450 - 90 * i, 30 * i, 30 * i + 24)} for i in range(5)]
+    assert _planes_justified(ragged) is False
+    # Too few lines to trust the evidence.
+    assert _planes_justified(flush[:3]) is False
+
+
+def test_planes_justified_allows_first_line_indent_and_hyphen_outlier() -> None:
+    # The LaTeX-abstract archetype: line 0 indented +43px (right edge still flush), one
+    # body line -22px short on the right (clipped hyphen), the rest flush within ±1px.
+    planes = [{"frame": _frame(143, 1450, 0, 27)}]                       # indented first line
+    planes += [{"frame": _frame(100 + d, 1450 + r, 30 * (i + 1), 30 * (i + 1) + 27)}
+               for i, (d, r) in enumerate(((0, 0), (1, -22), (-1, 1), (0, 0), (1, -1)))]
+    planes.append({"frame": _frame(100, 700, 210, 237)})                  # short last line
+    assert _planes_justified(planes) is True
+    # A LEFTWARD first-line shift is not an indent — genuinely ragged.
+    shifted = [dict(p) for p in planes]
+    shifted[0] = {"frame": _frame(30, 1450, 0, 27)}
+    assert _planes_justified(shifted) is False
+
+
+def test_justify_feasibility_mirrors_the_gap_bounds() -> None:
+    # The block-consistency gate mirrors the drawing: a modest leftover is feasible,
+    # doubling a two-word line is not, one word never is — and a slightly TOO-LONG line
+    # counts as feasible (it squeezes onto the margin, ending flush all the same).
+    font = load_font(20, "woorden hier")
+    line = "deze regel heeft vijf woorden"
+    assert _justify_feasible(font, line, font.getlength(line) * 1.07) is True
+    assert _justify_feasible(font, "twee woorden", 2.0 * font.getlength("twee woorden")) is False
+    assert _justify_feasible(font, "woord", 500.0) is False
+    assert _justify_feasible(font, line, font.getlength(line) * 0.96) is True   # squeezable
+    assert _justify_feasible(font, line, font.getlength(line) * 0.85) is False  # beyond floor
+
+
+def test_justify_overhang_squeezes_to_margin_within_floor() -> None:
+    # Inside a justified block a slack-packed line would poke out of the flush margin:
+    # within the floor it squeezes onto the margin; a pathological overhang keeps its
+    # width; a fitting line is untouched.
+    assert _justify_overhang_width(1040.0, 1.0, 1000.0) == 1000   # 4% overhang -> squeeze
+    assert _justify_overhang_width(1120.0, 1.0, 1000.0) is None   # 12% -> leave (floor)
+    assert _justify_overhang_width(980.0, 1.0, 1000.0) is None    # fits -> untouched
+    assert _justify_overhang_width(1300.0, 0.8, 1000.0) == 1000   # condense counts first
+
+
+def test_justified_line_spans_target_and_respects_caps() -> None:
+    font = load_font(20, "woorden hier")
+    line = "deze regel heeft vijf woorden"
+    natural = font.getlength(line)
+    # A realistic leftover (the balanced wrap keeps lines near-full): ~7% over four gaps.
+    image = _justified_text_image(font, line, natural * 1.07, (0, 0, 0), 26)
+    assert image is not None and image.width == int(round(natural * 1.07))
+    # Cap: stretching a two-word line across double its width would gape — fall back.
+    assert _justified_text_image(font, "twee woorden", 2.0 * font.getlength("twee woorden"), (0, 0, 0), 26) is None
+    # A single word (or spaceless CJK line) has no gaps to spread.
+    assert _justified_text_image(font, "woord", 500.0, (0, 0, 0), 26) is None
 
 
 def test_fit_text_single_line_fits_box() -> None:

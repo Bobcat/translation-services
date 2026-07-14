@@ -71,6 +71,121 @@ _EXTEND_MAX_RATIO = 1.0
 # colour: within it the planes are one surface sampled with texture noise; beyond it
 # they are genuinely different (a gradient, two panels) and stay per-plane.
 _BG_SNAP_DELTA = 24
+# Justified source text (a LaTeX paper, a report column) is detected from the SOURCE line
+# geometry: with this many planes or more, left edges of all planes AND right edges of all
+# but the last stay within half a line height of their median (measured on docpack papers:
+# 2-22px deviation on ~1450px lines; ragged body text scatters by whole words). The render
+# then re-justifies: each line's leftover is spread over its word gaps.
+_JUSTIFY_MIN_LINES = 4
+_JUSTIFY_EDGE_RATIO = 0.5   # max edge deviation as a fraction of the median line height
+# A justified paragraph may INDENT its first line (LaTeX abstract: +43px on 27px lines) —
+# a rightward shift up to this many line heights is exempt from the left-edge test; the
+# indented line's RIGHT edge still has to be flush like every other.
+_JUSTIFY_INDENT_MAX = 2.5
+# A small minority of body lines may miss the strict tolerance by up to 2x (a hyphenated
+# line end whose "-" the OCR box clips measured -22px); more than ~a fifth of them, or any
+# line beyond 2x, is genuinely ragged text.
+_JUSTIFY_SOFT_FRACTION = 5  # divisor: allowed soft outliers = max(1, len(planes) // 5)
+# Block consistency: justify only when the block's unattainable lines stay a small
+# minority — count-based (one line is ALWAYS tolerated, then ~a fifth, sharing
+# _JUSTIFY_SOFT_FRACTION): a German translation (long compounds, large leftovers) has MOST
+# lines over the stretch cap and falls back ragged as a WHOLE — stretching a feasible
+# minority yields gaps without an achieved flush margin, worse than consistent ragged.
+# A too-LONG line inside a justified block (the wrap may pack up to the 4% width slack)
+# would poke OUT of the flush margin; it is squeezed onto the margin instead (and counts as
+# feasible — it ends flush), down to this extra per-line condensation floor. Beyond the
+# floor the overhang stands (pathological).
+_JUSTIFY_SQUEEZE_FLOOR = 0.94
+
+
+def _justify_overhang_width(natural_w: float, condense: float, plane_width: float) -> int | None:
+    """Rendered width for a justified block's too-long fallback line: capped at the plane
+    width when the extra squeeze stays above ``_JUSTIFY_SQUEEZE_FLOOR``, else ``None`` (the
+    line keeps its natural condensed width and overhangs — better than illegibly narrow)."""
+    condensed = natural_w * condense
+    if condensed <= plane_width:
+        return None
+    if plane_width / condensed < _JUSTIFY_SQUEEZE_FLOOR:
+        return None
+    return max(1, int(round(plane_width)))
+# Per-gap stretch/shrink bounds, as fractions of the natural space width. Outside them the
+# line falls back to ragged left — a near-empty last-but-one line must not become a river.
+_JUSTIFY_MAX_EXTRA = 1.5
+_JUSTIFY_MAX_SHRINK = 0.25
+
+
+def _planes_justified(planes: list[dict[str, Any]]) -> bool:
+    """Whether the group's SOURCE lines were typeset justified (both edges flush, last line
+    exempt on the right, first line may be indented) — the evidence that re-justifying the
+    translation is faithful. Flush BOTH edges is geometrically incompatible with a centered
+    ragged block, so this evidence may overrule a VLM "center" label at the call site."""
+    if len(planes) < _JUSTIFY_MIN_LINES:
+        return False
+    frames = [plane["frame"] for plane in planes]
+    line_h = median(frame[5] - frame[4] for frame in frames)
+    tolerance = _JUSTIFY_EDGE_RATIO * max(1.0, line_h)
+    lefts = [frame[2] for frame in frames]
+    rights = [frame[3] for frame in frames[:-1]]
+    left_devs = [left - median(lefts) for left in lefts]
+    right_devs = [right - median(rights) for right in rights]
+    # First-line paragraph indent: a bounded RIGHTWARD shift of line 0 only.
+    if tolerance < left_devs[0] <= _JUSTIFY_INDENT_MAX * line_h:
+        left_devs = left_devs[1:]
+    # Fewer lines = less evidence = a stricter bar: a short ragged paragraph whose 3 line
+    # ends happen to fall within ~20px (a letter's closing paragraph) must not qualify, so
+    # soft outliers are only granted from 6 lines up.
+    soft_budget = max(1, len(planes) // _JUSTIFY_SOFT_FRACTION) if len(planes) >= 6 else 0
+    soft = 0
+    for dev in (*left_devs, *right_devs):
+        if abs(dev) <= tolerance:
+            continue
+        if abs(dev) > 2.0 * tolerance:
+            return False
+        soft += 1
+    return soft <= soft_budget
+
+
+def _justify_feasible(font: Any, line: str, target_w: float) -> bool:
+    """Whether ``line`` can end flush at ``target_w``: within the per-gap stretch/shrink
+    bounds, or too long but within the overhang-squeeze floor (it then renders condensed
+    exactly onto the margin — flush all the same)."""
+    words = [w for w in line.split(" ") if w]
+    if len(words) < 2:
+        return False
+    natural = font.getlength(line)
+    space_w = max(1.0, font.getlength(" "))
+    per_gap = (target_w - natural) / (len(words) - 1)
+    if per_gap > _JUSTIFY_MAX_EXTRA * space_w:
+        return False
+    if per_gap >= -_JUSTIFY_MAX_SHRINK * space_w:
+        return True
+    return natural > 0 and target_w / natural >= _JUSTIFY_SQUEEZE_FLOOR
+
+
+def _justified_text_image(
+    font: Any, line: str, target_w: float, fg: tuple, text_h: int
+) -> Image.Image | None:
+    """``line`` drawn word-by-word with its leftover spread over the word gaps so the ink
+    spans exactly ``target_w`` — or ``None`` when justification is not applicable (a single
+    word, a spaceless CJK line) or would exceed the per-gap stretch/shrink bounds (the
+    caller then draws the plain ragged line)."""
+    words = [w for w in line.split(" ") if w]
+    if len(words) < 2:
+        return None
+    natural = font.getlength(line)
+    space_w = max(1.0, font.getlength(" "))
+    per_gap = (target_w - natural) / (len(words) - 1)
+    if per_gap > _JUSTIFY_MAX_EXTRA * space_w or per_gap < -_JUSTIFY_MAX_SHRINK * space_w:
+        return None
+    image = Image.new("RGBA", (max(1, int(round(target_w))), text_h), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(image)
+    x = 0.0
+    for word in words[:-1]:
+        draw.text((x, 0), word, font=font, fill=fg + (255,))
+        x += font.getlength(word) + space_w + per_gap
+    # anchor the last word's right edge on the target so rounding drift cannot fray the margin
+    draw.text((target_w - font.getlength(words[-1]), 0), words[-1], font=font, fill=fg + (255,))
+    return image
 
 def _plan_group(
     base: Image.Image,
@@ -222,6 +337,12 @@ def _plan_group(
             planes[0]["bullet_y"] = bullet_y
 
     centered = any(str(unit.get("alignment") or "") == "center" for unit in units)
+    # Justified source overrules a "center" label: flush both edges cannot be a centered
+    # ragged block — the VLM calls an indented justified abstract "center". The group then
+    # anchors left like its source (its last line measured left-anchored, not centered).
+    justified = angle == 0.0 and _planes_justified(planes)
+    if justified:
+        centered = False
     if centered and len(planes) > 1:
         centers = [(plane["frame"][2] + plane["frame"][3]) / 2 for plane in planes]
         axis = median(centers)
@@ -330,6 +451,25 @@ def _plan_group(
     # unreliable there (honest limit).
     base_np = base_arr if angle == 0.0 else None
 
+    # Justified rendering: every line except the last spreads its leftover over the word
+    # gaps (the ``justified`` flag was decided above, before the centered machinery).
+    last_text_index = max((i for i, l in enumerate(lines) if l), default=-1)
+    if justified and last_text_index > 0:
+        # Block consistency: stretching a feasible minority while the rest falls back gives
+        # gaps WITHOUT an achieved flush margin — then the whole block renders ragged.
+        body = [
+            (lines[i], planes[i]) for i in range(min(last_text_index, len(planes))) if lines[i]
+        ]
+        feasible = sum(
+            _justify_feasible(font, line, float(plane["width"]) / max(condense, 0.01))
+            for line, plane in body
+        )
+        # Count-based, not a hard fraction: ONE unattainable line is always tolerated (a
+        # 4-line block with one bad line sat at 75% and flipped the whole block ragged on
+        # live-run translation wobble), beyond that ~a fifth of the block.
+        if body and (len(body) - feasible) > max(1, len(body) // _JUSTIFY_SOFT_FRACTION):
+            justified = False
+
     jobs: list[_Job] = []
     for index, plane in enumerate(planes):
         x_axis, y_axis, xmin, xmax, ymin, ymax = plane["frame"]
@@ -347,10 +487,25 @@ def _plan_group(
             # Draw the line at its natural width, then squeeze in x by ``condense`` — this
             # keeps the source height (hierarchy) while the line fits the original width.
             text_h = max(1, int(ascent + descent))
-            text_w_nat = max(1, int(font.getlength(line)))
-            text_img = Image.new("RGBA", (text_w_nat, text_h), (0, 0, 0, 0))
-            ImageDraw.Draw(text_img).text((0, 0), line, font=font, fill=fg + (255,))
+            text_img = None
+            if justified and index < last_text_index:
+                # Target the plane width BEFORE condensation so the group-wide squeeze lands
+                # the right edge exactly on the plane's flush margin.
+                text_img = _justified_text_image(
+                    font, line, float(plane["width"]) / max(condense, 0.01), fg, text_h
+                )
+            if text_img is None:
+                text_w_nat = max(1, int(font.getlength(line)))
+                text_img = Image.new("RGBA", (text_w_nat, text_h), (0, 0, 0, 0))
+                ImageDraw.Draw(text_img).text((0, 0), line, font=font, fill=fg + (255,))
+            text_w_nat = text_img.width
             text_w = max(1, int(round(text_w_nat * condense)))
+            if justified and index < last_text_index:
+                # A too-long fallback line would poke OUT of the flush margin: squeeze it
+                # onto the margin (a few percent extra condensation on this line only).
+                overhang = _justify_overhang_width(text_w_nat, condense, float(plane["width"]))
+                if overhang is not None:
+                    text_w = overhang
             if text_w != text_w_nat:
                 text_img = text_img.resize((text_w, text_h), Image.LANCZOS)
             bullet_y = plane.get("bullet_y")
