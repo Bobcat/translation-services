@@ -1012,3 +1012,52 @@ difficulty). Findings + two shipped fixes (2026-07-14):
 Baseline note: 05/07/08/09 re-baselined for the demote change; 08/09 snapshots must be frozen
 IN-SEQUENCE (see the LaMa-drift recipe — the re-OCR of a smear segment is context-sensitive too,
 a standalone-process reocr of the same PNG bytes can read 'dl' where in-sequence runs read 'dil').
+
+---
+
+## `docpack-10` (arXiv preprint, vertical margin identifier, en→nl) — justified text
+
+Badge-strip windfall first: the "1 1 Introduction" doubling disappeared via the docpack-09 fix
+(printed serif "1" untouched, clean translated heading — the self-limiting property verified).
+
+**FIXED (2026-07-14) — justified rendering.** The source (LaTeX) justifies abstract and body;
+we rendered ragged-right. Detection is pure source geometry (`_planes_justified`): >=4 planes
+whose left edges ALL align and right edges align except the last line, within 0.5x line height
+(measured here: 2-22px deviation on ~1450px lines; ragged text scatters by whole words). The
+render then re-justifies every line except the last: leftover spread over word gaps
+(`_justified_text_image`), bounded per gap (+1.5x / -0.25x the space width) — beyond the bound
+that line falls back ragged (no rivers; visible on one short line of the intro, by design).
+The existing balanced minimax wrap already keeps lines near-equally full, so per-line leftovers
+are small and even — the Knuth-Plass DP considered in design turned out unnecessary. CJK
+(spaceless) and single-word lines fall back automatically; centered/VLM-c/r groups are never
+overruled (named limit: the abstract is VLM-labelled center and stays ragged). Blast radius
+measured on the fixture set: exactly the justified-source class re-rendered (papers 10/11,
+UNICEF 13/14, newsletter 02, quickguide-09 paragraph, page-1 leaflet) — visually verified on
+10 and page-1, re-baselined in-sequence.
+
+Round 2 (same day, user's live NL+DE runs) — three refinements, superseding the "center is
+never overruled" line above. (a) **First-line indent exemption**: the LaTeX abstract indents
+line 0 (+43px on 27px lines) — a bounded RIGHTWARD shift of the first line is exempt from the
+left-edge test (its right edge still must be flush). (b) **Soft outliers**: up to ~a fifth of
+body lines may miss the strict tolerance by up to 2x (a clipped trailing hyphen measured
+-22px); beyond 2x stays a hard fail. (c) **The justified verdict now overrules a VLM "center"
+label** — flush both edges is geometrically incompatible with centered-ragged, and the label
+wobbles run-to-run anyway (center vs left on the same abstract); the group anchors left like
+its source. And the German lesson: **block consistency** — per-line cap fallback on a
+long-compound language stretched a feasible minority while most lines stayed ragged (gaps
+WITHOUT an achieved flush margin — worse than ragged, the user's original concern in a new
+form). Justify only fires when >=80% of a block's body lines fit the gap bounds; below that
+the whole block renders consistently ragged.
+
+Round 3 (user's live DE+NL runs kept probing): (d) **Overhang squeeze** — the wrap may pack a
+line up to the 4% width slack; inside a justified block that line poked OUT of the flush margin
+("Ergebnissen"). It now renders condensed onto the margin (per-line extra squeeze, floored at
+0.94) and COUNTS as feasible — it ends flush. (e) **Count-based block gate** — the hard 80%
+fraction made small blocks brittle (a 4-line block with one bad line = 75% → whole block ragged;
+live translations wobble that per run): one unattainable line is always tolerated, then ~a fifth.
+(f) **Fewer lines = stricter bar** — soft outliers only from 6 lines up; a short ragged letter
+paragraph whose 3 line ends happened to fall within ~20px (docpack-01's closing paragraph)
+qualified briefly and is excluded again. Parked idea (user's, with his own caveat): wrap-packing
+into wall-bounded verified clean space (slack_px machinery) to shrink leftovers — a third
+mechanism, only if live runs still disappoint; growing the margin itself helps only too-LONG
+lines and would worsen the too-SHORT direction that dominates German.
