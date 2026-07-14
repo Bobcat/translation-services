@@ -345,7 +345,14 @@ def _resolve_claim_clusters(
         for k in to_merge:
             members = claim_lists[k]
             if not (tokens_of(members) - covered_tokens):
-                dropped.extend(members)                      # an earlier merge already covered its tokens
+                # An earlier merge already covered its tokens — same verdict as the redundant
+                # branch above: a clean, spatially detached claim is a genuine second print
+                # of duplicated words (a display title repeating body prose) and demotes to a
+                # leftover; a garbled or overlapping stray still drops.
+                if _is_second_print(members, kept, cells, line_tokens):
+                    demoted.append(list(members))
+                else:
+                    dropped.extend(members)
                 changed = True
                 continue
             target = _merge_target(members, kept, cells)
@@ -357,7 +364,18 @@ def _resolve_claim_clusters(
             changed = True
         to_merge = still
     for k in to_merge:
-        dropped.extend(claim_lists[k])                       # never reached a kept group -> detached stray
+        members = claim_lists[k]
+        # Never reached a kept group. When the merges have since covered its tokens it is
+        # redundant after all — the second-print test then separates a real detached print
+        # (the "Shared Care Record" display title whose words also occur in body prose;
+        # English tail words a sibling line full-covers) from a garbled stray. A claim whose
+        # tokens are STILL new is genuinely detached content and keeps dropping.
+        if not (tokens_of(members) - covered_tokens) and _is_second_print(
+            members, kept, cells, line_tokens
+        ):
+            demoted.append(list(members))
+        else:
+            dropped.extend(members)
     return kept, demoted, dropped
 
 

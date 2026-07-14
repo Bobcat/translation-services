@@ -1016,6 +1016,33 @@ def test_exact_second_print_demotes_to_leftover_instead_of_ignored() -> None:
     assert leftovers == [[3]]
 
 
+def test_detached_second_print_via_merge_refusal_demotes_not_drops() -> None:
+    # Display-title archetype: a TITLE whose words also occur in body prose. The title cells
+    # claim the body's hint line, look like new content at first (merge candidates), the
+    # paragraph then merges fully (their tokens are covered after all) but they sit far away
+    # (merge refused). That refusal path must apply the same second-print verdict: clean +
+    # spatially apart -> demote to a translated leftover, not ignored original pixels.
+    cells = [
+        # the display title, far above the paragraph
+        {"id": 1, "text": "Shared Record", "bbox": {"left": 60, "top": 70, "width": 400, "height": 60}},
+        # the body paragraph, wrapped over two adjacent printed lines
+        {"id": 2, "text": "navigate the Shared", "bbox": {"left": 100, "top": 600, "width": 300, "height": 24}},
+        {"id": 3, "text": "Record easily", "bbox": {"left": 100, "top": 628, "width": 280, "height": 24}},
+    ]
+    kept, demoted, dropped = _resolve_claim_clusters(
+        0, [[1], [2], [0]], cells, ["navigate the Shared Record easily"]
+    )
+    assert kept == [[1, 2]]      # paragraph line + its wrapped continuation merged
+    assert demoted == [[0]]      # the detached title print, rescued
+    assert dropped == []
+
+
+def test_parse_latex_arrow_token_normalises_to_glyph() -> None:
+    # The VLM reads an arrow glyph as LaTeX; the notation must never reach translator/render.
+    parsed = parse_grouping_output("*h|Roboto|18pt|700|l:* 4 $\\rightarrow$ Go To Arrow")
+    assert parsed.units == ["4 → Go To Arrow"]
+
+
 def test_parse_pipe_opened_embedded_label_splits_table_columns() -> None:
     # A two-column table row where the model writes the second column's typography label
     # straight after the row's field separator: the "|" opens the label (no star). The label

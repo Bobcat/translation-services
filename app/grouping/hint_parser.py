@@ -103,6 +103,11 @@ _EMBEDDED_LABEL = re.compile(
 _DANGLING_LABEL_OPEN = re.compile(r"\s\*+[thbm]\s*$", re.IGNORECASE)
 # A "<n>pt" token — proof a pipeless label is a degraded typography label, not a wrapped word.
 _PT_TOKEN = re.compile(r"\d{1,3}\s*pt\b", re.IGNORECASE)
+# The VLM occasionally reads an arrow GLYPH as LaTeX ("4 $\rightarrow$ Go To Arrow"); the
+# translator copies it verbatim and the render would print it literally. Normalise the four
+# arrow forms back to their glyph; anything else passes through untouched.
+_LATEX_GLYPH = re.compile(r"\$\\(rightarrow|leftarrow|uparrow|downarrow)\$")
+_LATEX_GLYPH_MAP = {"rightarrow": "→", "leftarrow": "←", "uparrow": "↑", "downarrow": "↓"}
 
 
 def _split_embedded_labels(text: str) -> list[tuple[str | None, str]]:
@@ -310,6 +315,7 @@ def parse_grouping_output(output_text: str) -> GroupingHint:
             # reach the translation. (The .strip("*") after still unwraps "*emphasis*"/"**bold**".)
             cleaned = _MARKDOWN_LEAD.sub("", seg_text).strip().strip("*").strip()
             cleaned = _DANGLING_LABEL_OPEN.sub("", cleaned).strip()
+            cleaned = _LATEX_GLYPH.sub(lambda m: _LATEX_GLYPH_MAP[m.group(1)], cleaned)
             bullet, marker, cleaned = _bullet_of(cleaned)
             if not cleaned or _is_separator(cleaned):
                 continue
