@@ -1,7 +1,8 @@
 # PDF translation — research and high-level design
 
 Status: design proposal, no code yet. Written 2026-07-16 from: profiling of the
-3-PDF testset, a feasibility probe on native PDF editing, a stage map of the
+PDF testset (v2: six documents, 28 pages), a feasibility probe on native PDF
+editing, a stage map of the
 image pipeline, and research into commercial and open-source document
 translators. Sources are listed at the end.
 
@@ -48,8 +49,15 @@ three born-digital testset PDFs (`pdf-01` simple / `pdf-02` designed brochure /
   donut-chart percentages and legend labels are ordinary text spans. In a
   native output mode they are translatable without touching pixels.
 
-Testset gap: no scanned and no hybrid PDF yet. Both classes must be added
-before the page classifier and the bitmap fallback can be validated.
+Testset v2 (2026-07-16) added the missing classes: `pdf-04` (real scanned
+brochure, image-only pages, small rotated plan labels), `pdf-05`
+(pixel-identical to `pdf-04` plus an invisible, deliberately uncorrected OCR
+layer — an A/B pair that isolates the effect of PDF structure), and `pdf-06`
+(born-digital/scanned/hybrid pages mixed in one document, for per-page
+routing). A per-page class matrix with measurable signals (text chars, image
+coverage) ships with the set as classifier ground truth. `pdf-05` pins down a
+classifier requirement: a present text layer is not a trustworthy one —
+garbage tokens over full-page images must still route the page to OCR.
 
 ## 3. How others do it
 
@@ -175,10 +183,11 @@ PDF in
 
 Notes:
 
-- **Page classifier:** text-layer coverage of visible ink decides the class.
-  Concrete signal needs tuning on scanned fixtures (e.g. extractable-char count
-  vs OCR sample on a downscaled render). Per page, with a document-level
-  summary in the response.
+- **Page classifier:** text-layer coverage of visible ink decides the class
+  (e.g. extractable-char count vs an OCR sample on a downscaled render, plus a
+  garbage-token check for hybrid layers). Thresholds are tuned against the
+  testset's per-page class matrix. Per page, with a document-level summary in
+  the response.
 - **Text-layer cells:** PyMuPDF lines (not spans) map to cells; pt→px at the
   analysis dpi. Span styles (font, size, bold, color) ride along as cell
   metadata — the render stage currently derives these from pixels and VLM
@@ -269,7 +278,9 @@ Each phase is independently shippable and benchmarked against the previous one.
 - **Reading order for designed documents** is why analysis stays raster-based.
   Accepting that means VLM cost on every page; a later optimization may skip
   the VLM for simple single-column pages (classifier decides). Not phase 0.
-- **Classifier thresholds** need scanned/hybrid fixtures that don't exist yet.
+- **Classifier thresholds** can be tuned against testset v2's per-page class
+  matrix (`pdf-04/05/06`), including the hybrid trap: text layer present but
+  not trustworthy.
 - **Decisions needed before phase 0:** page cap per request; analysis dpi
   (160 vs 200); whether raster-page output is an acceptable v1 contract;
   testset location (`testset/pdf/`, gitignored like `testset/`).
