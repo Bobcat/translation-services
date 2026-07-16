@@ -1,17 +1,60 @@
 """Source size of a line: the band metric (how tall a line renders) and the group size."""
 from __future__ import annotations
 
+from functools import lru_cache
 from typing import Any
 from collections import defaultdict
 import numpy as np
 from statistics import median, pstdev
 from PIL import Image
+from PIL import ImageDraw
 from app.replacement import geometry as geo
 from app.replacement.geometry import _ANGLE_DEADZONE_DEG
 from app.replacement.geometry import _plane_corners
 from app.replacement.pixels import _INK_DELTA
 from app.replacement.text.angle import _image_is_flat
+from app.replacement.text.fit import load_font
 from app.replacement.ground.color import sample_oriented_colors
+
+
+# "fill" size metric (size_metric_mode): render each line so ITS OWN ink is as tall as the
+# SOURCE line's ink, instead of the polygon height x a fixed ratio. The default 0.9 ratio
+# undershoots — the polygon spans ascender-to-descender but the mapped face's ink at that pt
+# fills less of it, so body text renders ~10-20% smaller than the print and reads airy. Fill
+# measures both sides in pixels (self-calibrating, per element, no global scale) and matches
+# them: target pt = source ink span / the face's ink-per-pt. Flat groups only (the source
+# scan is axis-aligned) and never CJK (the em-fill ratio already handles those).
+_FILL_PROBE = "Aghpxldijk"   # ascender + descender + x-height, so the ink span is the full face extent
+_FILL_REF_SIZE = 100
+
+
+@lru_cache(maxsize=32)
+def _face_ink_per_pt(family: str | None, weight: int | None) -> float:
+    """Rendered ink height per pt for the mapped face: draw a full-extent probe at a reference
+    size and measure its ink pixel span. Cached per (family, weight). ~0.9 for the serif face."""
+    font = load_font(_FILL_REF_SIZE, _FILL_PROBE, family=family, weight=weight)
+    ascent, descent = font.getmetrics()
+    image = Image.new("L", (max(4, int(font.getlength(_FILL_PROBE)) + 8), ascent + descent + 8), 0)
+    ImageDraw.Draw(image).text((2, 2), _FILL_PROBE, font=font, fill=255)
+    rows = np.nonzero((np.asarray(image) > 60).any(axis=1))[0]
+    span = float(rows.max() - rows.min() + 1) if len(rows) else float(_FILL_REF_SIZE)
+    return span / _FILL_REF_SIZE if span > 0 else 0.9
+
+
+def _quad_ink_span(base_px: np.ndarray, quad, bg: tuple[int, int, int]) -> float | None:
+    """Vertical extent of the quad's ink: the span between the first and last row carrying any
+    ink against ``bg`` (measured the same way as the face probe — full ascender-to-descender).
+    None when the box is too small or carries no ink."""
+    xs = [p[0] for p in quad]
+    ys = [p[1] for p in quad]
+    x0, x1 = max(0, int(min(xs))), min(base_px.shape[1], int(max(xs)) + 1)
+    y0, y1 = max(0, int(min(ys))), min(base_px.shape[0], int(max(ys)) + 1)
+    if x1 - x0 < 4 or y1 - y0 < 4:
+        return None
+    window = base_px[y0:y1, x0:x1].astype(np.int16)
+    inked = (np.abs(window - np.asarray(bg, dtype=np.int16)).max(axis=2) >= _INK_DELTA).any(axis=1)
+    rows = np.nonzero(inked)[0]
+    return float(rows.max() - rows.min() + 1) if len(rows) else None
 
 
 # "band" size metric (size_metric_mode): the OCR polygon's full ink extent is the default

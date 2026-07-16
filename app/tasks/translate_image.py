@@ -83,6 +83,7 @@ def run_translate_image_pipeline(
     # as the script signal that picks the OCR model (Han/Kana -> the multilingual
     # server pair, anything else -> the en recognizer).
     grouping_model = str(request.get("grouping_model") or "").strip() or settings.llm_pool.grouping_model
+    preserve_image_regions = _bool_request_flag(request, "preserve_image_regions", default=True)
     llm_calls: list[dict[str, Any]] = []  # payload + response of every VLM/LLM call, in order
     # Layout detection is image-only too and ~30-80ms warm, so it runs on a worker thread while
     # the multi-second VLM call blocks here — its wall-clock cost hides entirely behind the hint.
@@ -127,6 +128,7 @@ def run_translate_image_pipeline(
         hint=hint,
         model=grouping_model,
         layout_regions=layout_regions or None,
+        preserve_image_regions=preserve_image_regions,
     )
     align_wall_ms = _elapsed_ms(align_started_at)
 
@@ -256,6 +258,7 @@ def run_translate_image_pipeline(
             "preserve_heuristic_text": preserve_heuristic_text,
             "preserve_unchanged_text": preserve_unchanged_text,
             "use_geometry_columns": use_geometry_columns,
+            "preserve_image_regions": preserve_image_regions,
             "render_size_mode": render_size_mode,
             "erase_fill_mode": erase_fill_mode,
             "width_fit_mode": width_fit_mode,
@@ -282,6 +285,10 @@ def run_translate_image_pipeline(
             "hint_units_adjusted": hint_units_adjusted,  # geometry-injected column `|`s (fed only when use_geometry_columns)
             "field_geometry_changes": field_geometry_changes,
             "units": [unit.to_dict() for unit in grouping.units],
+            # OCR cells + layout regions kept so a re-entry can RE-ALIGN from cache (e.g. flip
+            # preserve_image_regions) without re-running VLM/OCR — the align inputs, frozen.
+            "cells": cells,
+            "layout_regions": layout_regions,
         },
         "translation": [
             {
@@ -311,6 +318,7 @@ def run_translate_image_pipeline(
         "preserve_heuristic_text": preserve_heuristic_text,
         "preserve_unchanged_text": preserve_unchanged_text,
         "use_geometry_columns": use_geometry_columns,
+        "preserve_image_regions": preserve_image_regions,
         "render_size_mode": render_size_mode,
         "erase_fill_mode": erase_fill_mode,
         "width_fit_mode": width_fit_mode,

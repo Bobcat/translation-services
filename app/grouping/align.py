@@ -57,6 +57,7 @@ def build_units_from_hint(
     hint_bullets: list[bool] | None = None,
     hint_bullet_markers: list[str | None] | None = None,
     layout_regions: list[dict[str, Any]] | None = None,
+    preserve_image_regions: bool = True,
 ) -> GroupingResult:
     hint_token_sets = [set(_tokens(text)) for text in hint_units]
     # The ordered token sequences feed the phrase tie-break in _pick_hint: a cell whose tokens
@@ -75,7 +76,11 @@ def build_units_from_hint(
     cell_columns: list[int | None] | None = None
     layout_gate_open = bool(layout_regions) and layout_evidence.document_gate(layout_regions, cells)
     if layout_gate_open:
-        preserved = layout_evidence.preserved_cell_indices(layout_regions, cells)
+        # preserve_image_regions=False: translate and render text inside image/chart regions
+        # too (a figure that is really a table screenshot, whose cells otherwise stay original
+        # pixels). Column clustering is unaffected — only the preserve routing is skipped.
+        if preserve_image_regions:
+            preserved = layout_evidence.preserved_cell_indices(layout_regions, cells)
         cell_columns = layout_evidence.cell_columns(layout_regions, cells)
     matches = [
         _Match(candidates=[], score=0.0)
@@ -97,6 +102,20 @@ def build_units_from_hint(
     # — reading-flow contiguity — instead of a hair's-breadth position tie-break that flips it to the
     # wrong neighbouring line (see _line_anchor).
     confident = [_confident_label(match) for match in matches]
+    # Column-consistency filter (multi-column pages): a hint block belongs to ONE physical column
+    # (its confident cells cluster there); a cell may only take a candidate whose block is in the
+    # cell's own column. Without it a cell weakly sharing a token ("in") with a block in the OTHER
+    # column can land within the flat-index position guard (adjacent reading-order hints sit in
+    # different columns) and get confidently mislabeled there — the VLM dropping a paragraph then
+    # dumps its orphaned cell across the page. Blocks whose column is unclear impose no constraint,
+    # so single-column pages (cell_columns None) and mixed blocks are untouched.
+    hint_columns = _hint_block_columns(matches, cell_columns) if cell_columns is not None else {}
+    if hint_columns:
+        matches = [
+            _column_filtered_match(match, cell_columns[index], hint_columns)
+            for index, match in enumerate(matches)
+        ]
+        confident = [_confident_label(match) for match in matches]
     line_anchors = [
         _line_anchor(index, cells, confident) if len(match.candidates) > 1 else None
         for index, match in enumerate(matches)
@@ -800,6 +819,70 @@ def _confident_label(match: _Match) -> int | None:
     if len(match.candidates) == 1 and match.score >= _MATCH_THRESHOLD:
         return match.candidates[0]
     return None
+
+
+# A hint block's column is trusted only when this fraction of its matching cells' score mass
+# agrees on one column.
+_HINT_COLUMN_MAJORITY = 0.6
+# Only a WEAK cross-column match is dropped by the column filter: a match at/above this score
+# means the cell genuinely carries the block's text (a header or byline the layout repeats in the
+# other column, a fragment that reads verbatim) and is kept wherever it sits. The mislabel this
+# guards is a partial match — a cell sharing one stray token ("in") with a far-column block —
+# which scores well below it. Set between the two: the dropped-paragraph orphans measure ~0.5,
+# genuine repeats ~1.0.
+_COLUMN_FILTER_MAX_SCORE = 0.75
+
+
+def _hint_block_columns(
+    matches: list["_Match"], cell_columns: list[int | None]
+) -> dict[int, int]:
+    """Per hint block, the column its matching cells agree on (>= _HINT_COLUMN_MAJORITY of the
+    score mass), else absent. Every cell whose candidates include the block votes its column,
+    weighted by match score — NOT only single-candidate cells: two similar blocks (the §2 bullet
+    and its neighbour) make each other's cells two-candidate, so a confident-only tally would
+    leave both blocks column-less and unconstrained. The real block cells cluster in one column
+    and carry the score mass; a lone cross-column orphan is outvoted."""
+    from collections import Counter
+
+    tally: dict[int, Counter] = {}
+    for index, match in enumerate(matches):
+        column = cell_columns[index]
+        if column is None or match.score < _MATCH_THRESHOLD:
+            continue
+        for candidate in match.candidates:
+            tally.setdefault(candidate, Counter())[column] += match.score
+    columns: dict[int, int] = {}
+    for label, counter in tally.items():
+        column, mass = counter.most_common(1)[0]
+        if mass >= _HINT_COLUMN_MAJORITY * sum(counter.values()):
+            columns[label] = column
+    return columns
+
+
+def _column_filtered_match(match: "_Match", column: int | None, hint_columns: dict[int, int]) -> "_Match":
+    """``match`` with WEAK candidates in a different column than ``column`` dropped (see
+    _COLUMN_FILTER_MAX_SCORE). A strong match — the cell carries the block's text, a header or
+    byline the layout repeats in the other column — is kept across columns; only a partial match
+    (a cell sharing one stray token with a far-column block, landing there through the flat-index
+    position guard) is the failure mode. Blocks of unknown column, and cells without a column,
+    impose no constraint."""
+    if column is None or match.score >= _COLUMN_FILTER_MAX_SCORE:
+        return match
+
+    def keep(index: int) -> bool:
+        block_column = hint_columns.get(index)
+        return block_column is None or block_column == column or index in match.full
+
+    candidates = [index for index in match.candidates if keep(index)]
+    if len(candidates) == len(match.candidates):
+        return match
+    return _Match(
+        candidates=candidates,
+        score=match.score if candidates else 0.0,
+        full=tuple(index for index in match.full if keep(index)),
+        full_alpha=tuple(index for index in match.full_alpha if keep(index)),
+        phrase=tuple(index for index in match.phrase if keep(index)),
+    )
 
 
 def _line_anchor(index: int, cells: list[dict[str, Any]], confident: list[int | None]) -> int | None:

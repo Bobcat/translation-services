@@ -1542,3 +1542,192 @@ def test_restore_printed_lead_marker_readds_a_lost_footnote_star() -> None:
     assert _restore_printed_lead_marker("Gelijke bijdragen.", plain) == "Gelijke bijdragen."
     starred_word = {"members": [{"text": "* niet aan een woord vast"}]}
     assert _restore_printed_lead_marker("los sterretje", starred_word) == "los sterretje"
+
+
+def test_split_table_row_duplicate_value_stays_in_its_own_column() -> None:
+    # The same phrase printed in TWO physical columns (a value column repeating the annotation
+    # column's text) matches the bare field best for BOTH copies — exact beats containment — so
+    # text alone pulls the far copy across the page. Geometry must arbitrate: the left copy
+    # stacks with the wrapped remainder of its own column ("via survey"), so it belongs to the
+    # longer field; the right copy keeps the bare field. Without the repair the longer field is
+    # left with only its sliver remainder line and squeezes its whole translation onto it.
+    unit = {
+        "field_translations": [
+            ("Row 9", "Rij 9"),
+            ("Manual quality scores via survey", "Handmatige kwaliteitsscores via enquête"),
+            ("Manual quality scores", "Handmatige kwaliteitsscores"),
+        ],
+        "members": [
+            {"cell_id": 1, "text": "Row 9", "translate": True,
+             "bbox": {"left": 100, "top": 800, "width": 90, "height": 26}},
+            {"cell_id": 2, "text": "Manual quality scores", "translate": True,
+             "bbox": {"left": 300, "top": 796, "width": 280, "height": 24}},
+            {"cell_id": 3, "text": "via survey", "translate": True,
+             "bbox": {"left": 350, "top": 824, "width": 170, "height": 26}},
+            {"cell_id": 4, "text": "Manual quality scores", "translate": True,
+             "bbox": {"left": 900, "top": 800, "width": 280, "height": 24}},
+        ],
+    }
+    cells = _split_table_row(unit, ())
+    assert cells is not None and len(cells) == 3
+    by_translation = {cell["translated_text"]: cell for cell in cells}
+    wrapped = by_translation["Handmatige kwaliteitsscores via enquête"]
+    assert sorted(m["cell_id"] for m in wrapped["members"]) == [2, 3]  # both lines of its column
+    bare = by_translation["Handmatige kwaliteitsscores"]
+    assert [m["cell_id"] for m in bare["members"]] == [4]  # the far copy stays in its own column
+
+
+def test_table_cell_planes_share_the_column_width(tmp_path) -> None:
+    # A cell whose source wraps to a short centered second line (a lone word under a full
+    # first line) must not cap the wrap at that sliver: a long token forced onto it would
+    # drag the whole cell through the pt-shrink loop. With the union width the translation
+    # lays out over both lines at the source size instead of crushed.
+    img = Image.new("RGB", (700, 140), (255, 255, 255))
+    draw = ImageDraw.Draw(img)
+    for x in range(60, 360, 14):   # line 1: full column width
+        draw.rectangle((x, 30, x + 6, 55), fill=(0, 0, 0))
+    for x in range(160, 250, 14):  # line 2: short centered word
+        draw.rectangle((x, 70, x + 6, 95), fill=(0, 0, 0))
+    for x in range(480, 640, 14):  # neighbour column, one line
+        draw.rectangle((x, 30, x + 6, 55), fill=(0, 0, 0))
+    path = tmp_path / "cell.png"
+    img.save(path)
+    unit = {
+        "translated_text": "Training van deep-learning VQA-modellen Spearmancorrelatie",
+        "block_id": 1, "level": "body",
+        "field_translations": [
+            ("Deep-learning VQA model training", "Training van deep-learning VQA-modellen"),
+            ("Spearman correlation", "Spearmancorrelatie"),
+        ],
+        "members": [
+            {"cell_id": 1, "text": "Deep-learning VQA model", "translate": True,
+             "bbox": {"left": 60, "top": 30, "width": 306, "height": 26}},
+            {"cell_id": 2, "text": "training", "translate": True,
+             "bbox": {"left": 160, "top": 70, "width": 96, "height": 26}},
+            {"cell_id": 3, "text": "Spearman correlation", "translate": True,
+             "bbox": {"left": 480, "top": 30, "width": 166, "height": 26}},
+        ],
+    }
+    png = render_translated_image(path, [unit])
+    arr = np.asarray(Image.open(BytesIO(png)).convert("L"))
+    # Line 2's rendered ink must keep the source scale (crushed-to-fit came out under half).
+    band = arr[64:104, 40:420]
+    rows = np.nonzero((band < 128).any(axis=1))[0]
+    assert len(rows) and rows.max() - rows.min() >= 15
+
+
+def test_split_table_row_cuts_a_box_ocr_jammed_across_two_columns() -> None:
+    # OCR read the line-1 text of TWO adjacent columns as one box ("…classification" +
+    # "Performance improvements…" with a garble at the seam). Both fields compete for it, one
+    # cell would span both columns and the cell-merge would glue the row shut. The box must be
+    # cut between the two field runs, each part joining its own column — and the merge must
+    # not re-glue the cut. A short shared label pair (the 'PRIJS BEDRAG' shared-box test above)
+    # stays on the designed shared-box path via the run-length gate.
+    unit = {
+        "field_translations": [
+            ("Large-scale video classification and action recognition",
+             "Grootschalige videoclassificatie en actieherkenning"),
+            ("Performance improvements over baselines",
+             "Prestatieverbeteringen ten opzichte van baselines"),
+        ],
+        "members": [
+            {"cell_id": 1, "text": "Large-scale", "translate": True,
+             "bbox": {"left": 963, "top": 979, "width": 101, "height": 17}},
+            {"cell_id": 2, "text": "video classification'[Performance improvements over",
+             "translate": True, "bbox": {"left": 1059, "top": 975, "width": 504, "height": 25}},
+            {"cell_id": 3, "text": "and action recognition", "translate": True,
+             "bbox": {"left": 993, "top": 1001, "width": 213, "height": 24}},
+            {"cell_id": 4, "text": "baselines", "translate": True,
+             "bbox": {"left": 1362, "top": 1001, "width": 89, "height": 23}},
+        ],
+    }
+    cells = _split_table_row(unit, ())
+    assert cells is not None and len(cells) == 2
+    by_tr = {c["translated_text"]: c for c in cells}
+    left = by_tr["Grootschalige videoclassificatie en actieherkenning"]
+    right = by_tr["Prestatieverbeteringen ten opzichte van baselines"]
+    left_edge = max(m["bbox"]["left"] + m["bbox"]["width"] for m in left["members"])
+    right_edge = min(m["bbox"]["left"] for m in right["members"])
+    assert left_edge <= right_edge  # the cut separates the columns; no cross-column span
+    assert sorted(m["cell_id"] for m in right["members"]) == [2, 4]
+
+
+def test_fill_size_metric_grows_body_to_match_source_ink(tmp_path) -> None:
+    # "fill" sizes a line so its rendered ink is as tall as the source line's ink; the default
+    # extent (0.9x polygon) undershoots. A flat body block rendered "fill" must produce taller
+    # ink than "extent" and land near the source ink; a no-op falls back to extent behaviour.
+    from app.replacement.text.size import _face_ink_per_pt
+
+    assert 0.7 < _face_ink_per_pt("Times New Roman", 400) < 1.1  # ink is a large fraction of the em
+
+    img = Image.new("RGB", (700, 260), (255, 255, 255))
+    draw = ImageDraw.Draw(img)
+    src_font = load_font(34, "Aghpxldijk", family="Times New Roman", weight=400)
+    lines = ["Ahvbgpy het originele", "onderbelicht ook al is", "literatuuronderzoek proces"]
+    tops = [30, 90, 150]
+    members = []
+    for i, (line, top) in enumerate(zip(lines, tops)):
+        draw.text((40, top), line, font=src_font, fill=(0, 0, 0))
+        # Tight bbox like real OCR: bound the actual ink, so extent (0.9x) genuinely undershoots.
+        left, itop, right, ibot = src_font.getbbox(line)
+        members.append({"cell_id": i, "text": line, "translate": True,
+                        "bbox": {"left": 40 + int(left), "top": top + int(itop),
+                                 "width": int(right - left), "height": int(ibot - itop)}})
+    path = tmp_path / "body.png"
+    img.save(path)
+    unit = {"translated_text": "Ahvbgpy het originele onderbelicht ook al is literatuuronderzoek proces",
+            "block_id": 1, "level": "body", "font_family": "Times New Roman", "font_weight": 400,
+            "members": members}
+
+    def median_line_ink(png):
+        # Per rendered LINE, the height of its ink run — the glyph size, not the block span.
+        arr = np.asarray(Image.open(BytesIO(png)).convert("L"))[:, 30:660]
+        inked = (arr < 100).any(axis=1)
+        runs, start = [], None
+        for i, v in enumerate(inked):
+            if v and start is None:
+                start = i
+            elif not v and start is not None:
+                runs.append(i - start)
+                start = None
+        runs = [r for r in runs if r >= 6]
+        return float(np.median(runs)) if runs else 0.0
+
+    extent = median_line_ink(render_translated_image(path, [dict(unit)], size_metric_mode="extent"))
+    fill = median_line_ink(render_translated_image(path, [dict(unit)], size_metric_mode="fill"))
+    assert fill > extent + 1  # fill grows the glyphs toward the source ink
+
+
+def test_align_column_filter_keeps_a_dropped_paragraph_orphan_in_its_own_column() -> None:
+    # The VLM dropped a left-column paragraph; its cells are un-hinted. One orphan weakly shares
+    # a token ("in") with the RIGHT column's block, which sits within the flat-index position
+    # guard, so without the column filter it gets confidently mislabeled there and the right
+    # block's translation renders across the page. With cell_columns evidence the orphan may only
+    # take a same-column block, so it stays a left-column leftover.
+    from app.grouping.align import build_units_from_hint
+
+    cells = [
+        {"id": 1, "text": "In contrast schema generation from a set", "translate": True,
+         "bbox": {"left": 100, "top": 100, "width": 300, "height": 24}},
+        {"id": 2, "text": "of documents remains under-explored", "translate": True,
+         "bbox": {"left": 100, "top": 130, "width": 300, "height": 24}},
+        {"id": 3, "text": "generating values conditioned on an aspect", "translate": True,
+         "bbox": {"left": 100, "top": 200, "width": 300, "height": 24}},  # orphan, left col
+        {"id": 4, "text": "In section two we curate and release the", "translate": True,
+         "bbox": {"left": 900, "top": 100, "width": 300, "height": 24}},
+        {"id": 5, "text": "dataset of high quality review tables", "translate": True,
+         "bbox": {"left": 900, "top": 130, "width": 300, "height": 24}},
+    ]
+    hint_units = ["In contrast schema generation from a set of documents remains under-explored",
+                  "In section two we curate and release the dataset of high quality review tables"]
+    regions = [
+        {"label": "text", "score": 0.99, "coordinate": [90, 90, 410, 240]},
+        {"label": "text", "score": 0.99, "coordinate": [890, 90, 1210, 170]},
+        {"label": "text", "score": 0.95, "coordinate": [90, 90, 410, 240]},  # 3 text regions -> gate opens
+    ]
+    result = build_units_from_hint(cells=cells, hint_units=hint_units, model="x", layout_regions=regions)
+    orphan_unit = next(u for u in result.units if any(m.cell_id == 3 for m in u.members))
+    assert orphan_unit.hint_index is None  # a left-column leftover, not bound to the right block
+    assert all(m.bbox["left"] < 500 for m in orphan_unit.members)  # never crosses into the right column
+    right = next(u for u in result.units if u.hint_index == 1)
+    assert all(m.bbox["left"] > 500 for m in right.members)  # right block stays right-column only

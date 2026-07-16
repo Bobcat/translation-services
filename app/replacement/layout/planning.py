@@ -14,8 +14,10 @@ from app.replacement.geometry import _ANGLE_DEADZONE_DEG
 from app.replacement.pixels import _INK_DELTA
 from app.replacement.jobs import _Job
 from app.replacement.layout.compositing import _ipoint
+from app.replacement.text.size import _face_ink_per_pt
 from app.replacement.text.size import _group_size
 from app.replacement.text.size import _quad_band_height
+from app.replacement.text.size import _quad_ink_span
 from app.replacement.text.angle import _line_clusters
 from app.replacement.text.angle import _baseline_angle
 from app.replacement.text.wrap import _fit_group
@@ -283,6 +285,7 @@ def _plan_group(
     render_size_mode: str = "median",
     width_fit_mode: str = "footprint",
     band_ratio: float | None = None,
+    ink_fill: bool = False,
     angle_field: tuple[float, float] | None = None,
     size_cohorts: dict[int, float] | None = None,
     base_arr: np.ndarray | None = None,
@@ -317,6 +320,7 @@ def _plan_group(
                     render_size_mode=render_size_mode,
                     width_fit_mode=width_fit_mode,
                     band_ratio=band_ratio,
+                    ink_fill=ink_fill,
                     angle_field=angle_field,
                     size_cohorts=size_cohorts,
                     base_arr=base_arr,
@@ -503,6 +507,11 @@ def _plan_group(
                 clamped = min(plane["true_height"], median(bands) * band_ratio)
                 plane["target"] = max(8, int(clamped * size_ratio))
 
+    # The units of a group share one VLM element, so one font family/weight. Take the first
+    # that carries a hint (leftovers have none -> fall back to the default font).
+    family = next((u.get("font_family") for u in units if u.get("font_family")), None)
+    weight = next((u.get("font_weight") for u in units if u.get("font_weight")), None)
+
     # "cohort" size metric: an element the VLM gave a font-size (pt) that other elements share
     # renders at the cohort's shared OCR-median size, so a list the VLM judged one size renders
     # uniform instead of each item at its own noisy per-line measurement. A short-line item then
@@ -519,6 +528,20 @@ def _plan_group(
         if cohort_height is not None:
             for plane in planes:
                 plane["target"] = max(8, int(cohort_height * size_ratio))
+
+    # "fill" size metric: size each line so its rendered ink is as tall as the SOURCE line's
+    # ink, matching the print's glyph fill instead of the 0.9-of-polygon undershoot (see
+    # size._face_ink_per_pt). Self-calibrating per element: measure both ink spans in pixels and
+    # divide. Runs LAST — it overrides the extent/band/cohort targets, since it is the direct
+    # pixel match those approximate. Flat, non-CJK groups only (the scan is axis-aligned; CJK
+    # em-fill is handled by the size ratio); weak ink evidence on a plane keeps its prior target.
+    if ink_fill and angle == 0.0 and size_ratio == _SIZE_RATIO:
+        ink_per_pt = _face_ink_per_pt(family, weight)
+        if ink_per_pt > 0:
+            for plane, (bg, _fg) in zip(planes, colors):
+                spans = [s for q in plane["quads"] if (s := _quad_ink_span(base_arr, q, bg)) is not None]
+                if spans:
+                    plane["target"] = max(8, int(round(median(spans) / ink_per_pt)))
 
     # "extend" width fit: widen each plane's usable width into VERIFIED clean background to
     # its right before fitting, so a longer translation of a short line (a list item) keeps
@@ -544,10 +567,6 @@ def _plan_group(
     # NOT a size chosen to fit the width. So a heading keeps heading size and body keeps
     # body size — the source size carries the hierarchy. The joined translation is balanced
     # over the original line count.
-    # The units of a group share one VLM element, so one font family/weight. Take the first
-    # that carries a hint (leftovers have none -> fall back to the default font).
-    family = next((u.get("font_family") for u in units if u.get("font_family")), None)
-    weight = next((u.get("font_weight") for u in units if u.get("font_weight")), None)
     joined = " ".join(texts)
     plane_widths = [plane["width"] for plane in planes]
     # Render at the source size, but spend pt only as a last resort: if even at the condense
@@ -557,6 +576,28 @@ def _plan_group(
     # OCR-noise cells instead of erasing far beyond the source footprint.
     size = _group_size(planes, render_size_mode)
     font, lines = _fit_group(joined, size=size, plane_widths=plane_widths, family=family, weight=weight)
+    # A table COLUMN cell that cannot fit its per-line footprints at the source size gets ONE
+    # retry with every line at the cell's union width before pt is spent: the union is the
+    # cell's own evidence (its widest line spans the column), and a short trailing source line
+    # (a lone centered word under a full first line) must not drag the whole cell through the
+    # pt-shrink loop because a long token cannot fit that sliver. Cells that already fit keep
+    # their footprints — this path only opens where the render would otherwise crush. The
+    # measured slack is zeroed: it was scanned at the old right edges.
+    if (
+        len(planes) > 1
+        and _raw_condense(font, lines, planes) < _CONDENSE_FLOOR
+        and any(unit.get("table_cell") for unit in units)
+    ):
+        xmin_union = min(plane["frame"][2] for plane in planes)
+        xmax_union = max(plane["frame"][3] for plane in planes)
+        for plane in planes:
+            x_axis, y_axis, _xmin, _xmax, ymin, ymax = plane["frame"]
+            plane["frame"] = (x_axis, y_axis, xmin_union, xmax_union, ymin, ymax)
+            plane["width"] = xmax_union - xmin_union
+            if "slack_px" in plane:
+                plane["slack_px"] = 0.0
+        plane_widths = [plane["width"] for plane in planes]
+        font, lines = _fit_group(joined, size=size, plane_widths=plane_widths, family=family, weight=weight)
     while size > _MIN_RENDER_SIZE and _raw_condense(font, lines, planes) < _CONDENSE_FLOOR:
         size -= 1
         font, lines = _fit_group(joined, size=size, plane_widths=plane_widths, family=family, weight=weight)

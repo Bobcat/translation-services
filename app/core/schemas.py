@@ -42,6 +42,10 @@ class RequestPayload(BaseModel):
     # Feed translation the geometry-adjusted hints (a `|` injected where OCR cell gaps show a column
     # the VLM missed) instead of the raw VLM hints, so a `label  value` row renders per column.
     use_geometry_columns: bool = True
+    # Keep text inside detected image/chart regions as original pixels (a screenshot's UI labels,
+    # a plot's axes). False translates and renders it too — for a "figure" that is really a table
+    # screenshot whose cells you want translated.
+    preserve_image_regions: bool = True
     # How a render group's single font size is chosen from its lines' measured heights: "min"
     # never overflows the smallest line's band; "median" resists one under-measured (lowercase)
     # line dragging the whole block down. Default "median" since 2026-07-06: evaluated across
@@ -66,7 +70,10 @@ class RequestPayload(BaseModel):
     # marker or mid-text — brackets) cannot inflate a line's size past its siblings.
     # One-sided: "band" only ever shrinks an outlier, and weak ink evidence keeps the
     # extent behaviour.
-    size_metric_mode: Literal["extent", "band"] = "extent"
+    # "fill" sizes each line so its rendered ink is as tall as the source line's ink (a direct
+    # per-line pixel match, self-calibrating on the mapped face), fixing the ~10-20% undershoot
+    # where translated body text reads smaller/airier than the print. Flat, non-CJK groups only.
+    size_metric_mode: Literal["extent", "band", "fill"] = "extent"
     # Cross-element size uniformity from the VLM's per-element font-size (pt) label. "off"
     # sizes each element from its own OCR true-height. "vlm" groups elements the VLM gave one
     # pt into a size cohort and — when their OCR heights AGREE (the VLM's equal claim holds) —

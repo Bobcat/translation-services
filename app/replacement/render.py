@@ -136,6 +136,7 @@ def render_translated_image(
                 render_size_mode=render_size_mode,
                 width_fit_mode=width_fit_mode,
                 band_ratio=band_ratio,
+                ink_fill=size_metric_mode == "fill",
                 angle_field=angle_field,
                 size_cohorts=size_cohorts,
                 base_arr=base_arr,

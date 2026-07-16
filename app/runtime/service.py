@@ -401,7 +401,8 @@ class RequestRuntime:
         # letting the schema default refill them would silently change the retranslate's inputs
         # beyond the prompt/language the caller asked to vary. ``in body`` (not ``or``) so an
         # explicit ``false`` override survives.
-        for flag in ("preserve_heuristic_text", "preserve_unchanged_text", "use_geometry_columns"):
+        for flag in ("preserve_heuristic_text", "preserve_unchanged_text", "use_geometry_columns",
+                     "preserve_image_regions"):
             if flag in body:
                 payload[flag] = bool(body[flag])
             elif flag in source_request:

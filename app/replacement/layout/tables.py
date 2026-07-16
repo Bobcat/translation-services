@@ -46,7 +46,7 @@ def _split_table_row(
     # pure-number line like '2025' the translation re-emits). Other non-translatable members (an
     # icon, a self-standing price not requested for render) are left untouched.
     columns: dict[int, list[dict[str, Any]]] = {}
-    for member in unit.get("members") or []:
+    for member in _split_straddling_members(unit.get("members") or [], pairs):
         if not member.get("bbox"):
             continue
         best_field, best_score = None, 0.0
@@ -71,6 +71,7 @@ def _split_table_row(
         columns.setdefault(best_field, []).append(member)
     if not columns:
         return None
+    _rehome_column_strays(columns, pairs)
     # A field with no member of its own shares a column (a 'PRIJS | BEDRAG' hint OCR read as one
     # box): attach its translation to the column whose members it best matches, kept in field
     # order so the cell renders the fields as written.
@@ -106,6 +107,7 @@ def _split_table_row(
     cells: list[dict[str, Any]] = []
     for field, cell_members in columns.items():
         cell = dict(unit)
+        cell["table_cell"] = True  # planner: this unit is one table COLUMN (shares its width)
         cell["translated_text"] = " ".join(text for _, text in sorted(column_texts[field]))
         cell["members"] = cell_members
         # The cell's own translatable member texts, NOT the parent row's (dict(unit) copied
@@ -118,6 +120,169 @@ def _split_table_row(
         cells.append(cell)
     return _merge_close_table_cells(cells)
 
+# A straddling member: OCR jammed the line-1 text of TWO adjacent columns into one box
+# ("video classification" + "Performance improvements over" with a garble at the seam). Both
+# fields then compete for the box, one cell ends up spanning both columns and the cell-merge
+# glues the row shut. Detected on strong evidence only: each side must match its field in one
+# contiguous run of at least this many key characters (a short shared label pair like
+# 'PRIJS BEDRAG' stays on the designed shared-box path), the two runs must be disjoint in the
+# member, and together cover most of it. The box is then cut between the runs, proportionally
+# in key space (letters+digits ~ ink).
+_STRADDLE_MIN_RUN = 10
+_STRADDLE_MIN_COVER = 0.6
+_STRADDLE_MIN_PART_PX = 8
+
+
+def _split_straddling_members(
+    members: list[dict[str, Any]], pairs: list[tuple[str, str]]
+) -> list[dict[str, Any]]:
+    """``members`` with every straddling box (see _STRADDLE_*) cut into its two field parts;
+    all other members pass through unchanged. The parts carry a shared ``split_part`` marker so
+    the cell-merge can refuse to re-glue the cut."""
+    out: list[dict[str, Any]] = []
+    for member in members:
+        parts = _straddle_parts(member, pairs)
+        out.extend(parts if parts else [member])
+    return out
+
+
+def _straddle_parts(
+    member: dict[str, Any], pairs: list[tuple[str, str]]
+) -> list[dict[str, Any]] | None:
+    if not member.get("translate") or not member.get("bbox"):
+        return None
+    raw = str(member.get("text") or "")
+    key, raw_positions = _key_positions(raw)
+    if len(key) < 2 * _STRADDLE_MIN_RUN:
+        return None
+    runs: list[tuple[int, int, int]] = []  # (start, end) in member key, field index
+    for index, (source, _translated) in enumerate(pairs):
+        field_key = _field_key(source)
+        if len(field_key) < _STRADDLE_MIN_RUN:
+            continue
+        block = max(
+            difflib.SequenceMatcher(None, key, field_key).get_matching_blocks(),
+            key=lambda b: b.size,
+        )
+        if block.size >= _STRADDLE_MIN_RUN:
+            runs.append((block.a, block.a + block.size, index))
+    runs.sort(key=lambda run: run[1] - run[0], reverse=True)
+    for i in range(len(runs)):
+        for j in range(len(runs)):
+            if i == j or runs[i][2] == runs[j][2]:
+                continue
+            left, right = (runs[i], runs[j]) if runs[i][1] <= runs[j][0] else (runs[j], runs[i])
+            if left[1] > right[0]:
+                continue  # overlapping runs: duplicated value, not a straddle
+            if (left[1] - left[0]) + (right[1] - right[0]) < _STRADDLE_MIN_COVER * len(key):
+                continue
+            return _cut_member(member, raw, key, raw_positions, left, right)
+    return None
+
+
+def _cut_member(
+    member: dict[str, Any],
+    raw: str,
+    key: str,
+    raw_positions: list[int],
+    left: tuple[int, int, int],
+    right: tuple[int, int, int],
+) -> list[dict[str, Any]]:
+    """``member`` cut between its two field runs: text split at the seam (the garble between
+    the runs is dropped), bbox split proportionally in key space."""
+    bbox = member["bbox"]
+    fraction = ((left[1] + right[0]) / 2.0) / len(key)
+    cut = int(round(float(bbox["width"]) * fraction))
+    if cut < _STRADDLE_MIN_PART_PX or float(bbox["width"]) - cut < _STRADDLE_MIN_PART_PX:
+        return None
+    marker = member.get("cell_id") if member.get("cell_id") is not None else id(member)
+    parts: list[dict[str, Any]] = []
+    texts = (raw[: raw_positions[left[1] - 1] + 1].strip(), raw[raw_positions[right[0]]:].strip())
+    boxes = (
+        {**bbox, "width": cut},
+        {**bbox, "left": bbox["left"] + cut, "width": bbox["width"] - cut},
+    )
+    for text, box in zip(texts, boxes):
+        part = dict(member)
+        part.pop("polygon", None)  # the cut is bbox-space; a stale quad would span the seam
+        part["text"] = text
+        part["bbox"] = box
+        part["split_part"] = marker
+        parts.append(part)
+    return parts
+
+
+def _key_positions(text: str) -> tuple[str, list[int]]:
+    """``(_field_key(text), raw index of every key character)`` — the same normalization,
+    tracked per character so a key-space cut maps back to a raw-text position."""
+    key_chars: list[str] = []
+    positions: list[int] = []
+    for index, ch in enumerate(str(text or "")):
+        folded = unicodedata.normalize("NFKD", ch.lower())
+        for piece in folded:
+            if unicodedata.combining(piece) or re.match(r"[\W_]", piece):
+                continue
+            key_chars.append(piece)
+            positions.append(index)
+    return "".join(key_chars), positions
+
+
+# Members of ONE table cell stack vertically: wrapped lines of a column overlap in x by most
+# of the narrower box. Below this fraction two members are in different physical columns.
+_COLUMN_STACK_OVERLAP = 0.3
+
+
+def _rehome_column_strays(
+    columns: dict[int, list[dict[str, Any]]], pairs: list[tuple[str, str]]
+) -> None:
+    """Geometry arbitrates a duplicated-value tie the text match cannot see.
+
+    A value printed in TWO physical columns (the same phrase in two table cells) matches one
+    field best for BOTH copies — exact beats containment — so the far copy is pulled across
+    the page into that field's cell, which then spans two columns; the field whose source
+    carries the shared phrase plus more ("<phrase> via crowdsourcing") is left with only its
+    remainder fragment and squeezes its whole translation onto that sliver. Members of one
+    cell stack in x (wrapped lines overlap), so a member x-disjoint from every other member
+    of its field is a stray; when another field's members DO x-overlap it and that field's
+    source text-matches it too, it moves there. No-op for x-coherent cells — single-member
+    fields and genuinely wrapped columns are untouched."""
+    for field, members in columns.items():
+        if len(members) < 2:
+            continue
+        for member in list(members):
+            others = [m for m in members if m is not member]
+            if not others:
+                continue  # a lone member is trivially coherent (an earlier stray moved out)
+            if any(_x_overlap_fraction(member, other) >= _COLUMN_STACK_OVERLAP for other in others):
+                continue  # stacks with its own cell
+            member_text = str(member.get("text") or "")
+            for other_field, other_members in columns.items():
+                if other_field == field:
+                    continue
+                if _field_overlap(str(pairs[other_field][0]), member_text) < _FIELD_MATCH_MIN:
+                    continue
+                if any(
+                    _x_overlap_fraction(member, om) >= _COLUMN_STACK_OVERLAP
+                    for om in other_members
+                ):
+                    members.remove(member)
+                    other_members.append(member)
+                    break
+
+
+def _x_overlap_fraction(a: dict[str, Any], b: dict[str, Any]) -> float:
+    """x-overlap of two members' boxes as a fraction of the narrower box."""
+    box_a, box_b = a.get("bbox") or {}, b.get("bbox") or {}
+    a0 = float(box_a.get("left") or 0.0)
+    a1 = a0 + float(box_a.get("width") or 0.0)
+    b0 = float(box_b.get("left") or 0.0)
+    b1 = b0 + float(box_b.get("width") or 0.0)
+    narrower = min(a1 - a0, b1 - b0)
+    if narrower <= 0:
+        return 0.0
+    return (min(a1, b1) - max(a0, b0)) / narrower
+
+
 def _merge_close_table_cells(cells: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Merge adjacent table fields that are really one visual column.
 
@@ -128,7 +293,13 @@ def _merge_close_table_cells(cells: list[dict[str, Any]]) -> list[dict[str, Any]
     ordered = sorted(cells, key=lambda cell: (_cell_axis_box(cell)[0], _cell_axis_box(cell)[1]))
     merged: list[dict[str, Any]] = []
     for cell in ordered:
-        if not merged or not _should_merge_table_cells(merged[-1], cell):
+        # Never re-glue a deliberate straddle cut: the two parts of one OCR box are adjacent by
+        # construction, so the gap gauge would always merge them back into a two-column cell.
+        if (
+            not merged
+            or _cells_share_split_box(merged[-1], cell)
+            or not _should_merge_table_cells(merged[-1], cell)
+        ):
             merged.append(cell)
             continue
         previous = dict(merged[-1])
@@ -141,6 +312,14 @@ def _merge_close_table_cells(cells: list[dict[str, Any]]) -> list[dict[str, Any]
         previous["members"] = list(previous.get("members") or []) + list(cell.get("members") or [])
         merged[-1] = previous
     return merged
+
+def _cells_share_split_box(a: dict[str, Any], b: dict[str, Any]) -> bool:
+    """Whether the two cells hold parts of the same straddle-cut OCR box (see split_part)."""
+    parts_a = {
+        m.get("split_part") for m in (a.get("members") or []) if m.get("split_part") is not None
+    }
+    return any(m.get("split_part") in parts_a for m in (b.get("members") or []))
+
 
 def _should_merge_table_cells(left_cell: dict[str, Any], right_cell: dict[str, Any]) -> bool:
     left = _cell_axis_box(left_cell)

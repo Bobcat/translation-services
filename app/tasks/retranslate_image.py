@@ -46,10 +46,32 @@ def run_retranslate_image_pipeline(
     if not source_lang:
         raise RuntimeError("source_lang_code is required for translation routing")
 
-    units = [TranslationUnit.from_dict(item) for item in source_grouping.get("units") or []]
+    use_geometry_columns = _bool_request_flag(request, "use_geometry_columns", default=True)
+    preserve_image_regions = _bool_request_flag(request, "preserve_image_regions", default=True)
+    # When the align inputs were frozen (OCR cells + hint + layout regions), RE-ALIGN here so a
+    # grouping flag like preserve_image_regions takes effect without re-running VLM/OCR. Re-align
+    # is deterministic on the same inputs, so a default (preserve on) re-translate rebuilds the
+    # exact same units the source run had — while preserve OFF turns image/chart text (a figure
+    # that is really a table) into units, and toggling back ON drops it again. Older runs without
+    # cached cells fall back to the cached units (the previous behaviour).
+    cached_cells = source_grouping.get("cells")
+    if cached_cells:
+        from app.grouping import group_cells_into_units
+        from app.grouping.hint_parser import parse_grouping_output
+
+        units = list(
+            group_cells_into_units(
+                cells=cached_cells,
+                hint=parse_grouping_output(str(source_grouping.get("raw") or "")),
+                model=str(source_grouping.get("model") or ""),
+                layout_regions=source_grouping.get("layout_regions") or None,
+                preserve_image_regions=preserve_image_regions,
+            ).units
+        )
+    else:
+        units = [TranslationUnit.from_dict(item) for item in source_grouping.get("units") or []]
     if not units:
         raise RuntimeError("source run has no cached translation units to re-translate")
-    use_geometry_columns = _bool_request_flag(request, "use_geometry_columns", default=True)
     raw_hint_units = [str(line) for line in source_grouping.get("hint_units") or []]
     adjusted_hint_units = [str(line) for line in source_grouping.get("hint_units_adjusted") or []]
     # Feed translation the same hint variant the source run fed (translate_image uses the
@@ -154,9 +176,13 @@ def run_retranslate_image_pipeline(
         },
         "grouping": {
             "category": image_category,
+            "raw": str(source_grouping.get("raw") or ""),
             "hint_units": list(hint_units),
             "hint_block_ids": list(hint_block_ids),
             "units": [unit.to_dict() for unit in units],
+            # Carry the align inputs forward so a further re-entry can re-align from this run too.
+            "cells": cached_cells or source_grouping.get("cells"),
+            "layout_regions": source_grouping.get("layout_regions"),
         },
         "translation": [
             {
@@ -181,6 +207,7 @@ def run_retranslate_image_pipeline(
         "preserve_heuristic_text": preserve_heuristic_text,
         "preserve_unchanged_text": preserve_unchanged_text,
         "use_geometry_columns": use_geometry_columns,
+        "preserve_image_regions": preserve_image_regions,
         "render_size_mode": render_size_mode,
         "erase_fill_mode": erase_fill_mode,
         "width_fit_mode": width_fit_mode,
