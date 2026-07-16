@@ -34,7 +34,7 @@ storage, different failure semantics) and meet only in the view.
 No access to pipeline internals, no assumptions about how the translation was
 produced. A translation from an external system is just another pair with a
 different system label; our own runs produce a `rendered.pdf` like any other
-system. This is what makes calibration against other systems possible, and it
+system. This is what makes calibration against other systems' output possible, and it
 prevents us from scoring ourselves on knowledge only we have (units, cells,
 grouping).
 
@@ -47,13 +47,27 @@ untranslated blocks than a competitor that re-typesets everything. Axes:
 | Axis | Measures | How |
 |---|---|---|
 | **Layout** | does the structure survive? | PP-DocLayout on both renders; class-aware region matching (IoU); mean matched overlap, penalties for lost/invented regions |
-| **Completeness** | is everything translated, nothing dropped? | re-OCR of the translated render: leftover segments (still source language) + vanished segments (source region with no text counterpart) |
+| **Retention** | did the text survive? | re-OCR of the translated render: 100 − share of eligible source segments whose content is gone. Losing text is wrong under every interpretation |
 | **Typography** | legible and proportional? | text overflowing its matched region; font-size *ratio* drift between levels (readers notice broken ratios, not absolute sizes) |
 | **Structure flags** | hard yes/no | page count, image-region count, table-region count equal. Flags, not scores — a dropped page is not "−12 points", it is broken |
 
-Translation *adequacy* (is the translation itself good?) is deliberately not an
-axis in v1: it needs an LLM judge and is non-deterministic. Later, as a
-separate, clearly-labelled advisory axis.
+Next to the axes, one **indicator**: every eligible source segment lands in
+exactly one of three observable states — **changed** (present, different from
+the source; ~translated), **unchanged** (present, verbatim the source) or
+**missing** (gone) — and the unchanged share is reported without a good/bad
+scale attached. Deliberately kept text (a proper noun, "Yellow Card") and a
+missed translation are indistinguishable from the pair alone, so intent is not
+scored. The comparison resolves this for free: the legitimate-keep set is a
+property of the *document* (every correct system keeps the same names), so the
+cross-system unchanged-delta on the same document is the actionable signal.
+Axis and indicator names are observations on purpose; "preserve" and
+"leftover" stay pipeline jargon (deliberately-kept text; a unit without a hint
+line) and never appear in benchmark vocabulary.
+
+Translation *adequacy* (is the translation itself good — including whether an
+unchanged segment *should* have been translated?) is deliberately not an axis
+in v1: that is LLM-judge or human-judge territory, non-deterministic, and even
+then soft. Later, as a separate, clearly-labelled advisory axis.
 
 ### Measurement pipeline (per document pair)
 
@@ -65,12 +79,12 @@ separate, clearly-labelled advisory axis.
    regions as layout invention. Background is excluded by construction.
 4. OCR both renders → segments per page (the reader's view, identical
    treatment for every system).
-5. Leftover detection, language-free first: a target segment is a leftover when
-   it matches a source segment verbatim (normalized) AND contains alphabetic
-   words AND is not in the deliberately-preserved classes (prices, codes,
-   URLs — the preserve-heuristic line of thinking). Language-ID only as a
-   secondary signal on segments of ≥3 words; LID on short segments is known
-   to be unreliable.
+5. Text-fate split (changed | unchanged | missing), language-free: a target
+   segment counts as unchanged when it matches a source segment verbatim
+   (normalized) AND contains alphabetic words; segments in the non-prose
+   classes (prices, codes, URLs) are not eligible to begin with. Language-ID
+   at most as a secondary signal on segments of ≥3 words; LID on short
+   segments is known to be unreliable.
 6. Geometry/typography checks on matched regions.
 
 ### Determinism — where the variance actually is
@@ -84,31 +98,44 @@ any score change after a code change is real.
 What varies is *our own system's output*: VLM grouping and translation wobble
 run to run, and inpaint re-rolls its model fill (GPU float). Two live runs on
 the same source therefore give two different output files, each with its own
-exact score. Consequence for comparisons: our leaderboard column shows a
-**spread over N pipeline runs** (min/median/max per axis); an uploaded external
-translation is one static file with one fixed score.
+exact score. Consequence for comparisons: our own column in the comparison
+matrix shows a **spread over N pipeline runs** (min/median/max per axis); an
+uploaded external translation is one static file with one fixed score.
 
-To verify before building (measure, then design — the regression doc's rule):
+Verified before building (measured 2026-07-16, probe scripts, throwaway):
 
-- **PP-DocLayout bit-stability** on identical pixels (expected, same class of
-  inference as OCR; the layout axis rests on it).
-- **Inpaint wobble vs score identity**: a replay "pass" is not bit-identical
-  (3px centroid tolerance, inpaint float wobble). Whether slightly different
-  inpaint pixels can flip a PP-DocLayout region — and thus move a score while
-  the replay passes — decides if "score unchanged" may be exact or needs a
-  measured band.
+- **PP-DocLayout is bit-stable on identical pixels.** Two in-process runs and
+  two separate processes produced identical region lists (hash-equal) on 6
+  diverse testset pages (3–91 regions each: simple text, infographic spread,
+  scientific paper, scan, hybrid, mixed). The layout axis rests on solid
+  ground.
+- **Inpaint is deterministic in practice on this environment.** Two rerenders
+  of the same cached inputs produced byte-identical PNGs on a photo-heavy scan
+  page where the model fill demonstrably ran (a flat-fill rerender of the same
+  inputs differs). Stronger than the regression doc's earlier assumption of
+  GPU float wobble: on the current box/torch version, replay output —
+  including inpaint — is byte-stable. Consequence: **"score unchanged" is
+  exact**; any observed score drift on a passing replay is a real signal to
+  investigate, never a band to absorb. If wobble reappears after a torch or
+  hardware change, re-measure before adding tolerance.
 
 ### Scale and calibration
 
 - **Anchor the corners with constructed baselines.** The *identity baseline*
-  (source submitted as its own translation) must score ~100 on layout and 0 on
-  completeness. If identity does not reach ~100 on layout, the number measures
-  detector noise, not quality — fix that before trusting anything else.
-- **The leaderboard is the product, not the absolute number.** Per-axis 0–100
-  is operationally defined (e.g. layout = mean class-aware IoU × 100), but a
-  75 only gets meaning from the columns next to it. If no system exceeds 75 on
-  the infographic class, 75 is what that class currently allows — chasing 90
-  there is chasing the metric.
+  (source submitted as its own translation) must score ~100 on layout, 100 on
+  retention and 100% unchanged — everything kept, nothing translated. If
+  identity does not reach ~100 on layout, the number measures detector noise,
+  not quality — fix that before trusting anything else.
+- **The comparison is a time-allocation instrument, not a contest.** Per-axis
+  0–100 is operationally defined (e.g. layout = mean class-aware IoU × 100),
+  but a 75 only gets meaning from the columns next to it — and the question
+  those columns answer is where effort pays, not who ranks first. If nothing
+  observed exceeds ~75 on a document class, that is probably what the class
+  currently allows: move to the next bottleneck rather than polish the metric.
+  If some system reaches 92 on an axis where we sit at 75, that gap is
+  *proven-attainable headroom* — that is where the time goes. Reporting sorts
+  by headroom (gap to the best observed result, our own runs included), not by
+  rank.
 - **No composite score in v1.** Revisit once real distributions over the
   testset exist; a weighted composite chosen before seeing data would encode
   guesses as policy.
@@ -127,7 +154,7 @@ upgrade, other machine, other dpi); layer (b) is the code that will evolve.
 Therefore every run persists layer (a)'s output as `measurement.json`
 (regions + OCR segments per page, tens of KB). Scoring becomes a pure function
 over it: any scoring change can be recomputed **retroactively over the whole
-history, including external uploads**, keeping the leaderboard internally
+history, including external uploads**, keeping the comparison matrix internally
 consistent across scoring versions. The "scores only comparable within a
 version" constraint then applies only to the measurement layer. Side benefit:
 scoring unit tests get real frozen measurement data as fixtures, and a
@@ -162,7 +189,7 @@ they do not enter code or docs). API sketch:
 
 - `POST /v1/benchmark/run` — either `{request_id}` of a completed
   `translate_pdf` run, or an uploaded pair + system label.
-- `GET /v1/benchmark/results` — the matrix for the leaderboard.
+- `GET /v1/benchmark/results` — the comparison matrix.
 
 CLI (the headless twin, like `scripts/regress.py`): run over the whole
 testset; `re-score-all` (cheap, pure CPU) and `re-measure-all` (expensive,
@@ -219,14 +246,14 @@ third, separate use: calibration, not the fix-loop.
 |---|---|---|
 | **Replay** | did behaviour change? | exact (the existing regression-view pattern, document → pages) |
 | **Score** | benchmark-on-replay + delta vs accepted score | deterministic |
-| **Leaderboard** | how do we stand against other systems? | live runs (spread over N) + static external uploads |
+| **Comparison** | where is proven-attainable headroom, per axis × document class? | live runs (spread over N) + static external uploads |
 
 The working pattern "fixing one document while the rest must stay green and
 equal" is: focus one document in Replay+Score, "Run all" for the rest. Cell
 detail (any tab): side-by-side page renders with overlays — matched regions
-green, lost regions red, leftovers marked, overflow flagged.
+green, lost regions red, unchanged segments marked, overflow flagged.
 
-Import flow (Leaderboard): pick a source document from the PDF testset, upload
+Import flow (Comparison): pick a source document from the PDF testset, upload
 the external translation, type a system label.
 
 ---
@@ -241,7 +268,7 @@ the external translation, type a system label.
   completed run, replay (per-page reuse + document checks), benchmark-on-replay,
   accepted-score freeze.
 - **Slice 2c — API + view.** `/v1/benchmark/*`, the three-tab view, external
-  import, leaderboard with our N-run spread.
+  import, the comparison matrix with our N-run spread, sorted by headroom.
 
 Each slice is independently useful: 2a alone already scores any pair from the
 CLI; 2b alone already guards the pipeline; 2c makes both routine.
