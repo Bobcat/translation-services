@@ -1,9 +1,10 @@
 # translation-services
 
-A FastAPI service for **queued image-translation jobs**. You submit a request
-(an image plus a source/target language), it runs through a task pipeline — OCR,
-structural grouping, translation, and re-rendering the translated text back onto
-the image — and you poll for the result and its artifacts.
+A FastAPI service for **queued translation jobs** over images and PDF documents.
+You submit a request (an image or a PDF plus a source/target language), it runs
+through a task pipeline — OCR or text-layer extraction, structural grouping,
+translation, and re-rendering the translated text back onto the page — and you
+poll for the result and its artifacts.
 
 The service owns translation *input/output and orchestration*. It does not run
 language models itself: text translation and the vision grouping hint are
@@ -43,6 +44,13 @@ via PaddleOCR.
      language-pair routing and an optional prompt from the prompt library.
   4. **Replacement** — the renderer erases the source text and draws the
      translation back onto the image footprint.
+- Accepts an uploaded **PDF** (`application/pdf`) and translates it page by page
+  (`translate_pdf`): each page is rasterized and run through the same
+  `translate_image` stages, then the translated pages are reassembled into a PDF
+  on the original page sizes. Born-digital pages take their text from the PDF
+  text layer instead of OCR; a per-page census records the page class
+  (born-digital / scanned / hybrid), and every page keeps its own inspectable
+  artifacts.
 - Supports **re-translation** (`retranslate_image`): reuse a prior request's
   cached OCR/grouping and only re-run translation with a different prompt or
   target language — no OCR/VLM again.
@@ -60,6 +68,8 @@ This repo owns:
   TTL).
 - The image pipeline stages (OCR, grouping/alignment, translation routing,
   re-placement rendering) and their artifacts.
+- The document pipeline (PDF intake and page census, per-page rasterization and
+  text-layer extraction, reassembly) that reuses the image stages per page.
 
 It deliberately does **not** own:
 
