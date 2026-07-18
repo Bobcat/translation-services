@@ -54,10 +54,18 @@ from app.grouping.layout import PRESERVE_LABELS
 from app.grouping.layout import STRUCTURE_LABELS
 from app.grouping.layout import TEXT_LABELS
 
-SCORING_VERSION = 3
+SCORING_VERSION = 4
 
-# Regions below this detector confidence are noise for measurement purposes.
-_REGION_MIN_SCORE = 0.5
+# Regions below this detector confidence are noise for measurement purposes. 0.4 matches the
+# measurement-layer detection threshold (app.benchmark.measurement.MEASURE_LAYOUT_THRESHOLD):
+# on a perturbed render the model splits one region's confidence over competing classes,
+# dropping every candidate under the old 0.5 floor — see the detector appendix in
+# docs/pdf-benchmark-regression-design.md.
+_REGION_MIN_SCORE = 0.4
+# The structure FLAGS keep the old floor: they are hard did-a-picture/table-disappear signals,
+# and the 0.4-0.5 band is exactly where the detector is unstable (a crest inside a matched
+# header detected as a small image on one side only would flip a flag spuriously).
+_FLAG_MIN_SCORE = 0.5
 # Minimum IoU for two same-family regions to count as the same region.
 _MATCH_MIN_IOU = 0.1
 # Same-side same-family regions above this IoU are one detection reported twice.
@@ -523,7 +531,7 @@ def _region_count(pages: list[dict[str, Any]], labels: set[str]) -> int:
         1
         for page in pages
         for region in _usable_regions(page)
-        if region["label"] in labels
+        if region["label"] in labels and region["score"] >= _FLAG_MIN_SCORE
     )
 
 

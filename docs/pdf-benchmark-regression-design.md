@@ -345,3 +345,59 @@ CLI; 2b alone already guards the pipeline; 2c makes both routine.
 - Cross-machine score comparability — scores are compared within one
   measurement environment (same models, same fonts, same dpi), like the
   regression harness.
+
+---
+
+## Appendix: layout-detector behaviour under render perturbation
+
+Investigated 2026-07-18 (probe scripts, throwaway) after the comparison matrix
+showed pdf-01's page-1 header block — a logo plus two lines of large text, the
+most prominent element on the page — as *lost* on an externally produced
+translation whose render is, to a human eye, identical to the source there.
+
+**What actually happens.** The detector does not miss the block: run at
+threshold 0.1, it proposes it at almost exactly the source coordinates. But
+where the clean source render yields one confident region (`header` 0.914),
+the external render — which adds a small watermark line at the top and a
+coloured bar beside the logo — splits the same proposal's confidence across
+competing classes: `doc_title` 0.42, `paragraph_title` 0.38, `header` 0.35,
+`text` 0.35. Every candidate sits under the model's default threshold of 0.5,
+so the region vanishes from the output entirely. Dpi is not a factor: at
+300 dpi the pattern is identical (top candidate ~0.44). The general lesson:
+on a perturbed-but-visually-equivalent render the model's *localisation* is
+stable while its *classification* becomes ambiguous, and an argmax-per-proposal
+threshold turns that ambiguity into a hard miss. Class-confusion inside the
+text family is harmless to the benchmark (matching is family-level); the
+threshold cliff is what hurt.
+
+**Remedy (scoring v4).** The measurement layer detects at threshold **0.4**
+(recorded per measurement as `models.layout_threshold`), and scoring's region
+floor follows (`_REGION_MIN_SCORE` 0.4). On the case above the block returns
+as `doc_title` 0.42 and matches the source `header` at IoU 0.97; the page's
+false "missing" segments (retention 94 → 100) disappear with it. The
+structure FLAGS deliberately keep the old 0.5 floor: they are hard
+did-structure-disappear signals, and 0.4-0.5 is exactly the band where the
+detector is unstable (the logo's crest, detected as a small standalone
+`image` on one side only, would otherwise flip `image_regions_equal`).
+
+**Why measurement-only.** The threshold kwarg is not a post-hoc score filter:
+it feeds the model's internal postprocess. Measured across the full testset
+(265 pages/images, old vs new settings compared after the pipeline's own
+score filters), lowering it to 0.4 *removes* the full-page `image` region on
+14 photo/scan-archetype pages — a region the pipeline's preserve/gate logic
+relies on. `layout_nms` does the same and additionally suppressed a large
+text region on one page. So the pipeline keeps the model-default detection
+(bit-identical behaviour, verified); only `measure_pair` passes the lower
+threshold. The two detector configurations are one parameter on
+`detect_layout_regions`, documented there.
+
+**Validation.** After `scripts/benchmark.py remeasure` (the re-measure pass
+over all stored pairs; run ids preserved): every identity baseline still
+anchors at layout 100 / retention 100 / unchanged 100% across all six
+documents; the external system's pdf-01 layout moved 64.1 → 69.8 with the
+header matched; our own runs shifted comparably (ordering preserved); both
+document fixtures' accepted scores were re-frozen and benchmark-on-replay
+reproduces them exactly. Residual, accepted: on chart-heavy documents
+(pdf-02 carries 39 confident image regions) the count-equality flags remain
+sensitive to off-by-one detector variance; a relative tolerance would be a
+later scoring refinement.

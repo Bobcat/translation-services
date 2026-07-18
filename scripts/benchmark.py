@@ -11,12 +11,17 @@
     # recompute scores.json for every stored run with the current scoring code
     python scripts/benchmark.py rescore
 
+    # re-run the measurement layer over every stored pdf pair (GPU; only after a
+    # measurement-layer change such as a model upgrade or detection-threshold change)
+    python scripts/benchmark.py remeasure
+
     # print the leaderboard table from stored runs
     python scripts/benchmark.py report
 """
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
@@ -87,6 +92,27 @@ def cmd_identity(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_remeasure(args: argparse.Namespace) -> int:
+    """Re-run layer (a) — render + layout + OCR — over every stored pdf pair, in place.
+    The pairs are the ground truth; measurement.json and scores.json are derived and
+    overwritten. Run ids stay, so the comparison history keeps its identity."""
+    settings = load_settings()
+    for run in list_runs(Path(args.data_root)):
+        measurement = measure_pair(
+            settings=settings,
+            source_pdf=run.path / "source.pdf",
+            translated_pdf=run.path / "translated.pdf",
+            ocr_language=args.ocr_language,
+        )
+        run.measurement_path.write_text(
+            json.dumps(measurement, ensure_ascii=False), encoding="utf-8"
+        )
+        scores = score_measurement(measurement)
+        write_scores(run, scores)
+        print(f"{run.doc_id:36s} {run.system:12s} {run.run_id}  {_axes_line(scores)}")
+    return 0
+
+
 def cmd_rescore(args: argparse.Namespace) -> int:
     changed = 0
     for run in list_runs(Path(args.data_root)):
@@ -129,6 +155,10 @@ def main() -> int:
 
     p = sub.add_parser("rescore", help="recompute scores.json for all stored runs")
     p.set_defaults(func=cmd_rescore)
+
+    p = sub.add_parser("remeasure", help="re-run the measurement layer over all stored pairs (GPU)")
+    p.add_argument("--ocr-language", default="en")
+    p.set_defaults(func=cmd_remeasure)
 
     p = sub.add_parser("report", help="print stored runs")
     p.set_defaults(func=cmd_report)

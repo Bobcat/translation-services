@@ -28,6 +28,7 @@ from typing import Any
 
 _MODEL_NAME = "PP-DocLayout_plus-L"
 
+
 # Engine cache + locks, the app.ocr.paddleocr pattern: the predictor is not assumed thread-safe,
 # so prediction serialises on one lock; building the engine (~3.3s + ~770 MiB VRAM, lazy on first
 # use) must not block a warm predict, hence a separate build lock with double-checked caching.
@@ -54,13 +55,22 @@ _COLUMN_FUSE_OVERLAP = 0.5   # x-overlap needed to join a column, vs the narrowe
 _COLUMN_FUSE_STRONG = 0.7    # the stricter bar when a region touches SEVERAL columns at once
 
 
-def detect_layout_regions(input_path: Path) -> list[dict[str, Any]]:
+def detect_layout_regions(input_path: Path, *, threshold: float | None = None) -> list[dict[str, Any]]:
     """``[{"label", "score", "coordinate": [x0, y0, x1, y1]}]`` — ``[]`` on ANY failure (missing
-    model, no GPU, decode error): layout evidence is optional, the job must not fail on it."""
+    model, no GPU, decode error): layout evidence is optional, the job must not fail on it.
+
+    ``threshold`` overrides the model's default detection threshold (0.5) and exists for the
+    benchmark measurement layer ONLY (see the detector appendix in
+    docs/pdf-benchmark-regression-design.md). The pipeline always calls without it: the kwarg is
+    NOT a post-hoc score filter — it feeds the model's internal postprocess, and lowering it was
+    measured to DROP full-page image regions on photo/scan pages (14 of 265 testset pages), which
+    would flip the preserve/gate behaviour above. Same for ``layout_nms``, measured to suppress
+    those regions too; neither may silently change what align sees."""
     try:
         engine = _get_engine()
+        kwargs = {} if threshold is None else {"threshold": threshold}
         with _PREDICT_LOCK:
-            output = list(engine.predict(str(input_path), batch_size=1))
+            output = list(engine.predict(str(input_path), batch_size=1, **kwargs))
         boxes = (output[0].get("boxes") or []) if output else []
         return [
             {

@@ -23,6 +23,14 @@ from app.ocr import run_raw_ocr
 
 SCHEMA_VERSION = 1
 LAYOUT_MODEL = "PP-DocLayout_plus-L"
+# Measurement-layer detection threshold (the model default is 0.5). On a perturbed render the
+# detector splits one region's confidence over competing classes — a header detected at 0.914 on
+# the clean source came back as doc_title 0.42 / paragraph_title 0.38 / header 0.35 / text 0.35
+# on an externally re-rendered copy, every candidate under 0.5, so the region counted as lost
+# and skewed the layout axis. 0.4 admits the winning candidate; scoring's same-family dedupe
+# absorbs the extra duplicates. Measurement-only: the pipeline keeps the model default, because
+# the threshold kwarg is not additive (see detect_layout_regions).
+MEASURE_LAYOUT_THRESHOLD = 0.4
 
 
 def measure_pair(
@@ -38,6 +46,9 @@ def measure_pair(
         "analysis_dpi": dpi,
         "models": {
             "layout": LAYOUT_MODEL,
+            # The detection threshold rides along: scores are only comparable between
+            # measurements taken under the same threshold (a lower one admits more regions).
+            "layout_threshold": MEASURE_LAYOUT_THRESHOLD,
             "ocr_backend": settings.ocr.backend,
             "ocr_version": settings.ocr.ocr_version,
             "ocr_language": ocr_language,
@@ -59,7 +70,7 @@ def _measure_document(
                 pixmap = page.get_pixmap(dpi=dpi)
                 png_path = Path(tmp) / f"page-{index + 1:03d}.png"
                 png_path.write_bytes(pixmap.tobytes("png"))
-                regions = detect_layout_regions(png_path)
+                regions = detect_layout_regions(png_path, threshold=MEASURE_LAYOUT_THRESHOLD)
                 segments = run_raw_ocr(settings.ocr, png_path, language=ocr_language)
                 pages.append(
                     {
