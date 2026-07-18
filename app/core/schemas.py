@@ -7,7 +7,7 @@ from pydantic import BaseModel
 from pydantic import Field
 
 
-TaskName = Literal["translate_image", "retranslate_image", "rerender_image"]
+TaskName = Literal["translate_image", "retranslate_image", "rerender_image", "translate_pdf"]
 RequestState = Literal["queued", "running", "completed", "failed", "cancelled", "cancel_requested"]
 TranslatorMode = Literal["translategemma", "generic"]
 
@@ -83,6 +83,10 @@ class RequestPayload(BaseModel):
     # "vlm" since 2026-07-11: evaluated across the testset — visibly calmer renders, no
     # regressions observed; the OCR-agreement gate bounds any snap to the spread already there.
     size_cohort_mode: Literal["off", "vlm"] = "vlm"
+    # translate_pdf only: feed born-digital pages the PDF text layer as cells
+    # (exact text + style, no OCR). False forces OCR on every page — the A/B
+    # lever for measuring the text-layer path against the raster path.
+    use_pdf_text_layer: bool = True
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -95,6 +99,9 @@ class RequestLifecycle(BaseModel):
     started_at_utc: str | None = None
     finished_at_utc: str | None = None
     stage: str | None = None
+    # Per-page progress of a running translate_pdf document; None for image tasks.
+    pages_done: int | None = None
+    pages_total: int | None = None
     timings: dict[str, float] = Field(default_factory=dict)
     response: dict[str, Any] | None = None
     error: dict[str, Any] | None = None

@@ -90,10 +90,13 @@ app/
   tasks/             # feature pipelines — one module per task (the readable flows)
     translate_image.py
     retranslate_image.py
+    translate_pdf.py
   ocr/               # OCR component: paddle backend, cell merge, segment, overlay
   grouping/          # VLM hint + aligner -> translation units
   translation/       # language-pair routing, llm-pool translate, prompt library
   replacement/       # erase + re-render: geometry, fit, color, render
+  pdf/               # PDF intake: census, page raster, text-layer cells, assembly
+  benchmark/         # document-pair benchmark: measurement, scoring, run store
 ```
 
 To see how a feature works, open `tasks/<task>.py` — it reads as a recipe that
@@ -105,7 +108,7 @@ All routes are versioned under `/v1`.
 
 | Method | Path | Purpose |
 |---|---|---|
-| `POST` | `/v1/requests` | Submit a job. Multipart: `request_json` (a JSON object) + `image_file`. Returns the lifecycle envelope with a `request_id`. |
+| `POST` | `/v1/requests` | Submit a job. Multipart: `request_json` (a JSON object) + `image_file` (image tasks) or `document_file` (a PDF, task `translate_pdf`). Returns the lifecycle envelope with a `request_id`. |
 | `GET` | `/v1/requests/{id}` | Poll the request lifecycle (`state`, `stage`, `timings`, `response`, `error`). |
 | `POST` | `/v1/requests/{id}/cancel` | Request cancellation. |
 | `POST` | `/v1/requests/{id}/retranslate` | Re-translate a completed request's cached units with a new prompt/target language. |
@@ -115,8 +118,13 @@ All routes are versioned under `/v1`.
 | `GET` `PUT` `DELETE` | `/v1/prompts/{id}` | Read / update / delete a saved prompt. |
 | `GET` | `/v1/completions` | Poll completed-request events (`events` + `next_seq` cursor). |
 | `GET` | `/v1/status` | Service status / health. |
+| `GET` | `/v1/benchmark/results` | Stored document-benchmark runs (the comparison matrix). |
+| `GET` | `/v1/benchmark/testset` | PDF testset documents available as benchmark sources. |
+| `POST` | `/v1/benchmark/run` | Measure + score a pair: `{request_id}` of a completed `translate_pdf` run, or an uploaded pair + system label. |
+| `GET` | `/v1/benchmark/runs/{doc}/{system}` | Detail (per-page scores) of the latest stored run. |
+| `GET` | `/v1/benchmark/runs/{doc}/{system}/{run}/overlay/{side}/{page}` | Region-overlay render of a measured page. |
 
-`request_json` fields: `task` (`translate_image` \| `retranslate_image`),
+`request_json` fields: `task` (`translate_image` \| `retranslate_image` \| `rerender_image` \| `translate_pdf`),
 `source_lang_code` (**required for routing**), `target_lang_code`, optional
 `translator_model`, `translator_mode` (`generic` \| `translategemma`),
 `grouping_model`, `translation_prompt` / `translation_prompt_id`,

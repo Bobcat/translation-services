@@ -25,6 +25,10 @@ class RequestRecord:
     finished_at_utc: str | None = None
     finished_mono: float | None = None
     stage: str | None = None
+    # Per-page progress of a translate_pdf document (set from the worker thread,
+    # GIL-atomic int writes — same lock-free pattern as the cancel checkpoint).
+    pages_done: int | None = None
+    pages_total: int | None = None
     timings: dict[str, float] | None = None
     response: dict[str, Any] | None = None
     error: dict[str, Any] | None = None
@@ -82,6 +86,8 @@ class RequestStore:
             "started_at_utc": rec.started_at_utc,
             "finished_at_utc": rec.finished_at_utc,
             "stage": rec.stage,
+            "pages_done": rec.pages_done,
+            "pages_total": rec.pages_total,
             "timings": dict(rec.timings or {}),
             "response": rec.response,
             "error": rec.error,

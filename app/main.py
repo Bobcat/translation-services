@@ -32,11 +32,21 @@ from fastapi import Query
 from fastapi import UploadFile
 from fastapi.responses import FileResponse
 from fastapi.responses import JSONResponse
+from fastapi.responses import Response
 
 from pydantic import BaseModel
 from pydantic import Field
 
+from app.benchmark.measurement import measure_pair
+from app.benchmark.overlay import overlay_png
+from app.benchmark.scoring import score_measurement
+from app.benchmark.store import default_data_root
+from app.benchmark.store import find_run
+from app.benchmark.store import runs_index
+from app.benchmark.store import save_run
 from app.core.config import load_settings
+from app.pdf.document import PdfValidationError
+from app.pdf.document import profile_pdf
 from app.regression import capture as regression_capture
 from app.regression import run as regression_run
 from app.runtime.service import RequestRuntime
@@ -53,6 +63,7 @@ from app.translation.prompts.templates import DEFAULT_USER_TEMPLATE
 
 
 SUPPORTED_IMAGE_MIME_TYPES = {"image/jpeg", "image/png", "image/webp"}
+SUPPORTED_DOCUMENT_MIME_TYPES = {"application/pdf"}
 # Upload ceiling: a phone photo tops out around 10-15 MB; anything past this is not a
 # translation job and would otherwise be read into memory whole (plus a canonical re-encode).
 _MAX_UPLOAD_BYTES = 32 * 1024 * 1024
@@ -110,7 +121,8 @@ def create_app(settings_path: str | Path | None = None) -> FastAPI:
     @app.post("/v1/requests", response_model=RequestSubmitEnvelope)
     async def submit_request(
         request_json: str = Form(...),
-        image_file: UploadFile = File(...),
+        image_file: UploadFile | None = File(default=None),
+        document_file: UploadFile | None = File(default=None),
     ) -> JSONResponse:
         try:
             parsed = json.loads(request_json)
@@ -126,6 +138,18 @@ def create_app(settings_path: str | Path | None = None) -> FastAPI:
                 400,
                 code="REQUEST_JSON_INVALID",
                 message="request_json must be a JSON object",
+                retryable=False,
+            )
+
+        # A document task uploads its file under ``document_file``; the image tasks keep
+        # ``image_file``. Branch on the declared task so each path validates its own input.
+        if str(parsed.get("task") or "").strip() == "translate_pdf":
+            return await _submit_pdf_request(parsed, document_file)
+        if image_file is None:
+            return _error(
+                400,
+                code="REQUEST_INPUT_REQUIRED",
+                message="image_file is required",
                 retryable=False,
             )
 
@@ -195,6 +219,80 @@ def create_app(settings_path: str | Path | None = None) -> FastAPI:
             "mime_type": mime_type,
             "filename": str(image_file.filename or ""),
             "size_bytes": int(len(canonical_image_bytes)),
+        }
+        status_code, body = await runtime.submit(parsed)
+        if int(status_code) != 202:  # rejected or deduped -> this submission's file is unowned
+            await anyio.to_thread.run_sync(lambda: input_path.unlink(missing_ok=True))
+        return JSONResponse(status_code=int(status_code), content=body)
+
+    async def _submit_pdf_request(parsed: dict[str, Any], document_file: UploadFile | None) -> JSONResponse:
+        """The translate_pdf intake: validate + census the PDF up front (parse errors,
+        encryption and the page cap reject at submit time, not minutes into the run),
+        store the bytes VERBATIM (a PDF is never re-encoded at intake), and inject
+        ``parsed["document"]`` — the document counterpart of ``parsed["image"]``."""
+        if document_file is None:
+            return _error(
+                400,
+                code="REQUEST_INPUT_REQUIRED",
+                message="document_file is required for task translate_pdf",
+                retryable=False,
+            )
+        mime_type = str(document_file.content_type or "").strip().lower()
+        if mime_type not in SUPPORTED_DOCUMENT_MIME_TYPES:
+            return _error(
+                400,
+                code="REQUEST_MIME_TYPE_UNSUPPORTED",
+                message="document_file must be application/pdf",
+                retryable=False,
+                details={"mime_type": mime_type or "unknown"},
+            )
+        request_id = str(parsed.get("request_id") or "").strip()
+        if not request_id:
+            stem = safe_token(Path(str(document_file.filename or "document")).stem, fallback="document")
+            request_id = f"req_{stem}_{uuid.uuid4().hex}"
+            parsed["request_id"] = request_id
+        document_bytes = await document_file.read()
+        if not document_bytes:
+            return _error(
+                400,
+                code="REQUEST_EMPTY_INPUT",
+                message="uploaded document_file is empty",
+                retryable=False,
+            )
+        if len(document_bytes) > _MAX_UPLOAD_BYTES:
+            return _error(
+                413,
+                code="REQUEST_INPUT_TOO_LARGE",
+                message=f"uploaded document_file exceeds {_MAX_UPLOAD_BYTES} bytes",
+                retryable=False,
+            )
+        try:
+            profile = await anyio.to_thread.run_sync(
+                lambda: profile_pdf(document_bytes, page_cap=settings.pdf.page_cap)
+            )
+        except PdfValidationError as exc:
+            return _error(400, code=exc.code, message=str(exc), retryable=False)
+        upload_root = (runtime.work_root / "_uploads").resolve()
+        upload_dir = (upload_root / safe_token(request_id)).resolve()
+        try:
+            upload_dir.relative_to(upload_root)
+        except ValueError:
+            return _error(
+                400,
+                code="REQUEST_UPLOAD_PATH_INVALID",
+                message="invalid request_id upload path",
+                retryable=False,
+            )
+        upload_dir.mkdir(parents=True, exist_ok=True)
+        input_path = (upload_dir / f"input-{uuid.uuid4().hex[:8]}.pdf").resolve()
+        input_path.write_bytes(document_bytes)
+
+        parsed["document"] = {
+            "local_path": str(input_path),
+            "mime_type": mime_type,
+            "filename": str(document_file.filename or ""),
+            "size_bytes": int(len(document_bytes)),
+            "page_count": int(profile.page_count),
         }
         status_code, body = await runtime.submit(parsed)
         if int(status_code) != 202:  # rejected or deduped -> this submission's file is unowned
@@ -460,6 +558,145 @@ def create_app(settings_path: str | Path | None = None) -> FastAPI:
         ok = regression_capture.delete_path(name, lang, variant)
         return JSONResponse(status_code=200 if ok else 404, content={"deleted": ok})
 
+    # --- pdf benchmark (docs/pdf-benchmark-regression-design.md, slice 2c) ---
+    # The measurement shares this process's cached layout/OCR engines with the
+    # pipeline (predict locks serialize access), so a benchmark run competes for
+    # the same GPU but needs no extra VRAM.
+
+    _BENCHMARK_ROOT = default_data_root()
+    _TESTSET_PDF_ROOT = (_repo_root_dir() / "testset" / "pdf").resolve()
+
+    @app.get("/v1/benchmark/results")
+    async def benchmark_results() -> JSONResponse:
+        runs = await anyio.to_thread.run_sync(lambda: runs_index(_BENCHMARK_ROOT))
+        return JSONResponse(status_code=200, content={"runs": runs})
+
+    @app.get("/v1/benchmark/testset")
+    async def benchmark_testset() -> JSONResponse:
+        names = sorted(p.name for p in _TESTSET_PDF_ROOT.glob("*.pdf")) if _TESTSET_PDF_ROOT.is_dir() else []
+        return JSONResponse(status_code=200, content={"documents": names})
+
+    @app.post("/v1/benchmark/run")
+    async def benchmark_run(
+        request_json: str = Form(...),
+        source_file: UploadFile | None = File(default=None),
+        translated_file: UploadFile | None = File(default=None),
+    ) -> JSONResponse:
+        """One multipart surface, two source modes: ``{"request_id": …}`` scores a
+        completed translate_pdf run (input vs rendered artifact); otherwise a
+        ``translated_file`` upload is scored against either ``{"testset_doc": …}``
+        or an uploaded ``source_file``. ``system`` labels the column; ``doc_id``
+        defaults to the source filename stem so testset re-runs land on one row."""
+        try:
+            body = json.loads(request_json)
+            assert isinstance(body, dict)
+        except Exception:
+            return _error(400, code="REQUEST_JSON_INVALID", message="request_json must be a JSON object", retryable=False)
+
+        temp_files: list[Path] = []
+        try:
+            request_id = str(body.get("request_id") or "").strip()
+            if request_id:
+                status_code, input_art = await runtime.artifact_path(request_id=request_id, artifact_name="input")
+                if int(status_code) != 200:
+                    return JSONResponse(status_code=int(status_code), content=input_art)
+                status_code, rendered_art = await runtime.artifact_path(request_id=request_id, artifact_name="rendered")
+                if int(status_code) != 200:
+                    return JSONResponse(status_code=int(status_code), content=rendered_art)
+                if str(rendered_art.get("mime_type")) != "application/pdf":
+                    return _error(409, code="BENCHMARK_NOT_A_PDF_RUN", message="request has no PDF rendered artifact", retryable=False)
+                source_path = Path(str(input_art["path"]))
+                translated_path = Path(str(rendered_art["path"]))
+                system = str(body.get("system") or "ours").strip() or "ours"
+            else:
+                if translated_file is None:
+                    return _error(400, code="REQUEST_INPUT_REQUIRED", message="translated_file (or request_id) is required", retryable=False)
+                system = str(body.get("system") or "").strip()
+                if not system:
+                    return _error(400, code="BENCHMARK_SYSTEM_REQUIRED", message="system label is required for an import", retryable=False)
+                testset_doc = str(body.get("testset_doc") or "").strip()
+                if testset_doc:
+                    source_path = (_TESTSET_PDF_ROOT / testset_doc).resolve()
+                    try:
+                        source_path.relative_to(_TESTSET_PDF_ROOT)
+                    except ValueError:
+                        return _error(400, code="BENCHMARK_BAD_TESTSET_DOC", message="invalid testset document name", retryable=False)
+                    if not source_path.exists():
+                        return _error(404, code="BENCHMARK_TESTSET_DOC_NOT_FOUND", message="testset document not found", retryable=False)
+                try:
+                    if not testset_doc:
+                        if source_file is None:
+                            return _error(400, code="REQUEST_INPUT_REQUIRED", message="testset_doc or source_file is required", retryable=False)
+                        source_path = await _spool_upload(source_file, temp_files)
+                    translated_path = await _spool_upload(translated_file, temp_files)
+                except ValueError as exc:
+                    return _error(413, code="REQUEST_INPUT_TOO_LARGE", message=str(exc), retryable=False)
+
+            doc_id = str(body.get("doc_id") or "").strip() or source_path.stem
+            for path, side in ((source_path, "source"), (translated_path, "translated")):
+                try:
+                    await anyio.to_thread.run_sync(lambda p=path: profile_pdf(p, page_cap=settings.pdf.page_cap))
+                except PdfValidationError as exc:
+                    return _error(400, code=exc.code, message=f"{side}: {exc}", retryable=False)
+
+            def _measure_and_store():
+                measurement = measure_pair(settings=settings, source_pdf=source_path, translated_pdf=translated_path)
+                scores = score_measurement(measurement)
+                run = save_run(
+                    data_root=_BENCHMARK_ROOT, doc_id=doc_id, system=system,
+                    source_pdf=source_path, translated_pdf=translated_path,
+                    measurement=measurement, scores=scores,
+                )
+                return run, scores
+
+            run, scores = await anyio.to_thread.run_sync(_measure_and_store)
+            return JSONResponse(status_code=200, content={
+                "doc_id": run.doc_id, "system": run.system, "run_id": run.run_id,
+                "scoring_version": scores.get("scoring_version"),
+                "axes": scores.get("axes"), "indicators": scores.get("indicators"),
+                "flags": scores.get("flags"),
+            })
+        finally:
+            for path in temp_files:
+                await anyio.to_thread.run_sync(lambda p=path: p.unlink(missing_ok=True))
+
+    async def _spool_upload(upload: UploadFile, temp_files: list[Path]) -> Path:
+        data = await upload.read()
+        if len(data) > _MAX_UPLOAD_BYTES:
+            raise ValueError(f"uploaded file exceeds {_MAX_UPLOAD_BYTES} bytes")
+        target = (runtime.work_root / "_uploads" / f"benchmark-{uuid.uuid4().hex}.pdf").resolve()
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(data)
+        temp_files.append(target)
+        return target
+
+    @app.get("/v1/benchmark/runs/{doc_id}/{system}")
+    async def benchmark_run_detail(doc_id: str, system: str, run_id: str = Query(default="")) -> JSONResponse:
+        run = await anyio.to_thread.run_sync(
+            lambda: find_run(_BENCHMARK_ROOT, doc_id=doc_id, system=system, run_id=run_id.strip() or None)
+        )
+        if run is None:
+            return _error(404, code="BENCHMARK_RUN_NOT_FOUND", message="no stored run for this document/system", retryable=False)
+        scores = await anyio.to_thread.run_sync(run.load_scores)
+        return JSONResponse(status_code=200, content={
+            "doc_id": run.doc_id, "system": run.system, "run_id": run.run_id, "scores": scores,
+        })
+
+    @app.get("/v1/benchmark/runs/{doc_id}/{system}/{run_id}/overlay/{side}/{page}")
+    async def benchmark_overlay(doc_id: str, system: str, run_id: str, side: str, page: int):
+        run = await anyio.to_thread.run_sync(
+            lambda: find_run(_BENCHMARK_ROOT, doc_id=doc_id, system=system, run_id=run_id)
+        )
+        if run is None:
+            return _error(404, code="BENCHMARK_RUN_NOT_FOUND", message="no stored run for this document/system", retryable=False)
+        try:
+            payload = await anyio.to_thread.run_sync(
+                lambda: overlay_png(run, side=side, page_index=max(0, int(page) - 1))
+            )
+        except ValueError as exc:
+            return _error(400, code="BENCHMARK_OVERLAY_INVALID", message=str(exc), retryable=False)
+        return Response(content=payload, media_type="image/png")
+
     @app.get("/v1/completions", response_model=CompletionsEnvelope)
     async def get_completions(
         since_seq: int = Query(default=0),
@@ -473,6 +710,10 @@ def create_app(settings_path: str | Path | None = None) -> FastAPI:
         return await runtime.status()
 
     return app
+
+
+def _repo_root_dir() -> Path:
+    return Path(__file__).resolve().parents[1]
 
 
 def _error(

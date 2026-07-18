@@ -15,6 +15,7 @@ from app.core.schemas import RequestPayload
 from app.tasks.rerender_image import run_rerender_image_pipeline
 from app.tasks.retranslate_image import run_retranslate_image_pipeline
 from app.tasks.translate_image import run_translate_image_pipeline
+from app.tasks.translate_pdf import run_translate_pdf_pipeline
 from app.core.util import iso_utc
 from app.core.util import safe_token
 
@@ -114,20 +115,21 @@ class RequestRuntime:
                 "details": {"errors": exc.errors()},
             }
 
-        image = dict(raw_payload.get("image") or {})
-        image_path = str(image.get("local_path") or "").strip()
-        image_mime_type = str(image.get("mime_type") or "").strip()
-        if not image_path:
+        # The stored input file rides outside the schema: ``image`` for the image tasks,
+        # ``document`` for translate_pdf — each injected by the intake in app.main.
+        source_key = "document" if payload.task == "translate_pdf" else "image"
+        source = dict(raw_payload.get(source_key) or {})
+        if not str(source.get("local_path") or "").strip():
             return 400, {
                 "code": "REQUEST_INPUT_REQUIRED",
-                "message": "uploaded image_file is required",
+                "message": f"uploaded {'document_file' if source_key == 'document' else 'image_file'} is required",
                 "retryable": False,
             }
         request_id = str(payload.request_id or f"req_{uuid.uuid4().hex}").strip()
 
         prepared = payload.model_dump()
         prepared["request_id"] = request_id
-        prepared["image"] = image
+        prepared[source_key] = source
         payload_hash = _json_hash(prepared)
 
         async with self._lock:
@@ -487,6 +489,8 @@ class RequestRuntime:
             return self._process_retranslate_image_request(request_id, request)
         if str(request.get("task")) == "rerender_image":
             return self._process_rerender_image_request(request_id, request)
+        if str(request.get("task")) == "translate_pdf":
+            return self._process_translate_pdf_request(request_id, request)
         return self._process_translate_image_request(request_id, request)
 
     def _process_rerender_image_request(self, request_id: str, request: dict[str, Any]) -> dict[str, Any]:
@@ -532,6 +536,73 @@ class RequestRuntime:
             checkpoint=self._cancel_checkpoint_for(request_id),
         )
         return self._persist_result(request_id, request, input_path, str(image.get("mime_type") or "image/png"), result)
+
+    def _process_translate_pdf_request(self, request_id: str, request: dict[str, Any]) -> dict[str, Any]:
+        document = dict(request.get("document") or {})
+        input_path = Path(str(document.get("local_path") or "")).resolve()
+        if not input_path.exists() or not input_path.is_file():
+            raise RuntimeError("input document file is missing")
+        job_root = (self.work_root / safe_token(request_id)).resolve()
+        result = run_translate_pdf_pipeline(
+            settings=self._settings,
+            input_path=input_path,
+            request=request,
+            pages_root=job_root / "pages",
+            checkpoint=self._cancel_checkpoint_for(request_id),
+            progress=self._pages_progress_for(request_id),
+        )
+        return self._persist_pdf_result(request_id, request, input_path, result)
+
+    def _pages_progress_for(self, request_id: str):
+        """Per-page progress from the worker thread onto the lifecycle record (GIL-atomic
+        int/str writes, no lock — the write-side twin of the cancel checkpoint's read)."""
+        def report(done: int, total: int) -> None:
+            rec = self._record_store.get(request_id)
+            if rec is None or rec.state not in {"running", "cancel_requested"}:
+                return
+            rec.pages_done = int(done)
+            rec.pages_total = int(total)
+            rec.stage = f"page {int(done) + 1}/{int(total)}" if int(done) < int(total) else "assemble"
+        return report
+
+    def _persist_pdf_result(
+        self,
+        request_id: str,
+        request: dict[str, Any],
+        input_path: Path,
+        result: Any,
+    ) -> dict[str, Any]:
+        """Document-level artifacts. The per-page artifacts (input/rendered PNG, grouping,
+        translation, llm_calls) were already written by the pipeline as pages completed;
+        here each page's rendered PNG is only referenced as an artifact entry."""
+        job_root = (self.work_root / safe_token(request_id)).resolve()
+        job_root.mkdir(parents=True, exist_ok=True)
+        rendered_path = (job_root / "rendered.pdf").resolve()
+        rendered_path.write_bytes(result.rendered_pdf)
+        document_path = (job_root / "document.json").resolve()
+        document_path.write_text(
+            json.dumps(result.document, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        artifacts: dict[str, Any] = {
+            "input": {"path": str(input_path), "mime_type": "application/pdf"},
+            "rendered": {"path": str(rendered_path), "mime_type": result.mime_type},
+            "document": {"path": str(document_path), "mime_type": "application/json"},
+        }
+        for page in result.document.get("pages") or []:
+            page_no = int(page.get("page") or 0)
+            rendered_page = str(dict(page.get("artifacts") or {}).get("rendered") or "")
+            if page_no and rendered_page:
+                artifacts[f"page-{page_no:03d}"] = {"path": rendered_page, "mime_type": "image/png"}
+        return {
+            "task": request["task"],
+            "artifacts": artifacts,
+            "document": result.document,
+            "metadata": dict(result.metadata),
+            "metrics": dict(result.metrics),
+            # Per-page call logs live in pages/page-NNN/llm_calls.json; carrying every page's
+            # calls on the document response would multiply an already multi-MB log by N pages.
+            "llm_calls": [],
+        }
 
     def _process_translate_image_request(self, request_id: str, request: dict[str, Any]) -> dict[str, Any]:
         image = dict(request.get("image") or {})
@@ -677,4 +748,6 @@ class RequestRuntime:
     def _stage_for_task(self, task: str) -> str:
         if task == "translate_image":
             return "ocr_inspect"
+        if task == "translate_pdf":
+            return "census"
         return "running"

@@ -1058,3 +1058,71 @@ def test_parse_pipe_opened_embedded_label_splits_table_columns() -> None:
     ]
     assert hint.levels == ["header", "header", "body", "body"]
     assert hint.font_sizes == [14, 14, 11, 11]
+
+
+def test_symbolic_label_classifier() -> None:
+    # Rating codes and symbol runs with a stray capital are labels, not language.
+    from app.grouping.heuristics import _is_symbolic_label
+
+    assert _is_symbolic_label('A-')
+    assert _is_symbolic_label('A "')
+    assert _is_symbolic_label('A+ B')
+    # Two adjacent letters = a word candidate; short real words are out.
+    assert not _is_symbolic_label('Nu')
+    assert not _is_symbolic_label('be attentive to signs')
+    # Any lowercase letter is out: measurements ("25 m", "1,5 m") and stray
+    # lowercase fragments follow the existing _PRICE_TAX convention.
+    assert not _is_symbolic_label('1,5 m')
+    assert not _is_symbolic_label('i')
+    # A single CJK char is a complete word.
+    assert not _is_symbolic_label('推')
+    assert not _is_symbolic_label('危險')
+
+
+def test_all_symbolic_unit_is_preserved_whole() -> None:
+    # A unit that is ENTIRELY rating-code tokens (three cells on one geometric
+    # line) never reaches the translator — the measured batch hallucination
+    # ('A " A- A-' answered with another line's sentence) starts here. A single
+    # capital inside a prose unit keeps its normal flag.
+    from app.grouping.align import _build_unit
+
+    def cell(cid, text, left):
+        return {"id": cid, "text": text, "bbox": {"left": left, "top": 100, "width": 90, "height": 40}}
+
+    label_row = _build_unit(
+        cells=[cell(1, 'A "', 100), cell(2, "A-", 300), cell(3, "A-", 500)],
+        indices=[0, 1, 2], unit_id=1,
+    )
+    assert [m.translate for m in label_row.members] == [False, False, False]
+    assert label_row.source_text == ""
+
+    prose = _build_unit(
+        cells=[cell(1, "maat", 100), cell(2, "M", 300)],
+        indices=[0, 1], unit_id=2,
+    )
+    assert [m.translate for m in prose.members] == [True, True]
+
+    # A SINGLE symbolic cell (an icon OCR'd as one capital, a receipt code)
+    # keeps today's behaviour — the rule needs a row of them.
+    single = _build_unit(cells=[cell(1, "Q", 100)], indices=[0], unit_id=3)
+    assert [m.translate for m in single.members] == [True]
+
+
+def test_cell_marker_makes_the_unit_a_bullet() -> None:
+    # A cell that carries a stripped inline marker (text-layer "•") is ground
+    # truth for the bullet flag — no hint label needed. OCR cells never carry
+    # the field, so the image flow is untouched by construction.
+    from app.grouping.align import _build_unit
+
+    cells = [
+        {"id": 1, "text": "report suspected reactions", "marker": "•",
+         "bbox": {"left": 178, "top": 100, "width": 500, "height": 30}},
+        {"id": 2, "text": "Yellow Card",
+         "bbox": {"left": 178, "top": 132, "width": 140, "height": 30}},
+    ]
+    unit = _build_unit(cells=cells, indices=[0, 1], unit_id=1)
+    assert unit.bullet is True
+    assert unit.bullet_marker == "•"
+
+    plain = _build_unit(cells=[dict(cells[1])], indices=[0], unit_id=2)
+    assert plain.bullet is False

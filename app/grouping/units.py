@@ -21,6 +21,9 @@ class UnitMember:
     bbox: dict[str, int]
     order: int
     polygon: list[dict[str, int]] | None = None
+    # Exact em size of this member's text in image pixels, when the cell source
+    # knows it (a text layer's declared size); None = derive from ink geometry.
+    size_px: float | None = None
 
     def to_dict(self) -> dict[str, Any]:
         member: dict[str, Any] = {
@@ -32,11 +35,14 @@ class UnitMember:
         }
         if self.polygon is not None:
             member["polygon"] = [dict(point) for point in self.polygon]
+        if self.size_px is not None:
+            member["size_px"] = self.size_px
         return member
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "UnitMember":
         polygon = data.get("polygon")
+        size_px = data.get("size_px")
         return cls(
             cell_id=int(data["cell_id"]),
             text=str(data.get("text") or ""),
@@ -46,6 +52,7 @@ class UnitMember:
             polygon=[{key: int(value) for key, value in dict(point).items()} for point in polygon]
             if polygon is not None
             else None,
+            size_px=float(size_px) if size_px is not None else None,
         )
 
 

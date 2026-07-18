@@ -14,6 +14,9 @@ dependencies = [
   "paddleocr==3.6.0",
   "paddlex[ocr]==3.6.1",
   "pillow>=10",
+  # translate_pdf: page census/rasterization at intake and raster-page PDF assembly (AGPL;
+  # internal service). Also the planned native write-back backend (redact + re-typeset).
+  "pymupdf>=1.26",
   "uvicorn>=0.30",
   "pydantic>=2.6",
   "python-multipart>=0.0.9",

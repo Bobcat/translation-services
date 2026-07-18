@@ -27,6 +27,10 @@ _URL_SUFFIX = re.compile(r"\.(com|nl|org|net|io|de|fr|co|eu)\b")
 # original. Uppercase-only keeps lowercase measurements like "25 m" translatable as before.
 _PRICE_TAX = re.compile(r"^[€$£]?\s*[-+]?\s*\d[\d.,]*\s*[A-Z]?$")
 
+# Two adjacent letters anywhere = at least one real (non-CJK) word candidate.
+_LETTER_PAIR = re.compile(r"[^\W\d_]{2}", re.UNICODE)
+_CJK_START, _CJK_END = "一", "鿿"
+
 
 def _is_nontranslatable(text: str) -> bool:
     stripped = str(text or "").strip()
@@ -38,6 +42,26 @@ def _is_nontranslatable(text: str) -> bool:
     if _PRICE_TAX.match(stripped):
         return True
     return not any(char.isalpha() for char in stripped)
+
+
+def _is_symbolic_label(text: str) -> bool:
+    """UPPERCASE letters, but never two adjacent, or no letters at all: rating
+    codes ('A-', 'A"'), column glyphs, symbol runs with a stray capital. Labels,
+    not language. Any lowercase letter keeps the text out (the "25 m"
+    measurement convention _PRICE_TAX follows), as does a CJK/Kana/Hangul char
+    (a complete word). Consulted at UNIT level only — a whole unit of such
+    tokens is a label row the translator can only hallucinate on (measured:
+    the batch answered 'A " A- A-' with another line's sentence); a single
+    such member inside a prose unit rides along as before."""
+    stripped = str(text or "").strip()
+    if not stripped:
+        return True
+    if any(_CJK_START <= char <= _CJK_END or "぀" <= char <= "ヿ" or "가" <= char <= "힯"
+           for char in stripped):
+        return False
+    if any(char.islower() for char in stripped):
+        return False
+    return not _LETTER_PAIR.search(stripped)
 
 
 def _is_continuation(previous_cell: dict[str, Any] | None, cell: dict[str, Any]) -> bool:

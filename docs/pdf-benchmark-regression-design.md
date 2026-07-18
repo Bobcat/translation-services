@@ -74,9 +74,17 @@ then soft. Later, as a separate, clearly-labelled advisory axis.
 1. Render both PDFs at the same dpi (page by page; page-count mismatch → hard
    flag, score the aligned prefix).
 2. PP-DocLayout on both sides → regions per page.
-3. Region matching: class-aware, Hungarian/greedy on IoU. Matched pairs score
-   overlap; unmatched source regions count as layout loss, unmatched target
-   regions as layout invention. Background is excluded by construction.
+3. Region matching: class-aware, greedy on IoU, with two granularity filters
+   (scoring v3, each motivated by a measured artifact): near-identical
+   same-family detections on one side are deduped, and an unmatched region
+   whose area is largely covered by same-family regions on the other side is
+   "covered" — a detector split/merge/nested detection, excluded from the
+   layout score entirely. Only truly lost source regions and truly invented
+   target regions penalize, weighted by sqrt(area); the document score
+   aggregates by region weight rather than per page. A detector miss on one
+   side (content visibly present, no region reported) still counts — that is
+   measurement noise the weighting can only dampen. Background is excluded by
+   construction.
 4. OCR both renders → segments per page (the reader's view, identical
    treatment for every system).
 5. Text-fate split (changed | unchanged | missing), language-free: a target
@@ -121,6 +129,14 @@ Verified before building (measured 2026-07-16, probe scripts, throwaway):
 
 ### Scale and calibration
 
+- **The numbers are preservation measurements, not a quality ranking.** All
+  three axes measure what survived the translation; a system that returns the
+  source unchanged therefore maxes every axis, and only the unchanged
+  indicator exposes it. Reading order: structure flags first (is the document
+  intact?), then the unchanged share (did the system actually translate?),
+  then the axes — and "higher is better" only holds between systems whose
+  unchanged shares are comparable. This also bounds the headroom readout: a
+  gap against a system that barely translated is not attainable headroom.
 - **Anchor the corners with constructed baselines.** The *identity baseline*
   (source submitted as its own translation) must score ~100 on layout, 100 on
   retention and 100% unchanged — everything kept, nothing translated. If
@@ -246,7 +262,7 @@ third, separate use: calibration, not the fix-loop.
 |---|---|---|
 | **Replay** | did behaviour change? | exact (the existing regression-view pattern, document → pages) |
 | **Score** | benchmark-on-replay + delta vs accepted score | deterministic |
-| **Comparison** | where is proven-attainable headroom, per axis × document class? | live runs (spread over N) + static external uploads |
+| **Comparison** | how does our latest run move against our own best (Δ ours), with external measurements as informative reference — not a ranking | live runs (spread over N) + static external uploads |
 
 The working pattern "fixing one document while the rest must stay green and
 equal" is: focus one document in Replay+Score, "Run all" for the rest. Cell

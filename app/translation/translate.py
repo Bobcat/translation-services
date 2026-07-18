@@ -212,6 +212,13 @@ def translate_units(
             continue
         translated = batch.get(unit.id)
         route = f"{decision.translation_route}_batch"
+        if translated is not None and _batch_line_mismatch(source_text, translated):
+            # Measured failure mode: on degenerate short input ('A " A- A-') the
+            # batch answer carried ANOTHER line's translation, erasing the source
+            # and printing a duplicated sentence in its place. Length is the tell —
+            # a translation several times longer than its source is not a
+            # translation of it. Reroute through the per-unit fallback below.
+            translated = None
         if translated is None:
             hint_index = unit.hint_index
             if batched and hint_index is not None:
@@ -694,6 +701,14 @@ def _mapped_hint_line(
     if text:
         return text, None
     return None
+
+
+def _batch_line_mismatch(source_text: str, translated: str) -> bool:
+    """A batch line whose translation is several times longer than its source is
+    another line's answer (LLM cross-talk on degenerate input), not a translation.
+    The floor keeps legitimate short-word expansion ("Nu" -> "Now", CJK -> Latin)
+    out of the net; real expansion between languages stays well under 4x."""
+    return len(str(translated).strip()) > max(20, 4 * len(str(source_text).strip()))
 
 
 def _is_noise(text: str) -> bool:

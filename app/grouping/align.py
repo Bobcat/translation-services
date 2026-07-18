@@ -20,6 +20,7 @@ from typing import Any
 from app.grouping.heuristics import _is_continuation
 from app.grouping.heuristics import _is_icon_fragment
 from app.grouping.heuristics import _is_nontranslatable
+from app.grouping.heuristics import _is_symbolic_label
 from app.grouping.heuristics import _near
 from app.grouping import layout as layout_evidence
 from app.grouping.tokens import _fuzzy_tokens
@@ -1068,12 +1069,21 @@ def _build_unit(
 ) -> TranslationUnit:
     texts = [str(cells[cell_index].get("text") or "") for cell_index in indices]
     translate_flags = _member_translate_flags(texts, hint_line)
+    # A unit consisting ENTIRELY of symbolic label tokens, several of them on
+    # one geometric line ('A " A- A-': a row of rating codes), is preserved
+    # whole — the translator can only hallucinate on it. Deliberately >= 2
+    # members: single symbolic cells (an icon read as 'Q', a receipt code) keep
+    # today's behaviour — the translation layer's noise skip already covers the
+    # short ones, and the batch-length guard backstops the rest.
+    if len(texts) >= 2 and all(_is_symbolic_label(text) for text in texts):
+        translate_flags = [False] * len(translate_flags)
     members: list[UnitMember] = []
     for order, (cell_index, text, translate) in enumerate(
         zip(indices, texts, translate_flags), start=1
     ):
         cell = cells[cell_index]
         polygon = cell.get("polygon")
+        size_px = cell.get("size_px")
         members.append(
             UnitMember(
                 cell_id=int(cell["id"]),
@@ -1082,8 +1092,18 @@ def _build_unit(
                 bbox=dict(cell.get("bbox") or {}),
                 order=order,
                 polygon=[dict(point) for point in polygon] if polygon else None,
+                size_px=float(size_px) if size_px is not None else None,
             )
         )
+    # Ground-truth list marker from the cell layer (a stripped inline "•" the
+    # extractor recorded): stronger than the hint's bullet label, which wobbles
+    # run to run. Only the first member carries the item's marker.
+    if not bullet and indices:
+        cell_marker = str(cells[indices[0]].get("marker") or "").strip()
+        if cell_marker:
+            bullet = True
+            bullet_marker = bullet_marker or cell_marker
+
     bbox = union_bbox([member.bbox for member in members if member.bbox]) if members else {}
     source_text = " ".join(member.text for member in members if member.translate and member.text)
     return TranslationUnit(

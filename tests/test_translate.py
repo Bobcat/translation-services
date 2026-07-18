@@ -792,3 +792,18 @@ def test_truncated_structured_reply_is_rejected_not_mapped(monkeypatch) -> None:
     )
     assert [item.translated_text for item in out] == ["LINE2", "LINE3"]
     assert all(item.translation_route.endswith("_hint_line_fallback") for item in out)
+
+
+def test_batch_line_mismatch_flags_crosstalk_not_expansion() -> None:
+    from app.translation.translate import _batch_line_mismatch
+
+    # The measured failure: a degenerate source whose batch answer was another
+    # line's full sentence.
+    assert _batch_line_mismatch('A " A- A-', "Succesvolle duurzaamheidsinitiatieven hangen af van de kracht van de financiële positie van een bedrijf.")
+    # Legitimate short-word expansion and normal sentence growth stay clear.
+    assert not _batch_line_mismatch("Nu", "Now")
+    assert not _batch_line_mismatch("推", "Push to open")
+    assert not _batch_line_mismatch(
+        "There is a small increase in the risk.",
+        "Er is een kleine toename van het risico op complicaties.",
+    )

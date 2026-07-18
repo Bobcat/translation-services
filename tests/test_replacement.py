@@ -663,6 +663,27 @@ def test_size_cohort_mode_sizes_a_short_sibling_up_to_the_cohort(tmp_path) -> No
     assert ink_h(vlm, 195, 300) > ink_h(off, 195, 300)
 
 
+def test_plan_group_uses_declared_member_size_over_ink_extent(tmp_path) -> None:
+    # A member that declares its em size (a text layer's size_px) renders at exactly that
+    # size; without it the plane sizes from the polygon extent (0.9 x 40px = 36px here).
+    # The declared 22px must therefore produce a clearly smaller tile than the extent path.
+    img = Image.new("RGB", (1000, 800), (255, 255, 255))
+    path = tmp_path / "flat.png"
+    img.save(path)
+
+    def tile_height(size_px):
+        unit = _tilted_line_unit(1, 400.0, 0.0, h=40.0)
+        if size_px is not None:
+            unit["members"][0]["size_px"] = size_px
+        jobs = _plan_group(Image.open(path).convert("RGB"), [unit], snap_horizontal=True)
+        (job,) = [j for j in jobs if j.tile is not None]
+        return job.tile.height
+
+    extent = tile_height(None)
+    exact = tile_height(22.0)
+    assert exact < extent * 0.75
+
+
 def test_plan_group_reads_its_angle_from_the_document_field(tmp_path) -> None:
     # A one-line group whose own quad reads +2deg on a document whose field says +8deg
     # at that y must render at the field angle; without a field it trusts its own quad.

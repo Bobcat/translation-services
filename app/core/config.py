@@ -71,12 +71,23 @@ class InpaintSettings:
 
 
 @dataclass(frozen=True)
+class PdfSettings:
+    # The dpi every PDF page is rendered at for analysis and (phase 0) output.
+    # 160 puts an A4 page at ~2.5 Mpx — inside the render hot-path budget.
+    analysis_dpi: int = 160
+    # Hard per-request page limit: each page costs a full VLM+OCR+translate+render
+    # pass, so an unbounded document would monopolize the runner for hours.
+    page_cap: int = 25
+
+
+@dataclass(frozen=True)
 class AppSettings:
     service: ServiceSettings = field(default_factory=ServiceSettings)
     scheduler: SchedulerSettings = field(default_factory=SchedulerSettings)
     llm_pool: LlmPoolSettings = field(default_factory=LlmPoolSettings)
     ocr: OcrSettings = field(default_factory=OcrSettings)
     inpaint: InpaintSettings = field(default_factory=InpaintSettings)
+    pdf: PdfSettings = field(default_factory=PdfSettings)
 
 
 def load_settings(path: str | Path | None = None) -> AppSettings:
@@ -98,6 +109,7 @@ def load_settings(path: str | Path | None = None) -> AppSettings:
     llm_pool_payload = _dict(payload.get("llm_pool"))
     ocr_payload = _dict(payload.get("ocr"))
     inpaint_payload = _dict(payload.get("inpaint"))
+    pdf_payload = _dict(payload.get("pdf"))
 
     records_ttl_s = _int_dict(
         scheduler_payload.get("records_ttl_s"),
@@ -145,6 +157,10 @@ def load_settings(path: str | Path | None = None) -> AppSettings:
             model_path=str(inpaint_payload.get("model_path", "~/.cache/lama/big-lama.pt") or "").strip()
             or "~/.cache/lama/big-lama.pt",
             pixel_budget_px=max(65_536, int(inpaint_payload.get("pixel_budget_px", 1_500_000))),
+        ),
+        pdf=PdfSettings(
+            analysis_dpi=min(300, max(72, int(pdf_payload.get("analysis_dpi", 160)))),
+            page_cap=min(200, max(1, int(pdf_payload.get("page_cap", 25)))),
         ),
     )
 

@@ -347,6 +347,7 @@ def _plan_group(
     group_quads: list = []
     quad_tokens: list[set[str]] = []  # source words of each quad's member, parallel to group_quads
     own_boxes: list[dict[str, Any]] = []  # members this group ERASES — sweep-eligible ground
+    exact_quad_sizes: dict[int, float] = {}  # id(quad) -> the member's declared em size in px
     for unit in units:
         translated = fold_lone_fullwidth_punctuation(str(unit.get("translated_text") or "").strip())
         translated = _strip_unprinted_lead(translated, unit)
@@ -381,6 +382,8 @@ def _plan_group(
             group_quads.append(quad)
             quad_tokens.append(set(re.findall(r"[^\W\d_]+", str(member.get("text") or "").lower())))
             own_boxes.append(dict(member["bbox"]))
+            if member.get("size_px") is not None:
+                exact_quad_sizes[id(quad)] = float(member["size_px"])
     if not texts:
         return []
 
@@ -422,7 +425,7 @@ def _plan_group(
     for quads in clusters:
         true_height = median(geo.line_height(quad) for quad in quads)
         x_axis, y_axis, xmin, xmax, ymin, ymax = geo.oriented_frame(quads, angle)
-        planes.append({
+        plane = {
             "quads": quads,
             "tokens": _plane_source_tokens(quads, group_quads, quad_tokens),
             "target": max(8, int(true_height * size_ratio)),
@@ -430,7 +433,16 @@ def _plan_group(
             "pad": max(2.0, true_height / 6.0),
             "frame": (x_axis, y_axis, xmin, xmax, ymin, ymax),
             "width": xmax - xmin,
-        })
+        }
+        # A line whose every member declares its em size (a text layer) renders at
+        # exactly that size — the source's own typesetting, no ink estimation. The
+        # ink-derived refinements below (band, cohort, fill) skip these planes:
+        # each exists to correct a measurement this line does not need.
+        declared = [exact_quad_sizes.get(id(quad)) for quad in quads]
+        if declared and all(size is not None for size in declared):
+            plane["target"] = max(8, int(round(median(declared))))
+            plane["exact_size"] = True
+        planes.append(plane)
     planes = _drop_redundant_stray_planes(planes)
 
     # Loose-glyph bullet (OCR never read it, e.g. "•"): keep the original glyph by starting the
@@ -502,6 +514,8 @@ def _plan_group(
     if band_ratio is not None and angle == 0.0:
         band_px = base_arr
         for plane, (bg, _fg) in zip(planes, colors):
+            if plane.get("exact_size"):
+                continue
             bands = [b for q in plane["quads"] if (b := _quad_band_height(band_px, q, bg)) is not None]
             if bands:
                 clamped = min(plane["true_height"], median(bands) * band_ratio)
@@ -527,6 +541,8 @@ def _plan_group(
         cohort_height = size_cohorts.get(int(pt)) if pt is not None else None
         if cohort_height is not None:
             for plane in planes:
+                if plane.get("exact_size"):
+                    continue
                 plane["target"] = max(8, int(cohort_height * size_ratio))
 
     # "fill" size metric: size each line so its rendered ink is as tall as the SOURCE line's
@@ -539,6 +555,8 @@ def _plan_group(
         ink_per_pt = _face_ink_per_pt(family, weight)
         if ink_per_pt > 0:
             for plane, (bg, _fg) in zip(planes, colors):
+                if plane.get("exact_size"):
+                    continue
                 spans = [s for q in plane["quads"] if (s := _quad_ink_span(base_arr, q, bg)) is not None]
                 if spans:
                     plane["target"] = max(8, int(round(median(spans) / ink_per_pt)))

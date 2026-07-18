@@ -69,9 +69,14 @@ def run_translate_image_pipeline(
     input_mime_type: str,
     request: dict[str, Any],
     checkpoint: Callable[[], None] = lambda: None,
+    cells: list[dict[str, Any]] | None = None,
 ) -> TranslateImageResult:
     """``checkpoint`` is called between stages; the runtime passes one that raises when the
-    request was cancelled, so the run stops before the next expensive stage."""
+    request was cancelled, so the run stops before the next expensive stage.
+
+    ``cells`` overrides the OCR stage with pre-extracted cells (in render-pixel
+    space; each cell may name its origin in a ``source`` field); everything
+    downstream is cell-source-agnostic. None = run OCR as always."""
     del input_mime_type
     started_at = time.perf_counter()
     source_lang = str(request.get("source_lang_code") or "").strip()
@@ -110,17 +115,26 @@ def run_translate_image_pipeline(
     layout_wall_ms = layout_timing.get("wall_ms", 0.0)
 
     checkpoint()
-    ocr_language = resolve_ocr_language(settings.ocr, hint.units)
+    if cells is None:
+        cell_source = "ocr"
+        ocr_language = resolve_ocr_language(settings.ocr, hint.units)
 
-    ocr_started_at = time.perf_counter()
-    ocr_segments = run_raw_ocr(
-        settings.ocr,
-        input_path,
-        language=ocr_language,
-    )
-    ocr_wall_ms = _elapsed_ms(ocr_started_at)
+        ocr_started_at = time.perf_counter()
+        ocr_segments = run_raw_ocr(
+            settings.ocr,
+            input_path,
+            language=ocr_language,
+        )
+        ocr_wall_ms = _elapsed_ms(ocr_started_at)
 
-    cells = _ocr_cells(ocr_segments)
+        cells = _ocr_cells(ocr_segments)
+    else:
+        # Report what was handed in; the caller's cells name their own origin.
+        cell_source = str((cells[0].get("source") if cells else "") or "provided")
+        ocr_language = ""
+        ocr_segments = []
+        ocr_wall_ms = 0.0
+        cells = list(cells)
 
     align_started_at = time.perf_counter()
     grouping = group_cells_into_units(
@@ -147,13 +161,14 @@ def run_translate_image_pipeline(
     grouping_overlay_debug = None
     ocr_overlay_wall_ms = 0.0
     grouping_overlay_wall_ms = 0.0
-    if make_overlays:
+    if make_overlays and ocr_segments:  # no OCR overlay on the text-layer path
         overlay_started_at = time.perf_counter()
         projected_overlay_debug = render_original_ocr_overlay_debug(
             input_path=input_path,
             ocr_segments=ocr_segments,
         )
         ocr_overlay_wall_ms = _elapsed_ms(overlay_started_at)
+    if make_overlays:  # the grouping overlay draws from cells, any source
         overlay_started_at = time.perf_counter()
         grouping_overlay_debug = render_grouping_overlay_debug(
             input_path=input_path,
@@ -307,6 +322,7 @@ def run_translate_image_pipeline(
     metadata = {
         "ocr_backend": settings.ocr.backend,
         "ocr_language": ocr_language,
+        "cell_source": cell_source,
         "translation_alignment": "units_translated_rendered",
         "translation_ocr_space": "original",
         "translation_ocr_segment_count": len(ocr_segments),
