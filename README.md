@@ -133,6 +133,7 @@ All routes are versioned under `/v1`.
 | `GET` | `/v1/benchmark/testset` | PDF testset documents available as benchmark sources. |
 | `POST` | `/v1/benchmark/run` | Measure + score a pair: `{request_id}` of a completed `translate_pdf` run, or an uploaded pair + system label. |
 | `GET` | `/v1/benchmark/runs/{doc}/{system}` | Detail (per-page scores) of the latest stored run. |
+| `GET` | `/v1/benchmark/runs/{doc}/{system}/{run}/anchors` | Evidence behind the anchors axis: which digit anchors went missing/appeared, located at page + segment. |
 | `GET` | `/v1/benchmark/runs/{doc}/{system}/{run}/overlay/{side}/{page}` | Region-overlay render of a measured page. |
 | `GET` | `/v1/pdf-regression/fixtures` | Document-fixture inventory, with each fixture's frozen accepted score. |
 | `GET` | `/v1/pdf-regression/status` | What capturing a completed `translate_pdf` run would produce: the fixture name (testset document matched by content hash) and its existing fixtures. |

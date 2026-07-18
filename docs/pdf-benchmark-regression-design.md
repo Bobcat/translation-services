@@ -6,7 +6,8 @@ deterministic fix-loop and one workbench view.
 
 Companion documents: `pdf-translation-design.md` (the pipeline this measures),
 `regression-test-design.md` (the image harness this extends; its empirical
-determinism findings carry over).
+determinism findings carry over), `benchmark-method.md` (the scoring method as
+it stands today, with the rationale for every metric we retired).
 
 Status: design agreed 2026-07-16. Slice 2a (measurement + scoring + storage +
 CLI) built. Slice 2b (document fixtures + replay + benchmark-on-replay +
@@ -62,15 +63,32 @@ untranslated blocks than a competitor that re-typesets everything. Axes:
 | Axis | Measures | How |
 |---|---|---|
 | **Layout** | does the structure survive? | PP-DocLayout on both renders; class-aware region matching (IoU); mean matched overlap, penalties for lost/invented regions |
-| **Retention** | did the text survive? | re-OCR of the translated render: 100 − share of eligible source segments whose content is gone. Losing text is wrong under every interpretation |
+| **Anchors** | did the translation-invariant content survive? | digit anchors from the source re-OCR — NFKC-normalized, o/O folded to 0 inside digit-bearing tokens (the measured OCR confusion class: "2o25", "235,ooo"), grouping/decimal separators stripped, leading zeros stripped ("07 July" equals a localized "7 juli"), and only numbers of ≥2 significant digits count — matched as a document-wide multiset against the target re-OCR. Detector-free and translation-style-free; losing a number is wrong under every interpretation (v5; replaces the retired Retention axis, see below) |
 | **Typography** | legible and proportional? | text overflowing its matched region; font-size *ratio* drift between levels (readers notice broken ratios, not absolute sizes) |
 | **Structure flags** | hard yes/no | page count, image-region count, table-region count equal. Flags, not scores — a dropped page is not "−12 points", it is broken |
 
-Next to the axes, one **indicator**: every eligible source segment lands in
+**Retention retired as an axis (scoring v5).** The v1 Retention axis (100 −
+missing share) judged a source segment missing when its *region* found no
+counterpart — it rode on the same region matching as Layout. Measured on a
+re-typesetting external system: all 40 "missing" segments arrived via lost
+regions while the translated pages carried equal-or-more text (per-page volume
+ratios 1.05–2.08) and were visually complete — reflow, not loss. It survives
+as the `region_retention` indicator. The anchors axis replaces it with direct
+text evidence; anchor normalization deliberately absorbs locale reformatting
+("1,234.56" ⇄ "1.234,56", date-order swaps, full-width digits). Named limits:
+prose without any digit is invisible to anchors (the volume ratio is the
+coarse backstop), and numeral-word regrouping (e.g. a CJK myriad form,
+"50,000" ⇄ "5万") changes the signature and reads as loss.
+
+Next to the axes, two **indicators**: every eligible source segment lands in
 exactly one of three observable states — **changed** (present, different from
 the source; ~translated), **unchanged** (present, verbatim the source) or
 **missing** (gone) — and the unchanged share is reported without a good/bad
-scale attached. Deliberately kept text (a proper noun, "Yellow Card") and a
+scale attached. The **volume ratio** (script-aware text units,
+translated/source; CJK characters count per character, other scripts per word)
+is the coarse text-loss backstop: language-pair inflation makes its absolute
+value meaningless, but it is constant per document row, so a low outlier
+against the other systems on the same document suggests dropped content. Deliberately kept text (a proper noun, "Yellow Card") and a
 missed translation are indistinguishable from the pair alone, so intent is not
 scored. The comparison resolves this for free: the legitimate-keep set is a
 property of the *document* (every correct system keeps the same names), so the
@@ -122,8 +140,12 @@ What varies is *our own system's output*: VLM grouping and translation wobble
 run to run, and inpaint re-rolls its model fill (GPU float). Two live runs on
 the same source therefore give two different output files, each with its own
 exact score. Consequence for comparisons: our own column in the comparison
-matrix shows a **spread over N pipeline runs** (min/median/max per axis); an
-uploaded external translation is one static file with one fixed score.
+matrix shows the **latest pipeline run**, with the per-run history visible in
+the cell's detail; an uploaded external translation is one static file with
+one fixed score. (The original design aggregated our runs into a median
+spread, but stored runs accumulate *across code versions* — an aggregate then
+mixes old pipeline behaviour into the current stand, so it was dropped;
+run-to-run wobble stays readable from the per-run list.)
 
 Verified before building (measured 2026-07-16, probe scripts, throwaway):
 
@@ -154,9 +176,11 @@ Verified before building (measured 2026-07-16, probe scripts, throwaway):
   gap against a system that barely translated is not attainable headroom.
 - **Anchor the corners with constructed baselines.** The *identity baseline*
   (source submitted as its own translation) must score ~100 on layout, 100 on
-  retention and 100% unchanged — everything kept, nothing translated. If
-  identity does not reach ~100 on layout, the number measures detector noise,
-  not quality — fix that before trusting anything else.
+  anchors, volume ratio 1.0 and 100% unchanged — everything kept, nothing
+  translated. If identity does not reach ~100 on layout, the number measures
+  detector noise, not quality — fix that before trusting anything else. The
+  identity corner doubles as the calibration check for the anchor normalizer
+  per script: identity anchors under 100 mean the normalizer is broken.
 - **The comparison is a time-allocation instrument, not a contest.** Per-axis
   0–100 is operationally defined (e.g. layout = mean class-aware IoU × 100),
   but a 75 only gets meaning from the columns next to it — and the question
@@ -308,7 +332,7 @@ third, separate use: calibration, not the fix-loop.
 |---|---|---|
 | **Replay** | did behaviour change? | exact (the existing regression-view pattern, document → pages) |
 | **Score** | benchmark-on-replay + delta vs accepted score | deterministic |
-| **Comparison** | how does our latest run move against our own best (Δ ours), with external measurements as informative reference — not a ranking | live runs (spread over N) + static external uploads |
+| **Comparison** | how does our latest run move against our own best (Δ ours), with external measurements as informative reference — not a ranking | latest live run (per-run history in the detail) + static external uploads |
 
 The working pattern "fixing one document while the rest must stay green and
 equal" is: focus one document in Replay+Score, "Run all" for the rest. Cell
@@ -401,3 +425,22 @@ reproduces them exactly. Residual, accepted: on chart-heavy documents
 (pdf-02 carries 39 confident image regions) the count-equality flags remain
 sensitive to off-by-one detector variance; a relative tolerance would be a
 later scoring refinement.
+
+**Addendum — retention was the second casualty (scoring v5, same day).**
+Decomposing the retention score of a re-typesetting external system on pdf-02
+showed every one of its 40 "missing" segments arrived via the lost-region
+mechanism and none via an empty matched region — retention was fully
+region-gated, so the same matching noise documented above flowed straight into
+an axis presented as text survival. The translated pages carried
+equal-or-more text than the source (per-page script-aware volume ratios
+1.05–2.08) and the worst-scoring page was visually complete. Remedy: the
+retention axis was retired in favour of the detector-free **anchors** axis
+(digit-signature multiset, document-wide) with the **volume ratio** indicator
+as the coarse backstop; the old value survives as the `region_retention`
+indicator. See §Axes for the definitions and the named limits. After the v5
+rescore (pure CPU, retroactive over all stored measurements): identity anchors
+exactly 100 with volume ratio 1.00 on all six documents; the re-typesetting
+system's pdf-02 text survival reads 87.8 on anchors (volume ×1.12) instead of
+84.1 on region-retention — and on pdf-06, where a third of the content really
+was left untranslated or dropped, anchors (70.3) and volume (×0.89) agree with
+the unchanged share instead of contradicting it.

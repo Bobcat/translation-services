@@ -44,11 +44,13 @@ def _axes_line(scores: dict) -> str:
         for key in ("page_count_equal", "image_regions_equal", "table_regions_equal")
     )
     indicators = scores.get("indicators") or {}
+    ratio = indicators.get("volume_ratio")
     return (
         f"layout {axes.get('layout', 0):6.2f}  "
-        f"retain {axes.get('retention', 0):6.2f}  "
+        f"anchors {axes.get('anchors', 0):6.2f}  "
         f"typo {axes.get('typography', 0):6.2f}  "
-        f"unchanged {indicators.get('unchanged_share', 0):5.1f}%{flag_marks}"
+        f"unchanged {indicators.get('unchanged_share', 0):5.1f}%  "
+        f"vol {'x%.2f' % ratio if ratio is not None else '  n/a'}{flag_marks}"
     )
 
 

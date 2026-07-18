@@ -24,6 +24,7 @@ from fastapi.responses import Response
 
 from app.benchmark.measurement import measure_pair
 from app.benchmark.overlay import overlay_png
+from app.benchmark.scoring import anchor_details
 from app.benchmark.scoring import score_measurement
 from app.benchmark.store import default_data_root
 from app.benchmark.store import find_run
@@ -157,6 +158,18 @@ def register(app: FastAPI, *, settings: AppSettings, runtime: RequestRuntime) ->
         return JSONResponse(status_code=200, content={
             "doc_id": run.doc_id, "system": run.system, "run_id": run.run_id, "scores": scores,
         })
+
+    @app.get("/v1/benchmark/runs/{doc_id}/{system}/{run_id}/anchors")
+    async def benchmark_anchors(doc_id: str, system: str, run_id: str) -> JSONResponse:
+        """The anchors-axis evidence: which digit anchors went missing (and which are new),
+        located at page + segment. Pure CPU over the stored measurement."""
+        run = await anyio.to_thread.run_sync(
+            lambda: find_run(benchmark_root, doc_id=doc_id, system=system, run_id=run_id)
+        )
+        if run is None:
+            return _error(404, code="BENCHMARK_RUN_NOT_FOUND", message="no stored run for this document/system", retryable=False)
+        details = await anyio.to_thread.run_sync(lambda: anchor_details(run.load_measurement()))
+        return JSONResponse(status_code=200, content=details)
 
     @app.get("/v1/benchmark/runs/{doc_id}/{system}/{run_id}/overlay/{side}/{page}")
     async def benchmark_overlay(doc_id: str, system: str, run_id: str, side: str, page: int):

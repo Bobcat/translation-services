@@ -35,7 +35,7 @@ def _axes_line(scores: dict) -> str:
     axes = scores.get("axes") or {}
     indicators = scores.get("indicators") or {}
     return (
-        f"layout {axes.get('layout', 0):6.2f}  retain {axes.get('retention', 0):6.2f}  "
+        f"layout {axes.get('layout', 0):6.2f}  anchors {axes.get('anchors', 0):6.2f}  "
         f"typo {axes.get('typography', 0):6.2f}  unchanged {indicators.get('unchanged_share', 0):5.1f}%"
     )
 
