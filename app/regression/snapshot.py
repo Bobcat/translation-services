@@ -22,7 +22,9 @@ from app.regression.fixture import expected_unit_of
 _OCR_LANG_BY_TARGET = {"zh": "ch", "zh-cn": "ch", "zh-tw": "chinese_cht", "ja": "japan", "ko": "korean"}
 
 
-def _ocr_language(target_lang: str) -> str:
+def ocr_language_for_target(target_lang: str) -> str:
+    """The OCR model code that reads text rendered for ``target_lang``. Public: the pdf harness
+    uses the same mapping for benchmark-on-replay measurements."""
     code = str(target_lang or "").strip().lower()
     return _OCR_LANG_BY_TARGET.get(code, code or "en")
 
@@ -34,7 +36,7 @@ def reocr_rows(ocr_settings: OcrSettings, png_bytes: bytes, language: str) -> li
         handle.flush()
         path = Path(handle.name)
         try:
-            segments = run_raw_ocr(ocr_settings, path, language=_ocr_language(language))
+            segments = run_raw_ocr(ocr_settings, path, language=ocr_language_for_target(language))
         except RuntimeError:
             # Unknown/unsupported code: fall back to the Latin model so a capture never 500s.
             # Capture and replay fall back identically, so the comparison stays consistent.

@@ -50,7 +50,7 @@ def run_variant(ocr_settings: OcrSettings, *, variant_path) -> dict[str, Any]:
     snapshot_diff_png = variant_path / "snapshot_diff.png"
     if diffs:
         actual_png.write_bytes(rendered)
-        _write_snapshot_diff(variant_path, boxes)
+        write_snapshot_diff(variant_path, boxes)
     else:
         for stale in (actual_png, snapshot_diff_png):
             if stale.exists():
@@ -88,11 +88,12 @@ _DIFF_BOX_PAD = 6
 _DIFF_BOX_WIDTH = 3
 
 
-def _write_snapshot_diff(variant_path, boxes: list[dict[str, Any]]) -> None:
+def write_snapshot_diff(variant_path, boxes: list[dict[str, Any]]) -> None:
     """``snapshot_diff.png``: the snapshot with a box around every mismatched re-OCR segment,
     so a reviewer flipping snapshot/actual sees WHERE to look instead of searching. Only the
     snapshot copy is marked — the actual stays clean for judging (and re-baselining). Align-only
-    failures yield no boxes; the unmarked copy is still written so the viewer never 404s."""
+    failures yield no boxes; the unmarked copy is still written so the viewer never 404s.
+    Public: the pdf document harness writes the same artifact per page dir."""
     snapshot_png = variant_path / "snapshot.png"
     if not snapshot_png.exists():
         return

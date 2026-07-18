@@ -8,7 +8,22 @@ Companion documents: `pdf-translation-design.md` (the pipeline this measures),
 `regression-test-design.md` (the image harness this extends; its empirical
 determinism findings carry over).
 
-Status: design, agreed 2026-07-16. Nothing built yet.
+Status: design agreed 2026-07-16. Slice 2a (measurement + scoring + storage +
+CLI) built. Slice 2b (document fixtures + replay + benchmark-on-replay +
+accepted-score freeze) built 2026-07-18 — `app/regression/pdf/`,
+`scripts/pdf_regress.py`; the freeze-boundary decision is recorded in
+§"Regression for translate_pdf". Slice 2c built 2026-07-18:
+`/v1/pdf-regression/*` (`app/routes/pdf_regression.py`; benchmark routes moved
+to `app/routes/benchmark.py` in the same seam). Workbench surfaces (revised the
+same day, replacing the initial Replay/Score-tabs-inside-pdf-testing sketch):
+capture is a collapsible "Regression fixture" panel on the **PDF translation**
+view (freeze a completed run, mirroring the image capture panel), with a live
+status badge fed by `GET /v1/pdf-regression/status` (resolves the run's source
+PDF to a testset document by content hash and lists its existing fixtures);
+replay + benchmark-on-replay live on a dedicated **PDF translation regression**
+view — one page, fixture tree + replay diffs + score-vs-accepted inline, the
+document counterpart of the image regression view; **PDF testing** stays the
+Comparison matrix only.
 
 ---
 
@@ -224,12 +239,43 @@ is therefore essentially a list of page fixtures plus document-level checks:
 - rasterize/assemble are deterministic given dpi + engine version.
 
 The existing fixture machinery is reused per page, not duplicated. Capture
-needs no new pipeline work: a completed `translate_pdf` run already persists
-per page exactly what a fixture freezes (`pages/page-NNN/grouping.json`,
-`translation.json`, the raw hint inside `llm_calls.json`).
+needs almost no new pipeline work: a completed `translate_pdf` run already
+persists per page what a fixture freezes (`pages/page-NNN/grouping.json`,
+`translation.json`, the raw hint inside `llm_calls.json`); the pipeline
+additionally persists the resolved request flags per page (`request.json`)
+because flag defaults live in `translate_image` only.
 
 Comparison semantics per page are unchanged from `regression-test-design.md`
 (exact align diff, re-OCR render diff with its measured tolerances).
+
+**Freeze boundary (decided at build, 2026-07-18).** Cells are frozen in the
+page fixture and align/render always replays on frozen inputs — identical
+semantics to the image harness, even though born-digital cells would be
+re-derivable. The deterministically re-derivable inputs are instead guarded by
+separate *frozen-input checks* at document level: the census (`profile_pdf`),
+the page raster (sha vs the frozen raster; renders are not stored, they are
+reproduced from `source.pdf` at the frozen dpi) and, for `pdf_text_layer`
+pages, an exact re-extraction diff of the text-layer cells. This keeps the two
+failure classes attributable: an extraction change fails as "extraction
+changed", not as a cascade of misaligned units. The re-baseline semantics
+differ accordingly: replay diffs (align / re-OCR / assembled geometry) are
+acceptable via `accept`; frozen-input diffs are not — the frozen hint and
+translations belong to the old derivation, so those require a fresh live
+capture. Capture itself refuses to freeze a fixture whose replay cannot
+reproduce the live run (align diffed exactly, render diffed by re-OCR), so a
+fixture is never born failing; `ignored_cell_ids`, which the run does not
+persist, is derived by that same capture-time replay. The accepted score is
+frozen together with its measurement (`accepted_measurement.json`), so the
+Score comparison always evaluates both sides under the *current* scoring code
+regardless of when the freeze happened.
+
+Storage: `testset/pdf/_regression/<stem>/<lang>/<vN>/` — `document.json`
+(census, dpi, target lang), `source.pdf`, `accepted.pdf`,
+`accepted_measurement.json` + `accepted_scores.json`, and `pages/page-NNN/`
+with per-page `fixture.json`/`snapshot.json`/`snapshot.png` in the image
+harness's exact schema. Deliberately outside `testset/_regression` so the
+image tooling never walks document fixtures. CLI: `scripts/pdf_regress.py`
+(`capture` / `run [--score]` / `accept` / `list`).
 
 ---
 

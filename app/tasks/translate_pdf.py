@@ -11,7 +11,7 @@ Pages run sequentially inside this one job: the GPU stages are serial anyway,
 ``checkpoint`` still cancels between stages, and ``progress`` reports each
 finished page to the lifecycle record. Per-page artifacts are written to
 ``pages_root/page-NNN/`` as they complete (input.png, rendered.png,
-grouping.json, translation.json, llm_calls.json), so a document job leaves
+grouping.json, translation.json, request.json, llm_calls.json), so a document job leaves
 inspectable state per page and a later per-document retranslate can re-enter
 from the cached grouping exactly like the image flow.
 """
@@ -126,7 +126,10 @@ def run_translate_pdf_pipeline(
             rendered_path = page_dir / "rendered.png"
             rendered_path.write_bytes(page_result.rendered_image or page_png.read_bytes())
             debug = page_result.debug or {}
-            for name in ("grouping", "translation"):
+            # "request" carries the RESOLVED request flags per page — what a document-fixture
+            # capture freezes (app/regression/pdf/capture.py); defaults live in translate_image
+            # only, so persisting the resolved values is the one honest record.
+            for name in ("grouping", "translation", "request"):
                 if debug.get(name) is not None:
                     (page_dir / f"{name}.json").write_text(
                         json.dumps(debug[name], ensure_ascii=False, indent=2), encoding="utf-8"

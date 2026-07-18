@@ -85,6 +85,7 @@ concern:
 ```
 app/
   main.py            # HTTP composition root + route registration
+  routes/            # extracted route modules: pdf benchmark, pdf document regression
   core/              # settings, request/response schemas, helpers
   runtime/           # job execution: FIFO queue, runner loop, lifecycle store
   tasks/             # feature pipelines — one module per task (the readable flows)
@@ -123,6 +124,12 @@ All routes are versioned under `/v1`.
 | `POST` | `/v1/benchmark/run` | Measure + score a pair: `{request_id}` of a completed `translate_pdf` run, or an uploaded pair + system label. |
 | `GET` | `/v1/benchmark/runs/{doc}/{system}` | Detail (per-page scores) of the latest stored run. |
 | `GET` | `/v1/benchmark/runs/{doc}/{system}/{run}/overlay/{side}/{page}` | Region-overlay render of a measured page. |
+| `GET` | `/v1/pdf-regression/fixtures` | Document-fixture inventory, with each fixture's frozen accepted score. |
+| `GET` | `/v1/pdf-regression/status` | What capturing a completed `translate_pdf` run would produce: the fixture name (testset document matched by content hash) and its existing fixtures. |
+| `POST` | `/v1/pdf-regression/capture` | Freeze a completed `translate_pdf` run as a document fixture; verifies the replay against the run before writing, optionally freezes the accepted score. |
+| `POST` | `/v1/pdf-regression/run` | Replay a document fixture and diff it against its snapshots; optional benchmark-on-replay against the accepted score. |
+| `POST` | `/v1/pdf-regression/accept` | Re-baseline a fixture from the current replay (refused when frozen inputs no longer reproduce). |
+| `GET` `DELETE` | `/v1/pdf-regression/fixtures/{name}/{lang}/{variant}/…` | Fixture artifacts (source/accepted/actual PDF, per-page snapshot/actual/diff PNGs, accepted scores) / delete a variant. |
 
 `request_json` fields: `task` (`translate_image` \| `retranslate_image` \| `rerender_image` \| `translate_pdf`),
 `source_lang_code` (**required for routing**), `target_lang_code`, optional
@@ -277,9 +284,20 @@ several variants (`v1`, `v2`, …) — each freezing a different valid hint or
 translation, which aligns and renders differently. They're curated cases, not a
 growing accept-set.
 
+The same machinery covers `translate_pdf` at document level: a document fixture
+is a set of page fixtures (identical schema) plus the frozen source PDF and
+document checks — the census, each page's raster, and for born-digital pages an
+exact re-extraction diff of the text-layer cells. Diffs in those *frozen inputs*
+cannot be re-baselined in place; they require a fresh capture, because the
+frozen hint and translations belong to the old derivation. A replay can also be
+benchmarked against the fixture's frozen accepted score
+(`scripts/pdf_regress.py`, the `/v1/pdf-regression/*` routes).
+
 Full design — freeze boundary, schema, comparison rules, the measured variance
 study and the regression API endpoints:
-**[docs/regression-test-design.md](docs/regression-test-design.md)**.
+**[docs/regression-test-design.md](docs/regression-test-design.md)**; the
+document-level harness and the benchmark it composes with:
+**[docs/pdf-benchmark-regression-design.md](docs/pdf-benchmark-regression-design.md)**.
 
 ## Deployment Notes
 
