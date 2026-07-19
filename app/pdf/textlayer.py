@@ -7,14 +7,13 @@ family, weight, italic, color). Align and translation consume cells
 source-agnostically; the style fields ride along for the cohort-consistent
 sizing of slice B and are inert until then.
 
-Protection policy (deliberately conservative for phase 1): a line containing a
-SUBSTANTIAL protected span — math fonts, symbol/icon fonts, private-use or
-unmapped glyphs, longer than a marker glyph — is dropped whole, as is any
-non-horizontal line. Dropped lines keep their original pixels: the bitmap
-backend only erases where units place text, so formulas, icons and rotated
-margin text survive untouched. The cost is that prose with inline math stays
-untranslated (it reads as unchanged in the benchmark); that limit is named in
-the page summary via the drop counters.
+Protection policy: a formula-dominated line, a line with substantial symbol/
+icon/unmapped content, and any non-horizontal line are dropped whole; dropped
+lines keep their original pixels (the bitmap backend only erases where units
+place text). A prose line whose math is a clear minority becomes a cell with
+inline-math ISLANDS (islands design doc): each math run turns into a ⟦Mn⟧
+placeholder in the text plus a recorded pixel bbox, rides through translation
+as an opaque token, and is transplanted back as source pixels by the render.
 
 A SHORT protected span (<= 2 chars: a bullet "•", an arrow, a dingbat) is a
 list/decoration marker riding inline on a prose line; it is stripped from the
@@ -32,13 +31,20 @@ from typing import Any
 import pymupdf
 
 # Two kinds of protected fonts, with different line policies. MATH fonts
-# (Computer Modern & friends, AMS, anything *Math*) always drop the whole
-# line: formulas shatter into tiny spans, and a half-stripped formula line is
-# garbage for the translator AND erases pixels it cannot redraw. SYMBOL fonts
-# (bullets, dingbats) may ride inline as ≤2-char markers on prose lines and
-# are then stripped. Matched against the base font name with the subset
-# prefix (``ABCDEF+``) stripped.
-_MATH_FONT_RE = re.compile(r"^(CM(?!R)[A-Z0-9]*|CMR\d|MSAM|MSBM|.*Math)", re.IGNORECASE)
+# always drop the whole line: formulas shatter into tiny spans, and a
+# half-stripped formula line is garbage for the translator AND erases pixels
+# it cannot redraw. Only the genuinely mathematical faces count — CMMI (math
+# italic), CMSY/CMBSY (symbols), CMEX (extensions), the AMS MSAM/MSBM sets,
+# and OpenType *Math* fonts. The Computer Modern TEXT faces (CMR roman, CMBX
+# bold, CMTI italic, CMTT typewriter, CMSS sans, CMSL slanted, CMCSC caps)
+# are a document's body type in classic LaTeX and must extract as prose — a
+# pure-CM document yielded 0 cells under the old CM* blanket (islands design
+# doc, phase 1). A CMR digit run INSIDE a formula still drops with its line:
+# the trigger is the true-math span beside it. SYMBOL fonts (bullets,
+# dingbats) may ride inline as ≤2-char markers on prose lines and are then
+# stripped. Matched against the base font name with the subset prefix
+# (``ABCDEF+``) stripped.
+_MATH_FONT_RE = re.compile(r"^(CMMI|CMSY|CMBSY|CMEX|MSAM|MSBM|.*Math)", re.IGNORECASE)
 _SYMBOL_FONT_RE = re.compile(r"^(Symbol|ZapfDingbats|Wingdings|Webdings)", re.IGNORECASE)
 _SUBSET_PREFIX_RE = re.compile(r"^[A-Z]{6}\+")
 _BOLD_NAME_RE = re.compile(r"bold|black|heavy|semibold|demibold", re.IGNORECASE)
@@ -66,7 +72,55 @@ class _LineStats:
     protected: int = 0
     rotated: int = 0
     stripped_markers: int = 0
+    island_seq: int = 0  # page-unique ⟦Mn⟧ numbering (units merge cells, ids must not collide)
     cells: list[dict[str, Any]] = field(default_factory=list)
+
+
+# Inline-math islands (islands design doc, phase 2). A line whose math is a clear
+# MINORITY becomes a cell: each maximal run of math spans (plus absorbed adjacent
+# letterless spans — the CMR "= 8" beside a CMMI "h") is replaced by a ⟦Mn⟧
+# placeholder in the text and recorded as an island with its pixel bbox; the render
+# transplants the source pixels there. Above the share cap, or without enough prose
+# words around it, the line is formula-dominated and keeps today's whole-line drop:
+# a display equation must stay source pixels entirely.
+_ISLAND_MAX_MATH_SHARE = 0.35
+_ISLAND_MIN_PROSE_WORDS = 3
+_ISLAND_SCRIPT_SIZE_RATIO = 0.85  # spans this much smaller than the line = sub/superscript
+_ISLAND_TOKEN_RE = re.compile(r"⟦M(\d+)⟧")
+
+# The Computer Modern TEXT faces collapse to one family for the dominance test:
+# in a pure-CM document the body (CMR), headings (CMBX) and theorem italic (CMTI)
+# are one typographic voice, and an island line's prose in any of them counts as
+# body prose.
+_CM_TEXT_RE = re.compile(r"^CM(R|BX|TI|TT|SS|SL|CSC)", re.IGNORECASE)
+
+
+def _text_family(span: dict[str, Any]) -> str:
+    """Normalized family key for the dominance test: subset prefix stripped, CM
+    text faces collapsed, otherwise the leading alphabetic run of the base name
+    (``NimbusRomNo9L-Regu``/``-Medi`` -> ``NIMBUSROMNO``)."""
+    name = _SUBSET_PREFIX_RE.sub("", str(span.get("font") or ""))
+    if _CM_TEXT_RE.match(name):
+        return "CM-TEXT"
+    match = re.match(r"[A-Za-z]+", name)
+    return (match.group(0) if match else name).upper()
+
+
+def _dominant_text_family(lines: list[dict[str, Any]]) -> str | None:
+    """The page's body face: the normalized text family carrying the most non-space
+    characters, math/symbol faces excluded. ``None`` on pages without text spans."""
+    counts: dict[str, int] = {}
+    for line in lines:
+        for span in line.get("spans") or []:
+            if _span_protection(span) is not None:
+                continue
+            chars = len(_span_text(span).replace(" ", ""))
+            if chars:
+                key = _text_family(span)
+                counts[key] = counts.get(key, 0) + chars
+    if not counts:
+        return None
+    return max(counts, key=counts.get)
 
 
 class PageTextExtractor:
@@ -98,11 +152,19 @@ class PageTextExtractor:
         # span-level bbox silently swallows the marker — the erase pass then
         # clips a glyph it does not redraw. Non-space glyph union avoids that.
         page_dict = self._doc[int(page_index)].get_text("rawdict")
-        for block in page_dict.get("blocks") or []:
-            if block.get("type") != 0:
-                continue
-            for line in block.get("lines") or []:
-                self._append_line(line, stats)
+        lines = [
+            line
+            for block in page_dict.get("blocks") or []
+            if block.get("type") == 0
+            for line in block.get("lines") or []
+        ]
+        # The page's dominant TEXT family (by char volume, math faces excluded)
+        # anchors the formula-vs-prose call on island lines: a display equation
+        # sets its operator names in the math ecosystem's roman, not in the
+        # page's body face.
+        dominant_family = _dominant_text_family(lines)
+        for line in lines:
+            self._append_line(line, stats, dominant_family=dominant_family)
         return PageCells(
             cells=stats.cells,
             dropped_protected_lines=stats.protected,
@@ -110,7 +172,9 @@ class PageTextExtractor:
             stripped_marker_spans=stats.stripped_markers,
         )
 
-    def _append_line(self, line: dict[str, Any], stats: _LineStats) -> None:
+    def _append_line(
+        self, line: dict[str, Any], stats: _LineStats, *, dominant_family: str | None = None
+    ) -> None:
         spans = [span for span in (line.get("spans") or []) if _span_text(span).strip()]
         if not spans:
             return
@@ -120,11 +184,14 @@ class PageTextExtractor:
             return
         kinds = [(span, _span_protection(span)) for span in spans]
         if any(
-            kind == "math"
-            or (kind == "symbol" and len(_span_text(span).strip()) > _MARKER_MAX_CHARS)
+            kind == "symbol" and len(_span_text(span).strip()) > _MARKER_MAX_CHARS
             for span, kind in kinds
         ):
-            stats.protected += 1  # substantial protected content (a formula): keep pixels
+            stats.protected += 1  # substantial symbol content (an icon row): keep pixels
+            return
+        island_runs = _island_runs(spans, kinds, dominant_family=dominant_family)
+        if island_runs is _FORMULA_LINE:
+            stats.protected += 1  # formula-dominated line: keep pixels whole
             return
         markers = [span for span, kind in kinds if kind == "symbol"]
         marker_text = ""
@@ -135,11 +202,44 @@ class PageTextExtractor:
             spans = [span for span in spans if id(span) not in marker_ids]
             if not spans:
                 return
-        text = " ".join(_span_text(span).strip() for span in spans)
-        text = re.sub(r"\s+", " ", text).strip()
+        island_span_ids = {id(span) for run in island_runs for span in run}
+        prose_spans = [span for span in spans if id(span) not in island_span_ids]
+        islands: list[dict[str, Any]] = []
+        parts: list[str] = []
+        run_starts = {id(run[0]): run for run in island_runs}
+        for span in spans:
+            run = run_starts.get(id(span))
+            if run is not None:
+                stats.island_seq += 1
+                island_bbox = _glyph_bbox(run)
+                if island_bbox is None:
+                    continue
+                islands.append(
+                    {
+                        "id": f"M{stats.island_seq}",
+                        "bbox": {
+                            "left": round(island_bbox[0] * self._scale, 2),
+                            "top": round(island_bbox[1] * self._scale, 2),
+                            "width": round(max(1.0, (island_bbox[2] - island_bbox[0]) * self._scale), 2),
+                            "height": round(max(1.0, (island_bbox[3] - island_bbox[1]) * self._scale), 2),
+                        },
+                    }
+                )
+                parts.append(f"⟦M{stats.island_seq}⟧")
+            elif id(span) not in island_span_ids:
+                parts.append(_span_text(span).strip())
+        text = re.sub(r"\s+", " ", " ".join(parts)).strip()
         if not text:
             return
-        bbox = _glyph_bbox(spans) or [float(v) for v in (line.get("bbox") or (0, 0, 0, 0))]
+        # Geometry from the PROSE glyphs: an island glyph (a radical, a stacked script)
+        # can reach far above the text band, and a cell bbox inflated by it shifts the
+        # render anchor a band up — two lines then print on top of each other (measured).
+        # The islands' own ink is erased via their recorded bboxes, not via the cell box.
+        bbox = (
+            _glyph_bbox(prose_spans)
+            or _glyph_bbox(spans)
+            or [float(v) for v in (line.get("bbox") or (0, 0, 0, 0))]
+        )
         left, top = bbox[0] * self._scale, bbox[1] * self._scale
         width = max(1.0, (bbox[2] - bbox[0]) * self._scale)
         height = max(1.0, (bbox[3] - bbox[1]) * self._scale)
@@ -147,7 +247,7 @@ class PageTextExtractor:
         # line "$865 million" is a large amount plus a small unit-word, and the
         # small word has more characters — the size that visually carries the
         # line is the big one.
-        dominant = max(spans, key=lambda span: len(_span_text(span).strip()) * float(span.get("size") or 0.0) ** 2)
+        dominant = max(prose_spans or spans, key=lambda span: len(_span_text(span).strip()) * float(span.get("size") or 0.0) ** 2)
         font_name = _SUBSET_PREFIX_RE.sub("", str(dominant.get("font") or ""))
         flags = int(dominant.get("flags") or 0)
         bold = bool(flags & _FLAG_BOLD) or bool(_BOLD_NAME_RE.search(font_name))
@@ -182,7 +282,83 @@ class PageTextExtractor:
             # The line carried a stripped list/decoration marker: ground truth
             # for the unit's bullet flag, stronger than any hint label.
             cell["marker"] = marker_text
+        if islands:
+            cell["islands"] = islands
         stats.cells.append(cell)
+
+
+# Sentinel: the line is formula-dominated and must keep its pixels whole.
+_FORMULA_LINE = object()
+
+
+def _island_runs(
+    spans: list[dict[str, Any]],
+    kinds: list[tuple[dict[str, Any], str | None]],
+    *,
+    dominant_family: str | None = None,
+) -> Any:
+    """Group the line's math into islands, or classify the line as a formula.
+
+    An island run is a maximal consecutive span sequence that contains at least one
+    true-math span, extended over adjacent spans that belong to the formula rather
+    than the prose: LETTERLESS spans (a formula's digits and operators are typeset
+    in the text face — the CMR "= 8" beside a CMMI "h", the measured span pattern)
+    and clearly SMALLER spans (a roman sub/superscript like the "model" in
+    "d_model"). Returns a list of runs (possibly empty: a pure prose line), or
+    ``_FORMULA_LINE`` when the line is formula-dominated: math glyph share above
+    ``_ISLAND_MAX_MATH_SHARE``, too little prose (fewer than
+    ``_ISLAND_MIN_PROSE_WORDS`` words), or prose set entirely OUTSIDE the page's
+    dominant text family — a display equation writes its operator names in the math
+    ecosystem's roman while real prose is set in the body face. Display equations
+    and near-formula lines keep their pixels whole."""
+    is_math = [kind == "math" for _span, kind in kinds]
+    if not any(is_math):
+        return []
+    line_size = max((float(s.get("size") or 0.0) for s in spans), default=0.0)
+    absorbable = [
+        not any(ch.isalpha() for ch in _span_text(span))
+        or (line_size > 0 and float(span.get("size") or 0.0) < _ISLAND_SCRIPT_SIZE_RATIO * line_size)
+        for span in spans
+    ]
+    in_island = list(is_math)
+    # Fixpoint expansion left+right: letterless neighbours join the island.
+    changed = True
+    while changed:
+        changed = False
+        for i in range(len(spans)):
+            if in_island[i] or not absorbable[i]:
+                continue
+            if (i > 0 and in_island[i - 1]) or (i + 1 < len(spans) and in_island[i + 1]):
+                in_island[i] = True
+                changed = True
+    math_chars = sum(
+        len(_span_text(span).replace(" ", "")) for span, inside in zip(spans, in_island) if inside
+    )
+    total_chars = sum(len(_span_text(span).replace(" ", "")) for span in spans)
+    prose_words = len(
+        " ".join(_span_text(span) for span, inside in zip(spans, in_island) if not inside).split()
+    )
+    if total_chars <= 0 or math_chars / total_chars > _ISLAND_MAX_MATH_SHARE:
+        return _FORMULA_LINE
+    if prose_words < _ISLAND_MIN_PROSE_WORDS:
+        return _FORMULA_LINE
+    if dominant_family is not None and not any(
+        _text_family(span) == dominant_family
+        for span, inside in zip(spans, in_island)
+        if not inside
+    ):
+        return _FORMULA_LINE
+    runs: list[list[dict[str, Any]]] = []
+    current: list[dict[str, Any]] = []
+    for span, inside in zip(spans, in_island):
+        if inside:
+            current.append(span)
+        elif current:
+            runs.append(current)
+            current = []
+    if current:
+        runs.append(current)
+    return runs
 
 
 def _span_text(span: dict[str, Any]) -> str:

@@ -807,3 +807,82 @@ def test_batch_line_mismatch_flags_crosstalk_not_expansion() -> None:
         "There is a small increase in the risk.",
         "Er is een kleine toename van het risico op complicaties.",
     )
+
+
+def test_island_token_mismatch_gate() -> None:
+    from app.translation.translate import _island_token_mismatch
+
+    src = "we employ ⟦M3⟧ heads and use ⟦M4⟧ per head"
+    # exact set, any order: fine (the island follows its slot in the sentence)
+    assert not _island_token_mismatch(src, "per kop gebruiken we ⟦M4⟧ en ⟦M3⟧ koppen")
+    # lost token: a formula would silently vanish
+    assert _island_token_mismatch(src, "we gebruiken ⟦M3⟧ koppen")
+    # invented token: the wrong crop would be pasted
+    assert _island_token_mismatch(src, "⟦M3⟧ ⟦M4⟧ ⟦M5⟧")
+    # duplicated token is also a mismatch
+    assert _island_token_mismatch(src, "⟦M3⟧ ⟦M3⟧ ⟦M4⟧")
+    # no tokens in the source: nothing to check
+    assert not _island_token_mismatch("plain prose", "gewoon proza")
+
+
+def test_island_unit_translates_from_cell_text_not_hint_line(monkeypatch) -> None:
+    # An island unit's tokens live in its CELL text; the hint line carries the VLM's own
+    # (TeX) reading of the math and never the tokens. The unit must therefore skip the
+    # structured/hint paths and translate per unit from its token-bearing source text.
+    calls: list[dict] = []
+
+    def fake_post(url, json, timeout):  # noqa: A002
+        calls.append(json)
+        if len(calls) == 1:  # structured batch over hint lines
+            return _FakeResponse({"output_text": "Kaarthouder\n###\nwe gebruiken $h=8$ koppen"})
+        return _FakeResponse({"output_text": "we gebruiken ⟦M3⟧ parallelle koppen"})
+
+    monkeypatch.setattr(translate_module.httpx, "post", fake_post)
+
+    out = translate_units(
+        settings=AppSettings(),
+        units=[
+            _unit(1, "Kaarthouder", hint_index=0),
+            _unit(2, "we employ ⟦M3⟧ parallel heads", hint_index=1),
+        ],
+        source_lang_code="en",
+        target_lang_code="nl",
+        translator_model="gemma",
+        translator_mode="generic",
+        hint_units=["Kaarthouder", "we employ $h = 8$ parallel heads"],
+        hint_block_ids=[0, 1],
+    )
+
+    assert len(calls) == 2  # structured + the island unit's own per-unit call
+    assert "⟦M3⟧" in calls[1]["input"]  # cell text with the token, not the hint line
+    assert out[1].translated_text == "we gebruiken ⟦M3⟧ parallelle koppen"
+    assert "island_mismatch" not in out[1].translation_route
+
+
+def test_island_unit_with_lost_token_stays_untranslated(monkeypatch) -> None:
+    calls: list[dict] = []
+
+    def fake_post(url, json, timeout):  # noqa: A002
+        calls.append(json)
+        if len(calls) == 1:
+            return _FakeResponse({"output_text": "Kaarthouder\n###\nirrelevant"})
+        return _FakeResponse({"output_text": "vertaling zonder token"})
+
+    monkeypatch.setattr(translate_module.httpx, "post", fake_post)
+
+    out = translate_units(
+        settings=AppSettings(),
+        units=[
+            _unit(1, "Kaarthouder", hint_index=0),
+            _unit(2, "we employ ⟦M3⟧ parallel heads", hint_index=1),
+        ],
+        source_lang_code="en",
+        target_lang_code="nl",
+        translator_model="gemma",
+        translator_mode="generic",
+        hint_units=["Kaarthouder", "we employ $h = 8$ parallel heads"],
+        hint_block_ids=[0, 1],
+    )
+
+    assert out[1].translated_text == ""  # gate: pixels stay
+    assert out[1].translation_route.endswith("_island_mismatch")

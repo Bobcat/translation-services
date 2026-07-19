@@ -287,6 +287,7 @@ def _build_unit(
         cell = cells[cell_index]
         polygon = cell.get("polygon")
         size_px = cell.get("size_px")
+        islands = cell.get("islands")
         members.append(
             UnitMember(
                 cell_id=int(cell["id"]),
@@ -296,6 +297,7 @@ def _build_unit(
                 order=order,
                 polygon=[dict(point) for point in polygon] if polygon else None,
                 size_px=float(size_px) if size_px is not None else None,
+                islands=[dict(island) for island in islands] if islands else None,
             )
         )
     # Ground-truth list marker from the cell layer (a stripped inline "•" the

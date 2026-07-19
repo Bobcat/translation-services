@@ -24,6 +24,9 @@ class UnitMember:
     # Exact em size of this member's text in image pixels, when the cell source
     # knows it (a text layer's declared size); None = derive from ink geometry.
     size_px: float | None = None
+    # Inline pixel islands (⟦Mn⟧ tokens in the text): [{"id": "Mn", "bbox": px}].
+    # Opaque data from the cell layer; the render transplants the source pixels.
+    islands: list[dict[str, Any]] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         member: dict[str, Any] = {
@@ -37,6 +40,8 @@ class UnitMember:
             member["polygon"] = [dict(point) for point in self.polygon]
         if self.size_px is not None:
             member["size_px"] = self.size_px
+        if self.islands is not None:
+            member["islands"] = [dict(island) for island in self.islands]
         return member
 
     @classmethod
@@ -53,6 +58,7 @@ class UnitMember:
             if polygon is not None
             else None,
             size_px=float(size_px) if size_px is not None else None,
+            islands=[dict(island) for island in data["islands"]] if data.get("islands") else None,
         )
 
 

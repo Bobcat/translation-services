@@ -5,6 +5,7 @@ the font metrics directly (no draw context needed).
 """
 from __future__ import annotations
 
+import re
 import unicodedata
 from dataclasses import dataclass
 from functools import lru_cache
@@ -263,10 +264,94 @@ class FallbackFont:
         return sum(face.getlength(segment) for face, segment in self.runs(text))
 
 
+_ISLAND_TOKEN_RE = re.compile(r"⟦M\d+⟧")  # ⟦Mn⟧ inline pixel island
+
+
+class IslandFont:
+    """A face plus fixed-width inline pixel islands (islands design doc, phase 4).
+
+    A ⟦Mn⟧ token measures at its island's source width scaled to the face size, and
+    draws as the island's ink MASK in the line's fill colour (``draw.bitmap``), so a
+    transplanted formula condenses, justifies and recolours exactly like the glyphs
+    around it. Quacks like FreeTypeFont for the render call sites, following
+    ``FallbackFont``; text segments recurse through ``draw_text``, so an island line
+    keeps the symbol-fallback behaviour of its face."""
+
+    def __init__(self, inner: Any, islands: dict[str, dict[str, Any]]):
+        self.inner = inner
+        # id -> {"mask": L image at source px, "w"/"h": source px, "dy": px below the
+        # line's ink top, "declared": the line's em size in source px}
+        self.islands = islands
+
+    @property
+    def size(self) -> int:
+        return self.inner.size
+
+    def getmetrics(self) -> tuple[int, int]:
+        return self.inner.getmetrics()
+
+    def scale_for(self, island: dict[str, Any]) -> float:
+        declared = float(island.get("declared") or 0.0)
+        return float(self.inner.size) / declared if declared > 0 else 1.0
+
+    def segments(self, text: str) -> list[tuple[str, str]]:
+        """``[("text"|"island", value)]`` in order; island values are the ⟦Mn⟧ tokens."""
+        out: list[tuple[str, str]] = []
+        pos = 0
+        for match in _ISLAND_TOKEN_RE.finditer(text):
+            if match.start() > pos:
+                out.append(("text", text[pos:match.start()]))
+            out.append(("island", match.group(0)))
+            pos = match.end()
+        if pos < len(text):
+            out.append(("text", text[pos:]))
+        return out
+
+    def getlength(self, text: str) -> float:
+        total = 0.0
+        for kind, value in self.segments(str(text)):
+            if kind == "island":
+                island = self.islands.get(value[1:-1])
+                total += (
+                    float(island["w"]) * self.scale_for(island)
+                    if island is not None
+                    else self.inner.getlength(value)
+                )
+            else:
+                total += self.inner.getlength(value)
+        return total
+
+
 def draw_text(draw: Any, xy: tuple[float, float], text: str, font: Any, fill: Any) -> None:
     """``draw.text`` that understands ``FallbackFont``: each run draws in its own face,
     x-advanced by the run's width and baseline-aligned to the primary (the faces' ascents
-    differ a few px at the same pt size). A plain font takes the plain path."""
+    differ a few px at the same pt size). ``IslandFont`` segments draw text through the
+    inner face and islands as ink masks. A plain font takes the plain path."""
+    if isinstance(font, IslandFont):
+        x, y = xy
+        ascent, descent = font.getmetrics()
+        text_h = max(1, int(ascent + descent))
+        for kind, value in font.segments(str(text)):
+            if kind == "island":
+                island = font.islands.get(value[1:-1])
+                if island is None:
+                    continue
+                scale = font.scale_for(island)
+                advance = float(island["w"]) * scale
+                w = max(1, int(round(float(island["w"]) * scale)))
+                h = max(1, int(round(float(island["h"]) * scale)))
+                dy = int(round(float(island.get("dy") or 0.0) * scale))
+                if h > text_h:  # a radical/stacked script taller than the line: squeeze into the box
+                    w = max(1, int(round(w * text_h / h)))
+                    h = text_h
+                dy = max(0, min(dy, text_h - h))
+                mask = island["mask"].resize((w, h), Image.LANCZOS)
+                draw.bitmap((int(round(x)), int(round(y + dy))), mask, fill=fill)
+                x += advance
+            else:
+                draw_text(draw, (x, y), value, font.inner, fill)
+                x += font.inner.getlength(value)
+        return
     if not isinstance(font, FallbackFont):
         draw.text(xy, text, font=font, fill=fill)
         return

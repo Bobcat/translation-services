@@ -67,16 +67,20 @@ language", never worse than today. Measured scope limit: ink-derived targets
 deep-shrunk small label work, so extending the floor there is a separate
 decision against those baselines, not a free generalization.
 
-**Phase 1 — font reclassification.** The current taxonomy is wrong. Math =
-`CMMI* / CMSY* / CMEX* / MSAM* / MSBM* / *Math*`. Text = `CMR* / CMBX* /
-CMTI* / CMTT* / CMSS* / CMSL* / CMCSC*` (Roman, bold, italic, typewriter,
-sans, slanted, small-caps are text faces). A text-font span counts as math
-only when sandwiched between math spans (the `= 8` inside `h = 8` — the
-measured span pattern: prose spans, then CMMI/CMR runs, then prose spans).
-Whole-line drop remains only for majority-math lines (display formulas,
-including their equation number). Direct win: the pure-CM class goes from 0%
-extraction to nearly everything; CM headings and CM-italic theorem prose
-survive.
+**Phase 1 — font reclassification (only).** The current taxonomy is wrong.
+Math = `CMMI* / CMSY* / CMBSY* / CMEX* / MSAM* / MSBM* / *Math*`. Text =
+`CMR* / CMBX* / CMTI* / CMTT* / CMSS* / CMSL* / CMCSC*` (Roman, bold,
+italic, typewriter, sans, slanted, small-caps are text faces). The drop
+trigger itself is unchanged in this phase: a line containing a true-math
+span still drops whole. Direct win: the pure-CM class goes from 0%
+extraction to its prose; CM headings and CM-italic theorem text survive.
+Sequencing decision (moved out of this phase during build): the
+majority-math drop rule and the sandwich absorption (the `= 8` inside
+`h = 8` — measured span pattern: prose spans, then CMMI/CMR runs, then
+prose spans) belong with the islands in phase 2. Without islands, keeping a
+minority-math line would erase the source's math typography and re-typeset
+it as plain text — a fidelity regression as an intermediate state. Every
+phase must be shippable on its own.
 
 **Phase 2 — islands in extraction.** A maximal run of math spans (plus
 absorbed sandwiched text spans and spaces) becomes one island per line:
@@ -103,11 +107,40 @@ baseline-aligned.
 `testset/pdf`; benchmark before/after; a document fixture once quality
 stands.
 
+## Build notes (2026-07-19, phases 2-4 live)
+
+Three findings from the first live runs, each now part of the design:
+
+- **Island units translate per unit from their cell text.** The structured and
+  hint-line translation paths re-translate the VLM's hint lines, which carry
+  the VLM's own (TeX) reading of the math and never the ⟦Mn⟧ tokens — on the
+  first live run every island unit fell through the token gate to preserve.
+  Units whose source text carries tokens now skip the hint paths and go
+  per-unit on the token-bearing cell text (measured after the fix: 35/35
+  units translated with the exact token multiset, zero gate hits).
+- **Cell geometry comes from the prose glyphs.** An island glyph (a radical)
+  reaches above the text band; a cell bbox inflated by it shifts the render
+  anchor a band up and two lines print on top of each other (measured twice
+  per formula-dense page). The cell bbox/polygon now unions only prose
+  glyphs; the islands' own ink is erased through their recorded boxes, added
+  to the plane's erase quads.
+- **Prose share and dominance decide, extraction-side.** The line share cap,
+  the minimum prose words and the dominant-text-family test (operator names
+  of a display equation are set in the math ecosystem's roman, not the body
+  face) together classify formula lines; the CM text faces collapse to one
+  family so pure-CM prose passes.
+
 ## Named limits
 
 - Tall inline math (fractions, stacked scripts) can exceed the line pitch:
-  v1 scales the island to line height or accepts slight overhang (the
-  line-pitch machinery exists). Named limit, not a blocker.
+  v1 squeezes the island into the line box. A very tall island's source crop
+  can also catch a sliver of the neighbouring line's ink (its glyph box
+  genuinely overlaps that band). Named limit, not a blocker.
+- A display equation's annotation line with genuine body-face prose ("where
+  head_i = Attention(…)") passes the prose tests and re-typesets with
+  transplants — content-correct, typographically mediocre.
+- The ``translategemma`` mode has no instructions channel for the token rule;
+  the deterministic gate degrades its island units to preserve.
 - The VLM hint transcribes math as TeX and will not match the placeholder
   text — the prose tokens must carry the align match. Needs a probe on the
   measured paper.

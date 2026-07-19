@@ -1771,3 +1771,28 @@ def test_align_column_filter_keeps_a_dropped_paragraph_orphan_in_its_own_column(
     assert all(m.bbox["left"] < 500 for m in orphan_unit.members)  # never crosses into the right column
     right = next(u for u in result.units if u.hint_index == 1)
     assert all(m.bbox["left"] > 500 for m in right.members)  # right block stays right-column only
+
+
+def test_island_font_measures_and_draws_the_transplant() -> None:
+    from PIL import Image as PILImage, ImageDraw
+    from app.replacement.text.fit import IslandFont, draw_text, load_font
+
+    inner = load_font(20, "sample")
+    # island measured at declared size 20: mask 40x18, sits 2px under the ink top
+    mask = PILImage.new("L", (40, 18), 255)
+    font = IslandFont(inner, {"M1": {"mask": mask, "w": 40, "h": 18, "dy": 2.0, "declared": 20.0}})
+
+    plain = inner.getlength("voor en na")
+    with_island = font.getlength("voor ⟦M1⟧ en na")
+    assert abs(with_island - (inner.getlength("voor ") + 40 + inner.getlength(" en na"))) < 1.0
+    assert with_island > plain
+
+    # halved size halves the island advance
+    small = IslandFont(load_font(10, "sample"), font.islands)
+    assert abs(small.getlength("⟦M1⟧") - 20.0) < 1.0
+
+    canvas = PILImage.new("RGBA", (int(with_island) + 4, 30), (0, 0, 0, 0))
+    draw_text(ImageDraw.Draw(canvas), (0, 0), "voor ⟦M1⟧ en na", font, (10, 10, 10, 255))
+    x0 = int(inner.getlength("voor "))
+    slot = canvas.crop((x0, 0, x0 + 40, 30))
+    assert any(px[3] > 0 for px in slot.getdata())  # the transplant left ink in its slot

@@ -357,6 +357,7 @@ def _plan_group(
     quad_tokens: list[set[str]] = []  # source words of each quad's member, parallel to group_quads
     own_boxes: list[dict[str, Any]] = []  # members this group ERASES — sweep-eligible ground
     exact_quad_sizes: dict[int, float] = {}  # id(quad) -> the member's declared em size in px
+    island_erase_quads: dict[int, list] = {}  # id(quad) -> the member's island ink boxes
     for unit in units:
         translated = fold_lone_fullwidth_punctuation(str(unit.get("translated_text") or "").strip())
         translated = _strip_unprinted_lead(translated, unit)
@@ -393,6 +394,14 @@ def _plan_group(
             own_boxes.append(dict(member["bbox"]))
             if member.get("size_px") is not None:
                 exact_quad_sizes[id(quad)] = float(member["size_px"])
+            for island in member.get("islands") or []:
+                b = island.get("bbox") or {}
+                left, top = float(b.get("left") or 0.0), float(b.get("top") or 0.0)
+                w, h = float(b.get("width") or 0.0), float(b.get("height") or 0.0)
+                island_erase_quads.setdefault(id(quad), []).append(
+                    [(int(left), int(top)), (int(left + w), int(top)),
+                     (int(left + w), int(top + h)), (int(left), int(top + h))]
+                )
     if not texts:
         return []
 
@@ -601,8 +610,10 @@ def _plan_group(
     # (which re-wraps) until the floor suffices or the size floor is hit. If the minimum size
     # still cannot fit, leave the original pixels; this catches chatty model replies on tiny
     # OCR-noise cells instead of erasing far beyond the source footprint.
+    group_islands = _group_islands(units, base)
     size = _group_size(planes, render_size_mode)
-    font, lines = _fit_group(joined, size=size, plane_widths=plane_widths, family=family, weight=weight)
+    font, lines = _fit_group(joined, size=size, plane_widths=plane_widths, family=family, weight=weight,
+                             islands=group_islands)
     # A table COLUMN cell that cannot fit its per-line footprints at the source size gets ONE
     # retry with every line at the cell's union width before pt is spent: the union is the
     # cell's own evidence (its widest line spans the column), and a short trailing source line
@@ -624,11 +635,13 @@ def _plan_group(
             if "slack_px" in plane:
                 plane["slack_px"] = 0.0
         plane_widths = [plane["width"] for plane in planes]
-        font, lines = _fit_group(joined, size=size, plane_widths=plane_widths, family=family, weight=weight)
+        font, lines = _fit_group(joined, size=size, plane_widths=plane_widths, family=family, weight=weight,
+                                 islands=group_islands)
     source_size = size
     while size > _MIN_RENDER_SIZE and _raw_condense(font, lines, planes) < _CONDENSE_FLOOR:
         size -= 1
-        font, lines = _fit_group(joined, size=size, plane_widths=plane_widths, family=family, weight=weight)
+        font, lines = _fit_group(joined, size=size, plane_widths=plane_widths, family=family, weight=weight,
+                                 islands=group_islands)
     if _raw_condense(font, lines, planes) < _CONDENSE_FLOOR:
         return []
     if all(plane.get("exact_size") for plane in planes) and size < max(
@@ -734,6 +747,18 @@ def _plan_group(
         erase_quads = [
             _member_erase_quad(quad, pad, min(pad, _ERASE_MARGIN)) for quad in plane["quads"]
         ]
+        # Island ink (the formula pixels the transplant redraws) lives partly OUTSIDE the
+        # prose-based member quads — a radical reaches above the band. Erase it via the
+        # recorded island boxes, grown by the same AA margin.
+        margin = int(min(pad, _ERASE_MARGIN))
+        for quad in plane["quads"]:
+            for box in island_erase_quads.get(id(quad), []):
+                erase_quads.append([
+                    (box[0][0] - margin, box[0][1] - margin),
+                    (box[1][0] + margin, box[1][1] - margin),
+                    (box[2][0] + margin, box[2][1] + margin),
+                    (box[3][0] - margin, box[3][1] + margin),
+                ])
         # A detected bullet glyph sits LEFT of the inset text start (``xmin`` here). OCR often pulls
         # it into the first cell's box, so the per-word erase — grown by ``pad`` — would wipe it. Clip
         # the erase to start AT the text so the glyph survives. (The old single-rectangle erase started
@@ -745,6 +770,38 @@ def _plan_group(
     if base_np is not None and sweep_ok:
         _sweep_stray_ink(base_np, planes, jobs, protected_boxes or [], own_boxes)
     return jobs
+
+def _group_islands(units: list[dict[str, Any]], base: Image.Image) -> dict[str, Any]:
+    """The group's inline pixel islands (islands design doc, phase 4): per ⟦Mn⟧ id an ink
+    MASK cropped from the source raster (before any erase), its source width/height, its
+    vertical offset below the line's ink top, and the line's declared em size — everything
+    ``IslandFont`` needs to measure and transplant the island inside the re-typeset text.
+    The mask (inverted luminance with a paper-noise floor) draws in the line's fill colour,
+    so the transplant recolours and condenses exactly like the glyphs around it."""
+    islands: dict[str, Any] = {}
+    for unit in units:
+        for member in unit.get("members") or []:
+            declared = member.get("size_px")
+            member_top = float((member.get("bbox") or {}).get("top") or 0.0)
+            for island in member.get("islands") or []:
+                bbox = island.get("bbox") or {}
+                left, top = float(bbox.get("left") or 0.0), float(bbox.get("top") or 0.0)
+                w, h = float(bbox.get("width") or 0.0), float(bbox.get("height") or 0.0)
+                x0 = max(0, int(left)); y0 = max(0, int(top))
+                x1 = min(base.width, int(round(left + w))); y1 = min(base.height, int(round(top + h)))
+                if x1 - x0 < 1 or y1 - y0 < 1:
+                    continue
+                crop = base.crop((x0, y0, x1, y1)).convert("L")
+                mask = crop.point(lambda v: max(0, min(255, int((215 - v) * 255 / 175))))
+                islands[str(island.get("id") or "")] = {
+                    "mask": mask,
+                    "w": x1 - x0,
+                    "h": y1 - y0,
+                    "dy": top - member_top,
+                    "declared": float(declared) if declared else float(y1 - y0),
+                }
+    return islands
+
 
 def _plane_source_tokens(quads: list, group_quads: list, quad_tokens: list[set[str]]) -> set[str]:
     """The source words carried by a line cluster's member quads (matched by identity)."""

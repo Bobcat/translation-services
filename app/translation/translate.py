@@ -210,7 +210,13 @@ def translate_units(
                 )
             )
             continue
-        translated = batch.get(unit.id)
+        # An island unit (⟦Mn⟧ tokens in its cell text) must translate from that CELL
+        # text: the structured/hint paths translate the VLM's hint lines, which carry the
+        # VLM's own reading of the math (TeX), never our tokens — the gate below would
+        # reject every one of them. Measured on the live paper: all island units degraded
+        # to preserve through the hint fallback. Per-unit translation carries the tokens.
+        has_islands = bool(_ISLAND_TOKEN_RE.search(source_text))
+        translated = None if has_islands else batch.get(unit.id)
         route = f"{decision.translation_route}_batch"
         if translated is not None and _batch_line_mismatch(source_text, translated):
             # Measured failure mode: on degenerate short input ('A " A- A-') the
@@ -219,9 +225,11 @@ def translate_units(
             # a translation several times longer than its source is not a
             # translation of it. Reroute through the per-unit fallback below.
             translated = None
+        if translated is not None and _island_token_mismatch(source_text, translated):
+            translated = None  # islands lost/invented in the batch reply: retry per unit
         if translated is None:
             hint_index = unit.hint_index
-            if batched and hint_index is not None:
+            if batched and hint_index is not None and not has_islands:
                 fallback = (
                     _translate_hint_line(hint_index)
                     if hint_units and 0 <= hint_index < len(hint_units)
@@ -273,6 +281,14 @@ def translate_units(
                     )
                     continue
                 route = f"{decision.translation_route}_batch_fallback" if batched else decision.translation_route
+        if translated and _island_token_mismatch(source_text, translated):
+            # The islands contract (islands design doc, phase 3): every ⟦Mn⟧ token of the
+            # source must appear exactly once in the translation — reordering is fine (the
+            # island follows its slot in the translated sentence), loss or invention is not:
+            # a lost token would drop a formula, an invented one would paste the wrong crop.
+            # Deterministic gate; on failure the unit stays untranslated (pixels stay).
+            translated = ""
+            route = f"{route}_island_mismatch"
         if (
             translated
             and preserve_unchanged_text
@@ -470,7 +486,8 @@ def _system_prompt(target_lang_code: str, category: str = "") -> str:
     context = f"The text is from this image: {category.strip()}. " if str(category or "").strip() else ""
     return (
         f"You are a translation engine. {context}"
-        f"Translate the user's text into {target}. Return only the translation, nothing else."
+        f"Translate the user's text into {target}. Return only the translation, nothing else. "
+        "Copy any \u27e6...\u27e7 token unchanged, at the position where its content belongs."
     )
 
 
@@ -481,7 +498,8 @@ def _batch_system_prompt(target_lang_code: str, category: str = "") -> str:
         f"You are a translation engine. {context}"
         f"You receive a numbered list of text snippets. Translate EACH snippet into {target}. "
         "Return ONLY a numbered list of the translations, using the SAME numbers and the SAME "
-        "count, one item per line. Do not merge, split, reorder, drop or add items, and write "
+        "count, one item per line. Copy any \u27e6...\u27e7 token unchanged, at the position "
+        "where its content belongs. Do not merge, split, reorder, drop or add items, and write "
         "no other text."
     )
 
@@ -701,6 +719,18 @@ def _mapped_hint_line(
     if text:
         return text, None
     return None
+
+
+_ISLAND_TOKEN_RE = re.compile(r"\u27e6M\d+\u27e7")  # ⟦Mn⟧ inline-island token
+
+
+def _island_token_mismatch(source_text: str, translated: str) -> bool:
+    """The translation must carry exactly the source's ⟦Mn⟧ island tokens (any
+    order). No tokens in the source = nothing to check."""
+    source_tokens = sorted(_ISLAND_TOKEN_RE.findall(str(source_text)))
+    if not source_tokens:
+        return False
+    return sorted(_ISLAND_TOKEN_RE.findall(str(translated))) != source_tokens
 
 
 def _batch_line_mismatch(source_text: str, translated: str) -> bool:

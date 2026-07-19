@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from typing import Any
+from app.replacement.text.fit import IslandFont
 from app.replacement.text.fit import load_font
 from app.replacement.text.fit import break_pieces
 
@@ -45,12 +46,16 @@ def _fit_group(
     plane_widths: list[float],
     family: str | None = None,
     weight: int | None = None,
+    islands: dict[str, Any] | None = None,
 ) -> tuple[Any, list[str]]:
     """Render at the source ``size`` (true line height) in the unit's VLM font ``family`` /
     ``weight``, wrapped so each line fits the width of the plane it lands on (``plane_widths``).
     The font is NOT reduced to fit width — the source size, and thus the header/body hierarchy,
-    is preserved; width is matched by horizontal condensation in the caller."""
+    is preserved; width is matched by horizontal condensation in the caller. ``islands`` wraps
+    the font so ⟦Mn⟧ pixel-island tokens measure (and later draw) at their source width."""
     font = load_font(max(6, min(int(size), 160)), text, family=family, weight=weight)
+    if islands:
+        font = IslandFont(font, islands)
     return font, _wrap_to_planes(font, text, plane_widths)
 
 def _raw_condense(font: Any, lines: list[str], planes: list[dict[str, Any]]) -> float:
