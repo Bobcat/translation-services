@@ -281,6 +281,13 @@ def translate_units(
                     )
                     continue
                 route = f"{decision.translation_route}_batch_fallback" if batched else decision.translation_route
+        if translated and _tex_leak_mismatch(source_text, translated):
+            # The unit's own cells carry no math (formula lines drop before grouping), so a
+            # TeX-bearing translation came from the hint's reading of dropped lines: rendering
+            # it would print markup AND duplicate content whose pixels remain. Preserve —
+            # a fragment retry over the surviving cells would only produce mid-sentence soup.
+            translated = ""
+            route = f"{route}_tex_leak"
         if translated and _island_token_mismatch(source_text, translated):
             # The islands contract (islands design doc, phase 3): every ⟦Mn⟧ token of the
             # source must appear exactly once in the translation — reordering is fine (the
@@ -722,6 +729,29 @@ def _mapped_hint_line(
 
 
 _ISLAND_TOKEN_RE = re.compile(r"\u27e6M\d+\u27e7")  # ⟦Mn⟧ inline-island token
+
+# TeX markup in a TRANSLATION whose source has none is a model artifact, never content:
+# the VLM's grouping hint transcribes formula images as LaTeX, and a unit translated
+# through a hint path prints that markup as literal running text (measured: a page whose
+# formula-dominated lines were dropped rendered "$(x_1, \dots, x_n)$" mid-sentence).
+# A command (\dots, \mathbb) is the strong signal; a $...$ pair counts only when its
+# content looks like math (script/brace/backslash chars, or one short atom like "h_t"),
+# so money amounts ("$5 en $10 samen") stay out of the net.
+_TEX_COMMAND_RE = re.compile(r"\\[a-zA-Z]{2,}")
+_TEX_DOLLAR_RE = re.compile(r"\$([^$]{1,40})\$")
+
+
+def _tex_markup(text: str) -> bool:
+    if _TEX_COMMAND_RE.search(text):
+        return True
+    return any(
+        re.search(r"[_^{}\\]", content) or re.fullmatch(r"[A-Za-z0-9]{1,4}", content.strip())
+        for content in _TEX_DOLLAR_RE.findall(text)
+    )
+
+
+def _tex_leak_mismatch(source_text: str, translated: str) -> bool:
+    return _tex_markup(str(translated)) and not _tex_markup(str(source_text))
 
 
 def _island_token_mismatch(source_text: str, translated: str) -> bool:

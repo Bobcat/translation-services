@@ -886,3 +886,45 @@ def test_island_unit_with_lost_token_stays_untranslated(monkeypatch) -> None:
 
     assert out[1].translated_text == ""  # gate: pixels stay
     assert out[1].translation_route.endswith("_island_mismatch")
+
+
+def test_tex_leak_mismatch_gate() -> None:
+    from app.translation.translate import _tex_leak_mismatch
+
+    # The measured leak: a hint-path translation carrying the VLM's TeX reading of
+    # dropped formula lines, while the unit's own cells have no math at all.
+    assert _tex_leak_mismatch("plain prose", "序列 $(x_1, \\dots, x_n)$ 映射")
+    assert _tex_leak_mismatch("plain prose", "de toestand $h_t$ en invoer $t$")
+    assert _tex_leak_mismatch("plain prose", "waarbij \\mathbb{R}^d de ruimte is")
+    # Money pairs and plain prose stay out of the net.
+    assert not _tex_leak_mismatch("costs $5 and $10", "kost $5 en $10 samen")
+    assert not _tex_leak_mismatch("plain", "gewone vertaling")
+    # A source that itself carries the markup (a document ABOUT TeX) is exempt.
+    assert not _tex_leak_mismatch("source with $(x_1, \\dots)$", "vertaling met $(x_1, \\dots)$")
+
+
+def test_tex_bearing_batch_translation_degrades_to_preserve(monkeypatch) -> None:
+    calls: list[dict] = []
+
+    def fake_post(url, json, timeout):  # noqa: A002
+        calls.append(json)
+        return _FakeResponse({"output_text": "Kaarthouder\n###\n序列 $(x_1, \\dots, x_n)$ 映射到"})
+
+    monkeypatch.setattr(translate_module.httpx, "post", fake_post)
+
+    out = translate_units(
+        settings=AppSettings(),
+        units=[
+            _unit(1, "Kaarthouder", hint_index=0),
+            _unit(2, "sequence of symbol representations to another", hint_index=1),
+        ],
+        source_lang_code="en",
+        target_lang_code="zh",
+        translator_model="gemma",
+        translator_mode="generic",
+        hint_units=["Kaarthouder", "sequence of symbol representations $(x_1, ..., x_n)$ to another"],
+        hint_block_ids=[0, 1],
+    )
+
+    assert out[1].translated_text == ""  # pixels stay: no literal TeX, no duplicate content
+    assert out[1].translation_route.endswith("_tex_leak")

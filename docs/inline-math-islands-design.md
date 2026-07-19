@@ -129,6 +129,15 @@ Three findings from the first live runs, each now part of the design:
   of a display equation are set in the math ecosystem's roman, not the body
   face) together classify formula lines; the CM text faces collapse to one
   family so pure-CM prose passes.
+- **TeX-leak gate (found by a black-box output review).** A unit NEXT TO
+  dropped formula lines has no islands, so it translated through the hint
+  paths — and the hint carries the VLM's TeX reading of the dropped math,
+  which rendered as literal running text ("$(x_1, \dots, x_n)$" mid-sentence)
+  while duplicating content whose pixels remain. Gate: TeX markup in a
+  translation whose source has none is a model artifact, never content — the
+  unit degrades to preserve (a fragment retry over the surviving cells would
+  only produce mid-sentence soup). Money pairs ("$5 and $10") stay out of the
+  net. Measured on the paper: 11 units preserved, zero TeX in the output.
 
 ## Named limits
 
