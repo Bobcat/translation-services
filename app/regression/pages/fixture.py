@@ -13,6 +13,7 @@ rendered image read back). Both are plain JSON on disk under ``testset/_regressi
 from __future__ import annotations
 
 import hashlib
+import re
 import json
 from dataclasses import dataclass
 from dataclasses import field
@@ -192,3 +193,60 @@ def source_path(variant_path: Path) -> Path | None:
         if child.is_file():
             return child
     return None
+
+
+def _raw_hint(llm_calls: list[dict[str, Any]]) -> str:
+    for call in llm_calls:
+        if "grouping" in str(call.get("role") or "").lower():
+            return str((call.get("response") or {}).get("output_text") or "")
+    return ""
+
+
+def build_fixture(response: dict[str, Any], *, source_bytes: bytes) -> Fixture:
+    ocr = response.get("ocr") or {}
+    metadata = response.get("metadata") or {}
+    units = ocr.get("translation_units") or []
+    hint_translations: dict[str, dict[str, Any]] = {}
+    leftover_translations: dict[str, dict[str, Any]] = {}
+    for unit in units:
+        entry = {
+            "translated_text": unit.get("translated_text") or "",
+            "field_translations": unit.get("field_translations"),
+        }
+        hint_index = unit.get("hint_index")
+        if hint_index is not None:
+            hint_translations[str(hint_index)] = entry      # the hint line's translation
+        else:
+            leftover_translations[anchor_key(unit)] = entry  # a cell with no hint line
+    return Fixture(
+        image_sha256=sha256(source_bytes),
+        cells=ocr.get("cells") or [],
+        raw_hint=_raw_hint(response.get("llm_calls") or []),
+        hint_translations=hint_translations,
+        leftover_translations=leftover_translations,
+        request_flags={
+            "preserve_heuristic_text": bool(metadata.get("preserve_heuristic_text", True)),
+            "preserve_unchanged_text": bool(metadata.get("preserve_unchanged_text", False)),
+            "use_geometry_columns": bool(metadata.get("use_geometry_columns", True)),
+            "render_size_mode": str(metadata.get("render_size_mode") or "min"),
+            "erase_fill_mode": str(metadata.get("erase_fill_mode") or "flat"),
+            "width_fit_mode": str(metadata.get("width_fit_mode") or "footprint"),
+            "size_metric_mode": str(metadata.get("size_metric_mode") or "extent"),
+            "size_cohort_mode": str(metadata.get("size_cohort_mode") or "off"),
+        },
+        grouping_model=str(metadata.get("grouping_model") or ""),
+        target_lang=str(metadata.get("target_lang_code") or ""),
+        layout_regions=list(metadata.get("layout_regions") or []),
+    )
+
+
+def _next_variant(lang_dir: Path) -> str:
+    """The next free ``vN`` under a ``<name>/<lang>`` dir (max existing + 1, so a deleted variant
+    never collides)."""
+    nums = []
+    if lang_dir.exists():
+        for child in lang_dir.iterdir():
+            match = re.fullmatch(r"v(\d+)", child.name)
+            if child.is_dir() and match:
+                nums.append(int(match.group(1)))
+    return f"v{(max(nums) + 1) if nums else 1}"

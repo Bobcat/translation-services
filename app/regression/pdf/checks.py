@@ -3,7 +3,7 @@
 These guard the parts of ``translate_pdf`` that sit OUTSIDE the per-page align/render chain but
 inside our own code: the census (``app.pdf.document``), the raster (``app.pdf.raster`` + engine),
 the text-layer extraction (``app.pdf.textlayer``) and the assembly (``app.pdf.assemble``). Each
-returns human-readable mismatch strings (empty list = pass), like ``app.regression.compare``.
+returns human-readable mismatch strings (empty list = pass), like ``app.regression.pages.compare``.
 
 A non-empty census / raster / extraction diff means a FROZEN INPUT no longer reproduces from
 ``source.pdf`` — the frozen hint and translations belong to the old derivation, so such a diff is

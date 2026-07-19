@@ -12,8 +12,8 @@ from typing import Any
 
 from app.core.config import OcrSettings
 from app.ocr import run_raw_ocr
-from app.regression.fixture import Snapshot
-from app.regression.fixture import expected_unit_of
+from app.regression.pages.fixture import Snapshot
+from app.regression.pages.fixture import expected_unit_of
 
 # Translation target codes the renderer produces, mapped to the PaddleOCR model codes (it uses
 # 'ch'/'japan'/'korean', not 'zh'/'ja'/'ko' — the raw codes raise "no models available"). Latin
@@ -70,3 +70,39 @@ def build_snapshot(
         ignored_cells=sorted(int(c) for c in ignored_cells),
         reocr=reocr_rows(ocr_settings, rendered_png, target_lang),
     )
+
+
+# Box colours for the reviewer's marked-up snapshot: where a segment disappeared or moved
+# (red), and where an extra segment sits in the actual (orange).
+_DIFF_BOX_COLORS = {"missing": (220, 30, 30), "moved": (220, 30, 30), "extra": (235, 140, 20)}
+
+
+_DIFF_BOX_PAD = 6
+
+
+_DIFF_BOX_WIDTH = 3
+
+
+def write_snapshot_diff(variant_path, boxes: list[dict[str, Any]]) -> None:
+    """``snapshot_diff.png``: the snapshot with a box around every mismatched re-OCR segment,
+    so a reviewer flipping snapshot/actual sees WHERE to look instead of searching. Only the
+    snapshot copy is marked — the actual stays clean for judging (and re-baselining). Align-only
+    failures yield no boxes; the unmarked copy is still written so the viewer never 404s.
+    Public: the pdf document harness writes the same artifact per page dir."""
+    snapshot_png = variant_path / "snapshot.png"
+    if not snapshot_png.exists():
+        return
+    from PIL import Image
+    from PIL import ImageDraw
+
+    image = Image.open(snapshot_png).convert("RGB")
+    draw = ImageDraw.Draw(image)
+    for box in boxes:
+        left = int(box["left"]) - _DIFF_BOX_PAD
+        top = int(box["top"]) - _DIFF_BOX_PAD
+        right = int(box["left"]) + int(box["width"]) + _DIFF_BOX_PAD
+        bottom = int(box["top"]) + int(box["height"]) + _DIFF_BOX_PAD
+        draw.rectangle((left, top, right, bottom),
+                       outline=_DIFF_BOX_COLORS.get(box.get("kind"), (220, 30, 30)),
+                       width=_DIFF_BOX_WIDTH)
+    image.save(variant_path / "snapshot_diff.png")

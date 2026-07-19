@@ -155,8 +155,8 @@ truncated per-line reply degrades to empty. RG3 — the capture CLI refuses a
 cell-less (retranslate) response with a pointer to the grafting endpoint,
 and reports a duplicate instead of crashing on it.
 
-Still open from the review: only the `merging.py` removal proposal
-(production-dead; awaiting explicit approval) — everything else is done.
+Everything from the review is done. The last item, the `merging.py` removal
+proposal (O6, production-dead), was approved and executed on 2026-07-19.
 User-side: the min/median A/B evaluation and the zh verification.
 
 ## Grouping — alignment (app/grouping/align.py)

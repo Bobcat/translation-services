@@ -3,7 +3,7 @@
 
 The CLI precursor of POST /v1/regression/fixtures: it freezes exactly the result that just ran
 (no re-run). Fetches the request response + rendered artifact over HTTP, then delegates to
-``app.regression.capture``.
+``app.regression.image.capture``.
 
     python scripts/capture_fixture.py --request-id <id> --name nike-ad --variant v1
 """
@@ -17,7 +17,7 @@ import httpx
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from app.core.config import load_settings
-from app.regression import capture as cap
+from app.regression.image import capture as cap
 
 
 def main() -> int:

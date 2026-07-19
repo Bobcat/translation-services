@@ -5,7 +5,9 @@ What the numbers in the PDF-testing comparison mean, how they are produced, and
 taught us each time. The design history and API/storage details live in
 `pdf-benchmark-regression-design.md`; this document is the method as it stands.
 
-Status: describes scoring v5 (2026-07-18).
+Status: describes scoring rev 5 (2026-07-18). The rev number is a change
+counter of the scoring function — it identifies which code produced a stored
+`scores.json` — not a maturity level.
 
 ---
 
@@ -117,20 +119,20 @@ glyph the OCR cannot read on either side still counts against the pair.
 Every retirement below was forced by a measured case, not by taste. The frozen
 measurements made each one cheap to verify and retroactive to apply.
 
-**"Completeness" → changed/unchanged/missing (v2).** The original completeness
+**"Completeness" → changed/unchanged/missing (rev 2).** The original completeness
 axis mixed two things a pair cannot distinguish: a deliberately kept proper
 noun and a missed translation. The split into observable states — changed,
 unchanged, missing — moved the judgement out of the metric; the unchanged
 share became an indicator to compare across systems instead of a score.
 
-**Naive region matching → granularity-aware matching (v3).** The detector
+**Naive region matching → granularity-aware matching (rev 3).** The detector
 reports splits, merges, nested and duplicate regions that are not layout
 changes. Case: region pairs with visibly identical content scored as
-lost+invented because one side's detector cut the block in two. v3 dedupes
+lost+invented because one side's detector cut the block in two. Rev 3 dedupes
 duplicates, classifies split/merge/nested coverage as "covered" (excluded),
 and weights by sqrt(area) so captions cannot outvote page structure.
 
-**Detector threshold 0.5 → 0.4, measurement-only (v4).** A page header —
+**Detector threshold 0.5 → 0.4, measurement-only (rev 4).** A page header —
 the most prominent element on the page — vanished from an externally
 re-rendered copy that is visually identical to the source: the detector kept
 localising it correctly but split its confidence across competing classes
@@ -142,7 +144,7 @@ removes full-page image regions the translation pipeline's preserve/gate logic
 depends on (measured on 14 of 265 testset pages) — so the pipeline keeps the
 model default, and the two configurations are one explicit parameter apart.
 
-**Retention axis → anchors + volume (v5).** Retention (100 − missing share)
+**Retention axis → anchors + volume (rev 5).** Retention (100 − missing share)
 was presented as text survival but rode entirely on the same region matching
 as L: a source segment counted "missing" when its *region* found no
 counterpart. Case: a re-typesetting system scored retention 84 while its
@@ -184,6 +186,6 @@ exists for.
 - Design, storage, API, regression coupling and the detector appendix:
   `pdf-benchmark-regression-design.md`.
 - Implementation: `app/benchmark/measurement.py` (layer a),
-  `app/benchmark/scoring.py` (layer b, pure).
+  `app/benchmark/scoring/` (layer b, pure).
 - CLI: `scripts/benchmark.py` — `measure`, `identity`, `rescore` (cheap,
   retroactive), `remeasure` (GPU, after measurement-layer changes), `report`.

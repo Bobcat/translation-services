@@ -63,11 +63,11 @@ untranslated blocks than a competitor that re-typesets everything. Axes:
 | Axis | Measures | How |
 |---|---|---|
 | **Layout** | does the structure survive? | PP-DocLayout on both renders; class-aware region matching (IoU); mean matched overlap, penalties for lost/invented regions |
-| **Anchors** | did the translation-invariant content survive? | digit anchors from the source re-OCR — NFKC-normalized, o/O folded to 0 inside digit-bearing tokens (the measured OCR confusion class: "2o25", "235,ooo"), grouping/decimal separators stripped, leading zeros stripped ("07 July" equals a localized "7 juli"), and only numbers of ≥2 significant digits count — matched as a document-wide multiset against the target re-OCR. Detector-free and translation-style-free; losing a number is wrong under every interpretation (v5; replaces the retired Retention axis, see below) |
+| **Anchors** | did the translation-invariant content survive? | digit anchors from the source re-OCR — NFKC-normalized, o/O folded to 0 inside digit-bearing tokens (the measured OCR confusion class: "2o25", "235,ooo"), grouping/decimal separators stripped, leading zeros stripped ("07 July" equals a localized "7 juli"), and only numbers of ≥2 significant digits count — matched as a document-wide multiset against the target re-OCR. Detector-free and translation-style-free; losing a number is wrong under every interpretation (rev 5; replaces the retired Retention axis, see below) |
 | **Typography** | legible and proportional? | text overflowing its matched region; font-size *ratio* drift between levels (readers notice broken ratios, not absolute sizes) |
 | **Structure flags** | hard yes/no | page count, image-region count, table-region count equal. Flags, not scores — a dropped page is not "−12 points", it is broken |
 
-**Retention retired as an axis (scoring v5).** The v1 Retention axis (100 −
+**Retention retired as an axis (scoring rev 5).** The v1 Retention axis (100 −
 missing share) judged a source segment missing when its *region* found no
 counterpart — it rode on the same region matching as Layout. Measured on a
 re-typesetting external system: all 40 "missing" segments arrived via lost
@@ -108,7 +108,7 @@ then soft. Later, as a separate, clearly-labelled advisory axis.
    flag, score the aligned prefix).
 2. PP-DocLayout on both sides → regions per page.
 3. Region matching: class-aware, greedy on IoU, with two granularity filters
-   (scoring v3, each motivated by a measured artifact): near-identical
+   (scoring rev 3, each motivated by a measured artifact): near-identical
    same-family detections on one side are deduped, and an unmatched region
    whose area is largely covered by same-family regions on the other side is
    "covered" — a detector split/merge/nested detection, excluded from the
@@ -210,7 +210,7 @@ Therefore every run persists layer (a)'s output as `measurement.json`
 (regions + OCR segments per page, tens of KB). Scoring becomes a pure function
 over it: any scoring change can be recomputed **retroactively over the whole
 history, including external uploads**, keeping the comparison matrix internally
-consistent across scoring versions. The "scores only comparable within a
+consistent across scoring revisions. The "scores only comparable within a
 version" constraint then applies only to the measurement layer. Side benefit:
 scoring unit tests get real frozen measurement data as fixtures, and a
 surprising score can be recomputed offline without a GPU.
@@ -236,7 +236,7 @@ Benchmark data is a persistent dataset, outside the TTL'd `work_root`:
 data/benchmark/<doc-id>/<system-label>/<run>/
   source.pdf  translated.pdf     # ground truth (re-measurable)
   measurement.json               # regions + OCR segments per page; schema/model versions, dpi
-  scores.json                    # scoring version + per-axis results (derivable from measurement)
+  scores.json                    # scoring revision + per-axis results (derivable from measurement)
 ```
 
 System labels are user input (data — external product names are fine there;
@@ -394,7 +394,7 @@ threshold turns that ambiguity into a hard miss. Class-confusion inside the
 text family is harmless to the benchmark (matching is family-level); the
 threshold cliff is what hurt.
 
-**Remedy (scoring v4).** The measurement layer detects at threshold **0.4**
+**Remedy (scoring rev 4).** The measurement layer detects at threshold **0.4**
 (recorded per measurement as `models.layout_threshold`), and scoring's region
 floor follows (`_REGION_MIN_SCORE` 0.4). On the case above the block returns
 as `doc_title` 0.42 and matches the source `header` at IoU 0.97; the page's
@@ -426,7 +426,7 @@ reproduces them exactly. Residual, accepted: on chart-heavy documents
 sensitive to off-by-one detector variance; a relative tolerance would be a
 later scoring refinement.
 
-**Addendum — retention was the second casualty (scoring v5, same day).**
+**Addendum — retention was the second casualty (scoring rev 5, same day).**
 Decomposing the retention score of a re-typesetting external system on pdf-02
 showed every one of its 40 "missing" segments arrived via the lost-region
 mechanism and none via an empty matched region — retention was fully
@@ -437,7 +437,7 @@ equal-or-more text than the source (per-page script-aware volume ratios
 retention axis was retired in favour of the detector-free **anchors** axis
 (digit-signature multiset, document-wide) with the **volume ratio** indicator
 as the coarse backstop; the old value survives as the `region_retention`
-indicator. See §Axes for the definitions and the named limits. After the v5
+indicator. See §Axes for the definitions and the named limits. After the rev 5
 rescore (pure CPU, retroactive over all stored measurements): identity anchors
 exactly 100 with volume ratio 1.00 on all six documents; the re-typesetting
 system's pdf-02 text survival reads 87.8 on anchors (volume ×1.12) instead of

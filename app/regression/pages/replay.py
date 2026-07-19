@@ -12,8 +12,8 @@ from typing import Any
 
 from app.grouping import group_cells_into_units
 from app.grouping.hint_parser import parse_grouping_output
-from app.regression.fixture import Fixture
-from app.regression.fixture import expected_unit_of
+from app.regression.pages.fixture import Fixture
+from app.regression.pages.fixture import expected_unit_of
 from app.replacement import render_translated_image
 from app.tasks.translate_image import _units_for_preserve_heuristic_text
 

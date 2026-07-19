@@ -18,7 +18,7 @@ from app.pdf.assemble import PageImage
 from app.pdf.assemble import assemble_pdf
 from app.pdf.document import profile_pdf
 from app.pdf.textlayer import PageTextExtractor
-from app.regression.capture import build_fixture
+from app.regression.pages.fixture import build_fixture
 from app.regression.pdf import checks
 from app.regression.pdf import fixture as dfx
 from app.regression.pdf.capture import _grouping_model

@@ -7,10 +7,14 @@ stable. The approved expected result is a **snapshot**: the align structure (uni
 cells) and the re-OCR of the rendered image. A regression run replays each fixture and diffs:
 align exactly, render behaviourally via re-OCR (text + position).
 
+The package mirrors the two harnesses: ``pages`` holds the shared per-page machinery
+(fixture/snapshot model, replay, compare, re-OCR), ``image`` the image-fixture flow that
+consumes it directly, and ``pdf`` the document harness that reuses it per page.
+
 See ``docs/regression-test-design.md`` for the full design.
 """
-from app.regression.fixture import Fixture
-from app.regression.fixture import Snapshot
-from app.regression.replay import replay_fixture
+from app.regression.pages.fixture import Fixture
+from app.regression.pages.fixture import Snapshot
+from app.regression.pages.replay import replay_fixture
 
 __all__ = ["Fixture", "Snapshot", "replay_fixture"]

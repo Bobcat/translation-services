@@ -31,14 +31,14 @@ from app.pdf.assemble import assemble_pdf
 from app.pdf.document import profile_pdf
 from app.pdf.raster import PageRasterizer
 from app.pdf.textlayer import PageTextExtractor
-from app.regression import fixture as fx
-from app.regression.compare import diff_units
-from app.regression.compare import reocr_mismatches
+from app.regression.pages import fixture as fx
+from app.regression.pages.compare import diff_units
+from app.regression.pages.compare import reocr_mismatches
 from app.regression.pdf import checks
 from app.regression.pdf import fixture as dfx
-from app.regression.replay import replay_fixture
-from app.regression.run import write_snapshot_diff
-from app.regression.snapshot import reocr_rows
+from app.regression.pages.replay import replay_fixture
+from app.regression.pages.snapshot import write_snapshot_diff
+from app.regression.pages.snapshot import reocr_rows
 
 
 @dataclass
@@ -246,7 +246,7 @@ def _score_replay(
     the current scoring code. Lazy imports: only --score loads the measurement stack."""
     from app.benchmark.measurement import measure_pair
     from app.benchmark.scoring import score_measurement
-    from app.regression.snapshot import ocr_language_for_target
+    from app.regression.pages.snapshot import ocr_language_for_target
 
     assert replay.assembled_pdf is not None
     with TemporaryDirectory(prefix="pdf-replay-score-") as tmp:

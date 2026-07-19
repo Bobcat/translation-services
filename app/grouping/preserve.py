@@ -1,9 +1,10 @@
-"""Small, self-contained grouping heuristics.
+"""The preserve policy: pure predicates deciding which text keeps its original pixels.
 
-Pure predicates the aligner (and the translator) consult — each a single text or geometry rule
-with a magic threshold or two, collected here so the rules read as a list instead of being
-scattered through the alignment algorithm. No alignment state: every function takes plain
-cell/text/box data, so this module has no dependency on ``align``.
+Each is a single text or geometry rule with a magic threshold or two, collected here so the
+policy reads as a list instead of being scattered through the alignment algorithm. Consulted
+by align (member translate flags, symbolic-label units, icon fragments), by the translator
+(skip routing) and by the table renderer — no alignment state, plain cell/text/box data only.
+This is what the ``preserve_heuristic_text`` request flag switches.
 """
 from __future__ import annotations
 
@@ -13,7 +14,8 @@ from typing import Any
 
 from app.grouping.tokens import _token_score
 from app.grouping.tokens import _tokens
-
+from app.grouping.units import _cell_box
+from app.grouping.units import _near
 
 # Below this fraction of the line's text height a same-unit member is treated as an icon/badge
 # label rather than body text (see _is_icon_fragment).
@@ -62,43 +64,6 @@ def _is_symbolic_label(text: str) -> bool:
     if any(char.islower() for char in stripped):
         return False
     return not _LETTER_PAIR.search(stripped)
-
-
-def _is_continuation(previous_cell: dict[str, Any] | None, cell: dict[str, Any]) -> bool:
-    """A wrapped continuation line starts at ~the same left margin as, and directly
-    below, its element's previous line. A price in the right column or the next row of
-    a receipt does not qualify, so genuinely repeated rows ("BONUS ...") still bind by
-    position."""
-    if previous_cell is None:
-        return False
-    prev, this = previous_cell.get("bbox") or {}, cell.get("bbox") or {}
-    height = float(this.get("height") or 0.0) or float(prev.get("height") or 0.0)
-    if height <= 0:
-        return False
-    drop = float(this.get("top") or 0.0) - float(prev.get("top") or 0.0)
-    indent = abs(float(this.get("left") or 0.0) - float(prev.get("left") or 0.0))
-    return 0 < drop <= 2.5 * height and indent <= 2.0 * height
-
-
-def _near(a: tuple[float, ...], b: tuple[float, ...]) -> bool:
-    """Two boxes are adjacent enough to be one wrapped element: x-ranges overlap and they are
-    vertically close (stacked onto the next row), or y-ranges overlap and they are horizontally
-    close (split across one line). A far-off box (an embedded image, a far column) is neither."""
-    height = max(a[3] - a[1], b[3] - b[1], 1.0)
-    x_overlap = min(a[2], b[2]) > max(a[0], b[0])
-    y_overlap = min(a[3], b[3]) > max(a[1], b[1])
-    y_gap = max(0.0, max(a[1], b[1]) - min(a[3], b[3]))
-    x_gap = max(0.0, max(a[0], b[0]) - min(a[2], b[2]))
-    stacked = x_overlap and y_gap <= 1.5 * height       # wrapped onto the next line
-    same_line = y_overlap and x_gap <= 2.0 * height     # split across one line ("... nooit.")
-    return stacked or same_line
-
-
-def _cell_box(cell: dict[str, Any]) -> tuple[float, float, float, float]:
-    bbox = cell.get("bbox") or {}
-    left = float(bbox.get("left") or 0.0)
-    top = float(bbox.get("top") or 0.0)
-    return left, top, left + float(bbox.get("width") or 0.0), top + float(bbox.get("height") or 0.0)
 
 
 def _is_icon_fragment(

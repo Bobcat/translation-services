@@ -5,7 +5,7 @@ from typing import Any
 import re
 import difflib
 import unicodedata
-from app.grouping.heuristics import _is_nontranslatable
+from app.grouping.preserve import _is_nontranslatable
 
 
 # Minimum source-text similarity to bind a table-row field to a cell. Below it the row is

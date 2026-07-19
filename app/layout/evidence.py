@@ -1,9 +1,7 @@
-"""Stage #5b layout evidence: document-structure regions from a PaddleX detection model.
+"""What the pipeline concludes from detected layout regions over OCR cells.
 
-``detect_layout_regions`` runs PP-DocLayout over the input image (~30-80ms warm on GPU; the
-pipeline starts it in parallel with the multi-second grouping-VLM call, so its wall-clock cost
-is hidden). The regions feed ``app.grouping.align`` with two things reading-order text matching
-cannot provide:
+The regions (``app.layout.detector``) feed ``app.grouping.align`` with two things
+reading-order text matching cannot provide:
 
   - COLUMNS: on a multi-column page (main text + a metadata sidebar; a two-column article) the
     cells of separate logical flows interleave in y, which breaks align's "lower on the page ->
@@ -13,39 +11,20 @@ cannot provide:
     reader must compare against the real UI, and re-painting inside a plot smears bars and
     gridlines. Those cells keep their original pixels (align routes them to ``ignored_cell_ids``).
 
-Layout is auxiliary evidence, never a gate on the job: detection failure returns ``[]`` and the
-pipeline behaves exactly as before. The ``document_gate`` below decides whether the evidence is
-trusted AT ALL — it judges the layout model's own confidence (enough high-score text regions,
-enough of the cells covered), NOT align's confidence. On scene photos and receipts the model
-itself reports few/low-score regions, the gate stays closed, and behaviour is bit-for-bit the
-pre-layout pipeline (measured closed on all 51 regression fixtures at introduction time).
+Layout is auxiliary evidence, never a gate on the job. The ``document_gate`` below decides
+whether the evidence is trusted AT ALL — it judges the layout model's own confidence (enough
+high-score text regions, enough of the cells covered), NOT align's confidence. On scene photos
+and receipts the model itself reports few/low-score regions, the gate stays closed, and
+behaviour is bit-for-bit the pre-layout pipeline (measured closed on all 51 regression fixtures
+at introduction time).
 """
 from __future__ import annotations
 
-import threading
-from pathlib import Path
 from typing import Any
 
-_MODEL_NAME = "PP-DocLayout_plus-L"
-
-
-# Engine cache + locks, the app.ocr.paddleocr pattern: the predictor is not assumed thread-safe,
-# so prediction serialises on one lock; building the engine (~3.3s + ~770 MiB VRAM, lazy on first
-# use) must not block a warm predict, hence a separate build lock with double-checked caching.
-_ENGINE: Any = None
-_BUILD_LOCK = threading.Lock()
-_PREDICT_LOCK = threading.Lock()
-
-# Labels that are document FLOW text: evidence for the gate and members of column clustering.
-TEXT_LABELS = {
-    "text", "content", "paragraph_title", "doc_title", "abstract", "aside_text",
-    "list", "header", "footer", "figure_title", "table_title", "reference",
-}
-# Labels whose inner text keeps its original pixels (see module docstring).
-PRESERVE_LABELS = {"image", "chart"}
-# Labels that are document structure but not flow columns; their cells count as document
-# evidence for the gate yet keep the global position estimate (a table has its own geometry).
-STRUCTURE_LABELS = {"table"}
+from app.layout.detector import PRESERVE_LABELS
+from app.layout.detector import STRUCTURE_LABELS
+from app.layout.detector import TEXT_LABELS
 
 _GATE_MIN_TEXT_REGIONS = 3   # this many confident text regions, or the page is no document
 _GATE_REGION_SCORE = 0.7     # region confidence for the gate and for preserve
@@ -53,47 +32,6 @@ _ASSIGN_REGION_SCORE = 0.6   # region confidence for cell->region assignment
 _GATE_MIN_FREE_COVER = 0.5   # of the cells outside preserve/table regions: fraction in text regions
 _COLUMN_FUSE_OVERLAP = 0.5   # x-overlap needed to join a column, vs the narrower of the two
 _COLUMN_FUSE_STRONG = 0.7    # the stricter bar when a region touches SEVERAL columns at once
-
-
-def detect_layout_regions(input_path: Path, *, threshold: float | None = None) -> list[dict[str, Any]]:
-    """``[{"label", "score", "coordinate": [x0, y0, x1, y1]}]`` — ``[]`` on ANY failure (missing
-    model, no GPU, decode error): layout evidence is optional, the job must not fail on it.
-
-    ``threshold`` overrides the model's default detection threshold (0.5) and exists for the
-    benchmark measurement layer ONLY (see the detector appendix in
-    docs/pdf-benchmark-regression-design.md). The pipeline always calls without it: the kwarg is
-    NOT a post-hoc score filter — it feeds the model's internal postprocess, and lowering it was
-    measured to DROP full-page image regions on photo/scan pages (14 of 265 testset pages), which
-    would flip the preserve/gate behaviour above. Same for ``layout_nms``, measured to suppress
-    those regions too; neither may silently change what align sees."""
-    try:
-        engine = _get_engine()
-        kwargs = {} if threshold is None else {"threshold": threshold}
-        with _PREDICT_LOCK:
-            output = list(engine.predict(str(input_path), batch_size=1, **kwargs))
-        boxes = (output[0].get("boxes") or []) if output else []
-        return [
-            {
-                "label": str(box.get("label") or ""),
-                "score": float(box.get("score") or 0.0),
-                "coordinate": [float(v) for v in (box.get("coordinate") or [])[:4]],
-            }
-            for box in boxes
-            if len(box.get("coordinate") or []) >= 4
-        ]
-    except Exception:  # noqa: BLE001 - auxiliary evidence, never job-fatal
-        return []
-
-
-def _get_engine() -> Any:
-    global _ENGINE
-    if _ENGINE is None:
-        with _BUILD_LOCK:
-            if _ENGINE is None:
-                from paddlex import create_model
-
-                _ENGINE = create_model(_MODEL_NAME)
-    return _ENGINE
 
 
 def document_gate(regions: list[dict[str, Any]], cells: list[dict[str, Any]]) -> bool:

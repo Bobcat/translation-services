@@ -1,6 +1,7 @@
-"""Route modules registered by the composition root (``app.main.create_app``).
+"""The HTTP surface, one module per concern, registered by ``app.main.create_app``.
 
-Each module exposes ``register(app, *, settings, runtime)`` and keeps its endpoints' closures
-over the shared runtime/settings, exactly like the routes that remain in ``app.main``. The core
-request/prompt/regression-image routes stay in ``app.main``; this package holds the surfaces
-that grew past it (pdf benchmark, pdf document regression)."""
+Each module exposes ``register(app, *, settings, runtime)`` and keeps its endpoints as
+closures over the shared runtime/settings: ``requests`` (job submission + lifecycle),
+``prompts`` (prompt library CRUD), ``image_regression`` and ``pdf_regression`` (the two
+replay harnesses), ``benchmark`` (the document-pair benchmark), with the shared error
+dialect and upload ceiling in ``common``."""

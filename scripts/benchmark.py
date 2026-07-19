@@ -124,7 +124,7 @@ def cmd_rescore(args: argparse.Namespace) -> int:
         if before is None or (before.get("axes") != after.get("axes")):
             changed += 1
             print(f"changed  {run.doc_id}/{run.system}/{run.run_id}  {_axes_line(after)}")
-    print(f"re-scored with scoring v{SCORING_VERSION}; {changed} run(s) changed")
+    print(f"re-scored with scoring rev {SCORING_VERSION}; {changed} run(s) changed")
     return 0
 
 

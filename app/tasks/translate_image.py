@@ -26,7 +26,7 @@ from typing import Callable
 from app.core.config import AppSettings
 from app.grouping import group_cells_into_units
 from app.grouping import request_grouping_hint
-from app.grouping.layout import detect_layout_regions
+from app.layout import detect_layout_regions
 from app.grouping.field_geometry import geometry_adjusted_hints
 from app.grouping.overlay import render_grouping_overlay_debug
 from app.grouping.units import TranslationUnit

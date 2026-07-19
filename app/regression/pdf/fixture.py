@@ -7,7 +7,7 @@ A document fixture is a directory ``testset/pdf/_regression/<stem>/<lang>/<vN>/`
   the per-page census (size, rotation, class, cell source) the replay re-derives and diffs,
 - ``accepted.pdf`` + ``accepted_scores.json`` — the approved assembled output and its frozen
   benchmark score (the yardstick of the re-baseline decision),
-- ``pages/page-NNN/`` — one IMAGE fixture per page (``app.regression.fixture`` schema, reused
+- ``pages/page-NNN/`` — one IMAGE fixture per page (``app.regression.pages.fixture`` schema, reused
   verbatim): frozen cells/hint/translations, approved snapshot, approved render.
 
 Page rasters are not stored: they are deterministically reproducible from ``source.pdf`` at the

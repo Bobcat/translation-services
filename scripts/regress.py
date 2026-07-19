@@ -3,7 +3,7 @@
 
 Each ``<name>/<lang>/<variant>`` is replayed (parse -> align -> render), the render re-OCR'd, and
 compared (align exactly, render via re-OCR). Exits non-zero if any variant fails. Delegates to
-``app.regression.run`` so the CLI and the /v1/regression/run endpoint behave identically.
+``app.regression.image.run`` so the CLI and the /v1/regression/run endpoint behave identically.
 
     python scripts/regress.py
     python scripts/regress.py --root testset/_regression
@@ -16,7 +16,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from app.core.config import load_settings
-from app.regression.run import run_variant
+from app.regression.image.run import run_variant
 
 
 def _variant_dirs(root: Path) -> list[tuple[str, str, Path]]:

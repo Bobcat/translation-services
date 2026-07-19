@@ -19,7 +19,6 @@ def run_raw_ocr(
         settings,
         input_path,
         language=language,
-        merge_lines=False,
     )
 
 

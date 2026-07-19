@@ -18,7 +18,7 @@ from typing import Any
 import pymupdf
 
 from app.core.config import AppSettings
-from app.grouping.layout import detect_layout_regions
+from app.layout import detect_layout_regions
 from app.ocr import run_raw_ocr
 
 SCHEMA_VERSION = 1

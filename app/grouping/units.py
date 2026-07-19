@@ -168,3 +168,24 @@ def union_bbox(bboxes: list[dict[str, int]]) -> dict[str, int]:
         "width": max(0, right - left),
         "height": max(0, bottom - top),
     }
+
+
+def _cell_box(cell: dict[str, Any]) -> tuple[float, float, float, float]:
+    bbox = cell.get("bbox") or {}
+    left = float(bbox.get("left") or 0.0)
+    top = float(bbox.get("top") or 0.0)
+    return left, top, left + float(bbox.get("width") or 0.0), top + float(bbox.get("height") or 0.0)
+
+
+def _near(a: tuple[float, ...], b: tuple[float, ...]) -> bool:
+    """Two boxes are adjacent enough to be one wrapped element: x-ranges overlap and they are
+    vertically close (stacked onto the next row), or y-ranges overlap and they are horizontally
+    close (split across one line). A far-off box (an embedded image, a far column) is neither."""
+    height = max(a[3] - a[1], b[3] - b[1], 1.0)
+    x_overlap = min(a[2], b[2]) > max(a[0], b[0])
+    y_overlap = min(a[3], b[3]) > max(a[1], b[1])
+    y_gap = max(0.0, max(a[1], b[1]) - min(a[3], b[3]))
+    x_gap = max(0.0, max(a[0], b[0]) - min(a[2], b[2]))
+    stacked = x_overlap and y_gap <= 1.5 * height       # wrapped onto the next line
+    same_line = y_overlap and x_gap <= 2.0 * height     # split across one line ("... nooit.")
+    return stacked or same_line

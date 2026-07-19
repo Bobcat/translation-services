@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from app.regression import capture as C
+from app.regression.image import capture as C
 
 
 def _img(root: Path, rel: str) -> None:

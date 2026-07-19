@@ -9,7 +9,6 @@ import numpy as np
 from PIL import Image
 
 from app.core.config import OcrSettings
-from app.ocr.merging import merge_same_line_segments
 from app.ocr.segment import bbox_polygon
 from app.ocr.segment import OcrSegment
 
@@ -81,7 +80,6 @@ def run_paddleocr(
     input_path: Path,
     *,
     language: str | None = None,
-    merge_lines: bool = True,
 ) -> list[OcrSegment]:
     resolved_language = str(language or settings.language or "").strip() or "en"
     engine, engine_lock = _get_paddleocr_engine(settings, resolved_language)
@@ -149,9 +147,7 @@ def run_paddleocr(
                 if confidence < settings.min_confidence:
                     continue
                 segments.append(OcrSegment(text=text, bbox=bbox, confidence=confidence, polygon=polygon))
-    if not merge_lines:
-        return segments
-    return merge_same_line_segments(segments)
+    return segments
 
 
 def _polygon_is_rotated_tall(polygon: list[dict[str, int]] | None) -> bool:

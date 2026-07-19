@@ -1,11 +1,11 @@
-"""Layout-evidence semantics (app.grouping.layout): the document gate, column clustering
+"""Layout-evidence semantics (app.layout): the document gate, column clustering
 with spanner refusal, and preserve-region assignment. Detection itself (the PaddleX model)
 is not exercised here — these are the pure functions align consumes."""
 from __future__ import annotations
 
-from app.grouping.layout import cell_columns
-from app.grouping.layout import document_gate
-from app.grouping.layout import preserved_cell_indices
+from app.layout import cell_columns
+from app.layout import document_gate
+from app.layout import preserved_cell_indices
 
 
 def _region(label: str, score: float, x0: float, y0: float, x1: float, y1: float) -> dict:

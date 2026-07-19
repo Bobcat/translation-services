@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-from app.grouping.align import _build_hint_index
-from app.grouping.align import _candidate_hints
-from app.grouping.align import _line_anchor
-from app.grouping.align import _match_scores
-from app.grouping.align import _resolve_claim_clusters
+from app.grouping.align.matching import _build_hint_index
+from app.grouping.align.matching import _candidate_hints
+from app.grouping.align.positions import _line_anchor
+from app.grouping.align.matching import _match_scores
+from app.grouping.align.claims import _resolve_claim_clusters
 from app.grouping.align import build_units_from_hint
 from app.grouping.hint_parser import parse_grouping_output
 from app.grouping.tokens import _tokens
@@ -409,7 +409,7 @@ def test_interleaved_leftover_does_not_split_a_unit() -> None:
 
 
 def test_rogue_seed_is_dropped_by_chaining() -> None:
-    from app.grouping.align import _chain
+    from app.grouping.align.positions import _chain
 
     # Seeds in reading order; the out-of-order hint index (a coincidental unique match)
     # must drop out, the monotone rest stays.
@@ -1062,7 +1062,7 @@ def test_parse_pipe_opened_embedded_label_splits_table_columns() -> None:
 
 def test_symbolic_label_classifier() -> None:
     # Rating codes and symbol runs with a stray capital are labels, not language.
-    from app.grouping.heuristics import _is_symbolic_label
+    from app.grouping.preserve import _is_symbolic_label
 
     assert _is_symbolic_label('A-')
     assert _is_symbolic_label('A "')
@@ -1084,7 +1084,7 @@ def test_all_symbolic_unit_is_preserved_whole() -> None:
     # line) never reaches the translator — the measured batch hallucination
     # ('A " A- A-' answered with another line's sentence) starts here. A single
     # capital inside a prose unit keeps its normal flag.
-    from app.grouping.align import _build_unit
+    from app.grouping.align.build import _build_unit
 
     def cell(cid, text, left):
         return {"id": cid, "text": text, "bbox": {"left": left, "top": 100, "width": 90, "height": 40}}
@@ -1112,7 +1112,7 @@ def test_cell_marker_makes_the_unit_a_bullet() -> None:
     # A cell that carries a stripped inline marker (text-layer "•") is ground
     # truth for the bullet flag — no hint label needed. OCR cells never carry
     # the field, so the image flow is untouched by construction.
-    from app.grouping.align import _build_unit
+    from app.grouping.align.build import _build_unit
 
     cells = [
         {"id": 1, "text": "report suspected reactions", "marker": "•",

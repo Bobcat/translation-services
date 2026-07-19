@@ -142,7 +142,7 @@ reflowed on top of each other.
 The angles are fairly **uniform** (~-20°), so it is mostly rotation, not strong perspective. Idea
 (parked): a **global deskew** stage — rotate the whole image by the median per-cell text angle so
 text is ~horizontal, then group/render on the straightened image (far more robust for the dense
-line). We already compute per-cell angles (`app/ocr/merging.py`); this is the planned
+line). Per-cell angles are cheap to derive from the OCR polygons; this is the planned
 "orientation rescue" stage as a global pre-rotation. Open choices: present the straightened
 result vs rotate the render back onto the original photo; and rotation-only vs full perspective
 unwarp (overkill while angles are uniform). Caveat: multi-plane objects (warning panel vs the

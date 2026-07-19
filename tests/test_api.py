@@ -13,7 +13,6 @@ from app.core.config import OcrSettings
 from app.main import create_app
 from app.ocr import OcrSegment
 from app.ocr import resolve_ocr_language
-from app.ocr.merging import merge_same_line_segments
 from app.ocr.overlay import render_original_ocr_overlay_debug
 from app.ocr.paddleocr import _polygon_is_rotated_tall
 from app.ocr.paddleocr import run_paddleocr
@@ -319,12 +318,11 @@ def test_upright_rescue_gates_on_short_reads_and_nonempty_result(tmp_path: Path,
         OcrSettings(backend="paddleocr", language="en", min_confidence=0.35),
         input_path,
         language="en",
-        merge_lines=False,  # the production entry (run_raw_ocr) runs unmerged
     )
     assert [segment.text for segment in segments] == ["1", "WORD", "注意"]
 
 
-def test_paddleocr_backend_normalizes_chunks_to_visual_lines(tmp_path: Path, monkeypatch) -> None:
+def test_paddleocr_backend_normalizes_chunks_to_segments(tmp_path: Path, monkeypatch) -> None:
     class FakePaddleOCR:
         def predict(self, input_path: str):
             assert input_path.endswith("input.jpg")
@@ -368,61 +366,15 @@ def test_paddleocr_backend_normalizes_chunks_to_visual_lines(tmp_path: Path, mon
     )
 
     assert languages == ["en"]
-    assert [segment.text for segment in segments] == ["THE SHOE", "WORKS IF", "SKEW"]
-    assert segments[0].bbox == {"left": 118, "top": 24, "width": 510, "height": 115}
-    assert segments[1].bbox == {"left": 114, "top": 124, "width": 524, "height": 117}
-    assert segments[2].polygon == [
+    assert [segment.text for segment in segments] == ["THE", "SHOE", "WORKS", "IF", "SKEW"]
+    assert segments[0].bbox == {"left": 118, "top": 24, "width": 208, "height": 115}
+    assert segments[3].bbox == {"left": 537, "top": 132, "width": 101, "height": 103}
+    assert segments[4].polygon == [
         {"x": 10, "y": 260},
         {"x": 110, "y": 250},
         {"x": 120, "y": 290},
         {"x": 20, "y": 300},
     ]
-
-
-def test_merge_same_line_segments_preserves_separate_rows() -> None:
-    segments = merge_same_line_segments(
-        [
-            OcrSegment(text="THE", bbox={"left": 118, "top": 24, "width": 208, "height": 115}, confidence=0.99),
-            OcrSegment(text="SHOE", bbox={"left": 348, "top": 26, "width": 280, "height": 113}, confidence=0.98),
-            OcrSegment(text="body line one", bbox={"left": 51, "top": 683, "width": 650, "height": 28}, confidence=0.94),
-            OcrSegment(text="body line two", bbox={"left": 51, "top": 724, "width": 650, "height": 28}, confidence=0.91),
-        ]
-    )
-
-    assert [segment.text for segment in segments] == ["THE SHOE", "body line one", "body line two"]
-
-
-def test_merge_same_line_segments_preserves_skewed_row_polygon() -> None:
-    segments = merge_same_line_segments(
-        [
-            OcrSegment(
-                text="LEFT",
-                bbox={"left": 10, "top": 10, "width": 44, "height": 22},
-                confidence=0.9,
-                polygon=[
-                    {"x": 10, "y": 10},
-                    {"x": 54, "y": 18},
-                    {"x": 52, "y": 32},
-                    {"x": 8, "y": 24},
-                ],
-            ),
-            OcrSegment(
-                text="RIGHT",
-                bbox={"left": 60, "top": 19, "width": 50, "height": 21},
-                confidence=0.9,
-                polygon=[
-                    {"x": 60, "y": 19},
-                    {"x": 110, "y": 28},
-                    {"x": 108, "y": 40},
-                    {"x": 58, "y": 31},
-                ],
-            ),
-        ]
-    )
-
-    assert [segment.text for segment in segments] == ["LEFT RIGHT"]
-    assert segments[0].polygon is not None
-    assert segments[0].polygon[1]["y"] > segments[0].polygon[0]["y"]
 
 
 def test_resolve_translation_route_returns_configured_model_and_mode() -> None:
@@ -587,7 +539,7 @@ def test_invalid_request_id_is_rejected_at_the_edge(tmp_path: Path) -> None:
 
 
 def test_oversized_upload_is_rejected(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr("app.main._MAX_UPLOAD_BYTES", 10)
+    monkeypatch.setattr("app.routes.requests.MAX_UPLOAD_BYTES", 10)
     app = create_app(_settings_path(tmp_path))
     with TestClient(app) as client:
         response = client.post(

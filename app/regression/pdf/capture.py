@@ -28,15 +28,15 @@ from app.core.config import AppSettings
 from app.pdf.document import profile_pdf
 from app.pdf.raster import PageRasterizer
 from app.pdf.textlayer import PageTextExtractor
-from app.regression import fixture as fx
-from app.regression.capture import _next_variant
-from app.regression.capture import build_fixture
-from app.regression.compare import diff_units
-from app.regression.compare import reocr_mismatches
+from app.regression.pages import fixture as fx
+from app.regression.pages.fixture import _next_variant
+from app.regression.pages.fixture import build_fixture
+from app.regression.pages.compare import diff_units
+from app.regression.pages.compare import reocr_mismatches
 from app.regression.pdf import checks
 from app.regression.pdf import fixture as dfx
-from app.regression.replay import replay_fixture
-from app.regression.snapshot import reocr_rows
+from app.regression.pages.replay import replay_fixture
+from app.regression.pages.snapshot import reocr_rows
 
 
 class CaptureError(ValueError):
@@ -195,7 +195,7 @@ def freeze_accepted_score(
     over both renders); imports lazily so replay-only paths never load the measurement stack."""
     from app.benchmark.measurement import measure_pair
     from app.benchmark.scoring import score_measurement
-    from app.regression.snapshot import ocr_language_for_target
+    from app.regression.pages.snapshot import ocr_language_for_target
 
     measurement = measure_pair(
         settings=settings,

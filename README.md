@@ -95,19 +95,21 @@ concern:
 ```
 app/
   main.py            # HTTP composition root + route registration
-  routes/            # extracted route modules: pdf benchmark, pdf document regression
+  routes/            # one module per route family: requests, prompts, benchmark, image + pdf regression
   core/              # settings, request/response schemas, helpers
   runtime/           # job execution: FIFO queue, runner loop, lifecycle store
   tasks/             # feature pipelines — one module per task (the readable flows)
     translate_image.py
     retranslate_image.py
     translate_pdf.py
-  ocr/               # OCR component: paddle backend, cell merge, segment, overlay
+  ocr/               # OCR component: paddle backend, segment model, overlay
+  layout/            # layout-region component: detector engine + document evidence
   grouping/          # VLM hint + aligner -> translation units
   translation/       # language-pair routing, llm-pool translate, prompt library
   replacement/       # erase + re-render: geometry, fit, color, render
   pdf/               # PDF intake: census, page raster, text-layer cells, assembly
   benchmark/         # document-pair benchmark: measurement, scoring, run store
+  regression/        # fixture harnesses: shared page machinery, image + pdf document
 ```
 
 To see how a feature works, open `tasks/<task>.py` — it reads as a recipe that
