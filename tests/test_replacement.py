@@ -428,6 +428,12 @@ def test_cell_marker_accepts_dotted_section_numbers_but_not_decimals() -> None:
     assert _cell_marker(unit("1.69 korting")) is None
     assert _cell_marker(unit("2.3 Titel zonder punt")) is None
     assert _cell_marker(unit("3.4.1nogeenwoord")) is None  # no whitespace after -> not a marker
+    # Bracket citation markers: a bibliography item's "[1]" must take the redraw path — the
+    # erase wiped it while the structured translation (marker is a separate hint field)
+    # returned the text without it, so every reference lost its number.
+    assert _cell_marker(unit("[1] Jimmy Lei Ba, Jamie Ryan Kiros. Layer normalization.")) == "[1]"
+    assert _cell_marker(unit("[23] Minh-Thang Luong. Multi-task learning.")) == "[23]"
+    assert _cell_marker(unit("[38, 2, 9] zoals in sectie 3")) is None  # in-text citation list
 
 
 def test_clean_right_extension_stops_at_ink_protected_cells_and_the_cap() -> None:

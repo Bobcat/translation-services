@@ -10,10 +10,12 @@ from app.replacement.geometry import _ANGLE_DEADZONE_DEG
 from app.replacement.layout.sweep import _ink_runs
 
 
-# An ALPHANUMERIC enumerate marker at the START of a cell: "1."/"2)"/"(a)"/"A."/"ii.", or a dotted
+# An ALPHANUMERIC enumerate marker at the START of a cell: "1."/"2)"/"(a)"/"A."/"ii.", a dotted
 # multi-level section number "3.4.1"/"A.1.2" (two or more dot-joined segments — OCR merges those
 # into the title's cell on ToC/outline rows, so without the redraw the erase swallows the number
-# and the translation drops it). OCR reads the digit/letter reliably, so we redraw it as text on
+# and the translation drops it), or a bracket citation marker "[1]"/"[23]" (a bibliography's
+# item numbers — the erase wiped them while nothing redrew them, and every reference lost its
+# number). OCR reads the digit/letter reliably, so we redraw it as text on
 # the cell. A GLYPH bullet ("•"/"*"/"-"/"◊") is deliberately NOT matched here: glyphs route to the
 # ink-scan path that keeps the original glyph in place, which renders the SAME glyph uniformly
 # whether or not OCR happened to read it on a given line (mixed OCR recognition across a bullet
@@ -22,6 +24,7 @@ from app.replacement.layout.sweep import _ink_runs
 # plain two-level "2.3 Title" row stays off this path — only "x.y."-and-deeper forms qualify.
 _ENUMERATE_MARKER = re.compile(
     r"^\s*(\([A-Za-z0-9]{1,3}\)"
+    r"|\[[A-Za-z0-9]{1,3}\]"
     r"|(?:[A-Za-z0-9]{1,3}\.){2,}[A-Za-z0-9]{0,3}[.)]?"
     r"|[A-Za-z0-9]{1,3}[.)])(?=\s)"
 )
