@@ -54,6 +54,15 @@ _SIZE_RATIO = 0.9
 _CJK_SIZE_RATIO = 0.72
 # Floor on the pt-shrink search (matches the plane target floor in _plan_group).
 _MIN_RENDER_SIZE = 8
+# Relative floor on the same search, for groups whose every plane DECLARES its size
+# (text-layer cells): a fit that had to fall below this fraction of the declared size is
+# not a rendering but a duplicate caption under leftover ink (a text-layer paragraph whose
+# protected lines dropped renders its full translation into the few surviving line planes).
+# Below the floor the group keeps the source pixels, the same give-up as the condense-floor
+# path. Ink-derived targets are exempt: on the OCR path deep shrink is sometimes the
+# accepted rendering (small rotated label work) — extending the floor there is a separate
+# decision against those baselines.
+_SQUEEZE_PRESERVE_FLOOR = 0.55
 # A line plane narrower than this fraction of the unit's other lines, AND carrying only words
 # already present on those lines, is an OCR stray (a neighbouring element's word pulled in) — not
 # a real wrapped line. Kept, it forms a sliver plane that starves the whole unit's width fit.
@@ -616,10 +625,15 @@ def _plan_group(
                 plane["slack_px"] = 0.0
         plane_widths = [plane["width"] for plane in planes]
         font, lines = _fit_group(joined, size=size, plane_widths=plane_widths, family=family, weight=weight)
+    source_size = size
     while size > _MIN_RENDER_SIZE and _raw_condense(font, lines, planes) < _CONDENSE_FLOOR:
         size -= 1
         font, lines = _fit_group(joined, size=size, plane_widths=plane_widths, family=family, weight=weight)
     if _raw_condense(font, lines, planes) < _CONDENSE_FLOOR:
+        return []
+    if all(plane.get("exact_size") for plane in planes) and size < max(
+        _MIN_RENDER_SIZE, int(round(_SQUEEZE_PRESERVE_FLOOR * source_size))
+    ):
         return []
     ascent, descent = font.getmetrics()
 

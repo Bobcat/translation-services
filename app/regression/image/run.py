@@ -16,6 +16,7 @@ from app.regression.pages.compare import diff_units
 from app.regression.pages.compare import reocr_mismatches
 from app.regression.pages.replay import replay_fixture
 from app.regression.pages.snapshot import reocr_rows
+from app.regression.pages.snapshot import write_snapshot_diff
 
 
 def _resolve_source(variant_path) -> tuple[object, str | None]:

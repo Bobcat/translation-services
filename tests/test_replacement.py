@@ -684,6 +684,25 @@ def test_plan_group_uses_declared_member_size_over_ink_extent(tmp_path) -> None:
     assert exact < extent * 0.75
 
 
+def test_plan_group_preserves_instead_of_rendering_below_the_squeeze_floor(tmp_path) -> None:
+    # A translation whose fit falls below the squeeze floor of the group's own size target
+    # (a text-layer paragraph whose protected lines dropped, crammed into one surviving
+    # plane) keeps the source pixels: no jobs, no erase. A translation that still fits
+    # above the floor renders normally.
+    img = Image.new("RGB", (1000, 800), (255, 255, 255))
+    path = tmp_path / "flat.png"
+    img.save(path)
+
+    def jobs_for(translated):
+        unit = _tilted_line_unit(1, 400.0, 0.0, h=24.0)
+        unit["members"][0]["size_px"] = 22.0
+        unit["translated_text"] = translated
+        return _plan_group(Image.open(path).convert("RGB"), [unit], snap_horizontal=True)
+
+    assert jobs_for(("woorden die niet passen " * 3).strip()) != []
+    assert jobs_for(("woorden die niet passen " * 4).strip()) == []
+
+
 def test_plan_group_reads_its_angle_from_the_document_field(tmp_path) -> None:
     # A one-line group whose own quad reads +2deg on a document whose field says +8deg
     # at that y must render at the field angle; without a field it trusts its own quad.
