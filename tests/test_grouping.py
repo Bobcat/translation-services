@@ -1197,3 +1197,37 @@ def test_overclaimed_hint_suffix_is_trimmed_but_an_honest_repeat_is_not() -> Non
                   "differences is in Figure 2."),
              unit(2, 1, tail)]
     assert trim_overclaimed_hint_lines(units, own) == own
+
+
+def test_a_heading_number_is_not_a_column_but_a_quantity_still_is() -> None:
+    # A section number set in its own cell a wide space before its title lands on a knife edge in
+    # the 2-cell gap rule: the threshold scales with average glyph width, so a LONGER title lowers
+    # it and the same 27px gap splits one heading while leaving its neighbour whole. Number and
+    # title are one heading, so the split must never happen there — while a body row's leading
+    # quantity column (a receipt line) still splits on the same geometry.
+    from app.grouping.field_geometry import geometry_adjusted_hints
+
+    def heading(uid, title, width, hint_index):
+        return _col_unit(uid, [
+            _member(1, str(uid), 300, 17, top=1000, height=33),
+            _member(2, title, 350, width, top=1000, height=33),
+        ], hint_index=hint_index)
+
+    units = [heading(2, "Background", 175, 0), heading(3, "Model Architecture", 278, 1)]
+    for unit in units:
+        object.__setattr__(unit, "level", "header")
+    adjusted, _changes = geometry_adjusted_hints(units, ["2 Background", "3 Model Architecture"])
+    assert adjusted == ["2 Background", "3 Model Architecture"]
+
+    # Body text with a column-wide gap: still a column (a quantity beside a product name). The
+    # heading rule must not have disabled the mechanism itself.
+    body = _col_unit(9, [
+        _member(1, "2", 300, 17, top=1000, height=33),
+        _member(2, "Cola zero", 460, 175, top=1000, height=33),
+    ])
+    adjusted, _changes = geometry_adjusted_hints([body], ["2 Cola zero"])
+    assert adjusted == ["2 | Cola zero"]
+    # ...and the SAME row labelled a heading keeps its number attached.
+    object.__setattr__(body, "level", "title")
+    adjusted, _changes = geometry_adjusted_hints([body], ["2 Cola zero"])
+    assert adjusted == ["2 Cola zero"]

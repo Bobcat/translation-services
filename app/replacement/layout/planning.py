@@ -36,6 +36,10 @@ from app.replacement.layout.tables import _reproduced_in
 from app.replacement.layout.markers import _cell_marker
 from app.replacement.layout.markers import _prepend_marker
 from app.replacement.layout.markers import _restore_printed_lead_marker
+from app.replacement.layout.markers import _restore_printed_lead_number
+from app.replacement.layout.markers import _widen_heading_number_gap
+from app.replacement.layout.markers import _heading_number_is_badge
+from app.replacement.layout.markers import _strip_heading_number
 from app.replacement.layout.markers import _strip_leading_glyph
 from app.replacement.layout.markers import _strip_unprinted_lead
 from app.replacement.layout.markers import _bullet_geometry
@@ -145,8 +149,6 @@ _JUSTIFY_MAX_SHRINK = 0.25
 # line height.
 _PITCH_SNAP_MIN_LINES = 3
 _PITCH_SNAP_NOISE_RATIO = 0.2  # top-residual tolerance, x line height
-
-
 def _snap_line_pitch(planes: list[dict[str, Any]]) -> None:
     """Snap plane tops onto the group's uniform line grid (see the _PITCH_SNAP_* rationale).
     Mutates only each frame's ymin — the erase quads keep hugging the true ink; only the
@@ -383,6 +385,22 @@ def _plan_group(
         # their own glyphs and stay out of this.
         if not cell_marker and not loose_glyph:
             translated = _restore_printed_lead_marker(translated, unit)
+            # Same idea for a section number printed in its own cell: the cell is erased with
+            # the rest of the heading, so a translation that dropped the number would take it
+            # off the page. Kept or restored, its separator is then set to the em width print
+            # gives it — an ordinary space renders it four times tighter.
+            if _heading_number_is_badge(base_arr, unit):
+                # The number is artwork on its own ground (a step badge). Leave its pixels
+                # standing and take it out of the text, exactly as the glyph-bullet path does
+                # — re-drawing it would print body-coloured text over the disc.
+                translated = _strip_heading_number(translated, unit)
+                unit = {**unit, "members": [
+                    {**m, "translate": False} if index == 0 else m
+                    for index, m in enumerate(unit.get("members") or [])
+                ]}
+            else:
+                translated = _restore_printed_lead_number(translated, unit)
+                translated = _widen_heading_number_gap(translated, unit)
         members = [
             m for m in (unit.get("members") or [])
             if m.get("bbox") and (m.get("translate") or _reproduced_in(m, translated))

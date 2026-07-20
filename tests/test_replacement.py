@@ -2063,3 +2063,105 @@ def test_wrap_to_planes_justified_packs_greedy_full_lines() -> None:
     for g_line in greedy[:-1]:
         assert font.getlength(g_line) <= 220.0  # still fits its plane
     assert font.getlength(greedy[0]) >= font.getlength(balanced[0])
+
+
+def test_a_dropped_section_number_is_restored_from_the_print() -> None:
+    # The number sits in its own cell, so it is erased with the rest of the heading — a
+    # translation that dropped it would take it off the page entirely. Restored from the print,
+    # spaced (it numbers the heading, it is not attached to its first word).
+    from app.replacement.layout.markers import _restore_printed_lead_number
+    from app.replacement.text.fit import EM_SPACE
+
+    def heading(*texts, level="header"):
+        return {"level": level,
+                "members": [{"text": t, "translate": True,
+                             "bbox": {"left": 0, "top": 0, "width": 10, "height": 10}} for t in texts]}
+
+    unit = heading("3", "Model Architecture")
+    assert _restore_printed_lead_number("Modelarchitectuur", unit) == f"3{EM_SPACE}Modelarchitectuur"
+    # Already carried: no second copy, whatever the punctuation around it.
+    assert _restore_printed_lead_number("3 Modelarchitectuur", unit) == "3 Modelarchitectuur"
+    assert _restore_printed_lead_number("3. Modelarchitectuur", heading("3.", "Model")) == (
+        "3. Modelarchitectuur"
+    )
+    # A unit that is ONLY a number (a page number, a lone table figure) is never touched.
+    assert _restore_printed_lead_number("", heading("2")) == ""
+    # A heading whose first cell is a word, not a number, is left alone.
+    assert _restore_printed_lead_number("Achtergrond", heading("Background", "and more")) == (
+        "Achtergrond"
+    )
+    # Multi-level and lettered section numbers count.
+    assert _restore_printed_lead_number("Schaalbaarheid", heading("3.2", "Scalability")) == (
+        f"3.2{EM_SPACE}Schaalbaarheid"
+    )
+    # Body text is not numbered this way: a leading number cell there is a quantity, a year or a
+    # table figure, and the column machinery owns it.
+    assert _restore_printed_lead_number("Cola zero", heading("2", "Cola", level="body")) == (
+        "Cola zero"
+    )
+    # An unbalanced OCR fragment is not a section number, and a number the translation moved
+    # elsewhere in the line is not missing.
+    assert _restore_printed_lead_number("4,0/5 (60 beoordelingen)", heading("(60", "reviews")) == (
+        "4,0/5 (60 beoordelingen)"
+    )
+    assert _restore_printed_lead_number("Tabel 2 hieronder", heading("2", "Table below")) == (
+        "Tabel 2 hieronder"
+    )
+
+
+def test_a_heading_number_keeps_the_em_gap_print_gives_it() -> None:
+    # Print sets one em between a section number and its heading; joined into the line as an
+    # ordinary space it renders four times tighter and the number reads as drifted into the
+    # title. The wrap must carry that width through instead of collapsing it.
+    from app.replacement.layout.markers import _widen_heading_number_gap
+    from app.replacement.text.fit import EM_SPACE
+    from app.replacement.text.fit import break_pieces
+    from app.replacement.text.fit import load_font
+
+    def heading(*texts, level="header"):
+        return {"level": level,
+                "members": [{"text": t, "translate": True,
+                             "bbox": {"left": 0, "top": 0, "width": 10, "height": 10}} for t in texts]}
+
+    unit = heading("3", "Model Architecture")
+    assert _widen_heading_number_gap("3 Modelarchitectuur", unit) == f"3{EM_SPACE}Modelarchitectuur"
+    # Body text keeps its plain space (a quantity beside a product name is not a heading).
+    assert _widen_heading_number_gap("2 Cola zero", heading("2", "Cola", level="body")) == "2 Cola zero"
+    # The wrap keeps the em separator as glue instead of collapsing it to a word space...
+    assert break_pieces(f"3{EM_SPACE}Model") == [("3", ""), ("Model", EM_SPACE)]
+    # ...and it measures four times a word space, blank in the mapped face.
+    font = load_font(40, "3 Model", family="Times New Roman", weight=700)
+    assert font.getlength(EM_SPACE) == 4 * font.getlength(" ")
+
+
+def test_a_step_badge_number_keeps_its_artwork_but_print_numbering_is_redrawn() -> None:
+    # A step badge is a white digit in a filled disc: erasing it fills the disc with its own
+    # colour and the re-drawn digit lands as body-coloured text on top, wrecking the artwork.
+    # Print numbering ("3 Model Architecture") shares the page ground and re-draws cleanly, so
+    # only the pixels can tell the two apart.
+    from app.replacement.layout.markers import _heading_number_is_badge
+    from app.replacement.layout.markers import _strip_heading_number
+
+    def unit(number_bbox, title_bbox):
+        return {"level": "header", "members": [
+            {"text": "2", "translate": True, "bbox": number_bbox},
+            {"text": "Drop off your package", "translate": True, "bbox": title_bbox},
+        ]}
+
+    page = Image.new("RGB", (400, 200), (255, 255, 255))
+    draw = ImageDraw.Draw(page)
+    draw.ellipse((20, 40, 80, 100), fill=(1, 0, 156))       # the blue disc
+    draw.text((45, 60), "2", fill=(255, 255, 255))
+    draw.text((110, 60), "Drop off", fill=(0, 0, 0))
+    badge = unit({"left": 40, "top": 55, "width": 22, "height": 30},
+                 {"left": 110, "top": 55, "width": 180, "height": 30})
+    assert _heading_number_is_badge(np.asarray(page), badge) is True
+    assert _strip_heading_number("2 Drop off your package", badge) == "Drop off your package"
+
+    # Same shape, black on white: print numbering, not artwork.
+    plain = Image.new("RGB", (400, 200), (255, 255, 255))
+    ImageDraw.Draw(plain).text((45, 60), "3", fill=(0, 0, 0))
+    ImageDraw.Draw(plain).text((110, 60), "Model Architecture", fill=(0, 0, 0))
+    printed = unit({"left": 40, "top": 55, "width": 22, "height": 30},
+                   {"left": 110, "top": 55, "width": 180, "height": 30})
+    assert _heading_number_is_badge(np.asarray(plain), printed) is False

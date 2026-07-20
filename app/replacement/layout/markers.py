@@ -8,6 +8,7 @@ from statistics import median
 from PIL import Image
 from app.replacement.geometry import _ANGLE_DEADZONE_DEG
 from app.replacement.layout.sweep import _ink_runs
+from app.replacement.text.fit import EM_SPACE
 
 
 # An ALPHANUMERIC enumerate marker at the START of a cell: "1."/"2)"/"(a)"/"A."/"ii.", a dotted
@@ -113,6 +114,116 @@ def _restore_printed_lead_marker(translated: str, unit: dict[str, Any]) -> str:
     if not out.strip() or out.lstrip()[0] in _LEAD_MARKER_CHARS:
         return out
     return printed.group(1) + out
+
+
+# A section number set in its OWN cell ("2", "3.1", "A.2") ahead of the heading it numbers. The
+# translator drops it about as often as it keeps it — it reads as a stray token, not as prose —
+# and once the cell is erased with the rest of the line a dropped number is simply gone from the
+# page. Re-add it from the print, like the footnote marker above, but spaced: it numbers the
+# heading, it is not attached to its first word.
+# Bare and unambiguous: "2", "3.1", "A.2", "4." — an opening bracket must be closed, so an OCR
+# fragment like "(60" (the head of "(60 reviews)") can never pass for a section number.
+_NUMBER_CELL = re.compile(r"^(?:\d+|[A-Za-z]\.?\d+)(?:[.\-]\d+)*[.:)]?$")
+# Only a HEADING is numbered this way. On body text a leading number cell is a quantity, a year
+# or a table figure, and the column machinery owns it (see grouping/field_geometry).
+_NUMBERED_LEVELS = {"title", "header"}
+
+
+def _heading_number(unit: dict[str, Any]) -> str | None:
+    """The section number this heading prints in its own leading cell, or ``None``. A unit that
+    is only a number (a page number, a lone table figure) has no heading to number, so it never
+    qualifies."""
+    if str(unit.get("level") or "") not in _NUMBERED_LEVELS:
+        return None
+    members = unit.get("members") or []
+    if len(members) < 2:
+        return None
+    number = str(members[0].get("text") or "").strip()
+    return number if _NUMBER_CELL.match(number) else None
+
+
+# Channel distance at which the number's ground is a DIFFERENT surface from the text it numbers,
+# not the same paper sampled twice. A step badge measures far beyond it (white digit on a
+# saturated disc vs black text on white); scanner noise and paper tint stay well under.
+_BADGE_GROUND_DELTA = 60
+
+
+def _heading_number_is_badge(base_px: Any, unit: dict[str, Any]) -> bool:
+    """True when the heading's leading number sits on its OWN ground — a step badge (a white
+    digit in a filled disc), not a number typeset on the same surface as its title.
+
+    A badge is artwork: erasing it fills the disc with its own colour and the re-drawn digit
+    lands as body-coloured text on top, which destroys the design. Print numbering (a paper's
+    "3 Model Architecture") shares the page ground and re-draws cleanly, so only the pixels can
+    tell the two apart.
+    """
+    if _heading_number(unit) is None:
+        return False
+    members = unit.get("members") or []
+    grounds = [_border_colour(base_px, m.get("bbox") or {}) for m in members[:2]]
+    if any(g is None for g in grounds):
+        return False
+    return max(abs(int(a) - int(b)) for a, b in zip(*grounds)) >= _BADGE_GROUND_DELTA
+
+
+def _border_colour(base_px: Any, bbox: dict[str, Any]) -> tuple[int, int, int] | None:
+    """Median colour of the ring just outside ``bbox`` — the ground the cell is printed on."""
+    height, width = base_px.shape[:2]
+    x0, y0 = int(bbox.get("left", 0)), int(bbox.get("top", 0))
+    x1 = x0 + int(bbox.get("width") or 0)
+    y1 = y0 + int(bbox.get("height") or 0)
+    pad = 3
+    x0, y0 = max(0, x0 - pad), max(0, y0 - pad)
+    x1, y1 = min(width, x1 + pad), min(height, y1 + pad)
+    if x1 - x0 < 3 or y1 - y0 < 3:
+        return None
+    patch = base_px[y0:y1, x0:x1]
+    ring = np.concatenate([
+        patch[0].reshape(-1, patch.shape[-1]), patch[-1].reshape(-1, patch.shape[-1]),
+        patch[:, 0].reshape(-1, patch.shape[-1]), patch[:, -1].reshape(-1, patch.shape[-1]),
+    ])
+    return tuple(int(v) for v in np.median(ring, axis=0)[:3])
+
+
+def _strip_heading_number(translated: str, unit: dict[str, Any]) -> str:
+    """``translated`` without the leading section number — for a badge, whose printed digit
+    stays in the image and would otherwise render a second time."""
+    number = _heading_number(unit)
+    if not number:
+        return translated
+    out = str(translated or "")
+    match = re.match(rf"^\s*{re.escape(number)}\s*", out)
+    return out[match.end():] if match else out
+
+
+def _widen_heading_number_gap(translated: str, unit: dict[str, Any]) -> str:
+    """``translated`` with an EM space between the section number and the heading it numbers.
+
+    Print sets that separator one em wide; joined into the line as an ordinary space it renders
+    four times tighter (measured on a paper: 28px in the source, 7px re-drawn), which reads as
+    the number having drifted into its title."""
+    number = _heading_number(unit)
+    if not number:
+        return translated
+    out = str(translated or "")
+    match = re.match(rf"^(\s*{re.escape(number)})(\s+)(?=\S)", out)
+    if not match:
+        return out
+    return out[: match.end(1)] + EM_SPACE + out[match.end(2):]
+
+
+def _restore_printed_lead_number(translated: str, unit: dict[str, Any]) -> str:
+    """``translated`` with the unit's printed leading section NUMBER re-added when the
+    translation lost it. Only on a heading whose number is a cell of its own with more text
+    after it, and only when the number appears nowhere in the translation — so a page number, a
+    table figure and a translation that moved the number are all left alone."""
+    number = _heading_number(unit)
+    if not number:
+        return translated
+    out = str(translated or "").strip()
+    if not out or re.search(rf"(?<!\d){re.escape(number.rstrip('.:)'))}(?!\d)", out):
+        return str(translated or "")
+    return f"{number}{EM_SPACE}{out}"
 
 
 # A glyph marker ("•"/"*"/"-"/"◊"...) that may lead the translated text. The ink-scan path keeps the

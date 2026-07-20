@@ -27,6 +27,16 @@ _MIN_GAP_RATIO = 1.8     # reference = the line's smallest word gap (>= 3 cells;
 _CHAR_WIDTH_RATIO = 2.0  # reference = average glyph width (2 cells; no measured word gap available)
 # Members are on one physical line when their vertical centres spread less than this of the height.
 _SINGLE_LINE_SPREAD = 0.6
+# A section number set in its own cell ("2", "3.1") a wide space before its title. The separation
+# is typographic, not a column: number and title are ONE heading. Left to the gap rule it lands on
+# a knife edge — the 2-cell threshold scales with the average glyph width, so on one page
+# "2 Background" stays whole while "3 Model Architecture", with the same 27px gap, splits purely
+# because its longer title lowers that average. The split half then renders the title as a lone
+# field and leaves the digit's ORIGINAL pixels standing beside it, 3-4px off the re-drawn
+# baseline; the unsplit half draws the number inline and collapses the gap to a word space. Same
+# page, two different artifacts. A heading's leading enumerator therefore never opens a column.
+_HEADING_LEVELS = {"title", "header"}
+_LEADING_ENUMERATOR = re.compile(r"^\(?\[?[A-Za-z]?\d+(?:[.\-]\d+)*[.):\]]?$")
 
 
 def geometry_adjusted_hints(
@@ -45,7 +55,7 @@ def geometry_adjusted_hints(
         line = hint_units[index]
         if "|" in line:  # the VLM already marked this row's fields — leave it
             continue
-        columns = _column_split(unit.members)
+        columns = _column_split(unit.members, level=unit.level)
         if columns is None:
             continue
         injected = _inject_pipes(line, columns)
@@ -61,9 +71,13 @@ def geometry_adjusted_hints(
     return adjusted, changes
 
 
-def _column_split(members: list[UnitMember]) -> list[list[UnitMember]] | None:
+def _column_split(
+    members: list[UnitMember], *, level: str | None = None
+) -> list[list[UnitMember]] | None:
     """Group a unit's members into >= 2 spatial columns, or None when it is not a column row.
-    Only a single physical line is considered (a multi-line unit is wrapped prose)."""
+    Only a single physical line is considered (a multi-line unit is wrapped prose). On a heading
+    a leading enumerator is part of the heading, never a column of its own (see
+    ``_LEADING_ENUMERATOR``); on body text it still can be (a receipt's quantity column)."""
     placed = [m for m in members if m.bbox]
     if len(placed) < 2 or not _is_single_line(placed):
         return None
@@ -88,9 +102,13 @@ def _column_split(members: list[UnitMember]) -> list[list[UnitMember]] | None:
         chars = sum(len(re.sub(r"[^a-z0-9]", "", m.text.lower())) for m in ordered) or 1
         char_width = sum(m.bbox["width"] for m in ordered) / chars
         threshold = _CHAR_WIDTH_RATIO * char_width
+    heading_lead = (
+        str(level or "") in _HEADING_LEVELS
+        and bool(_LEADING_ENUMERATOR.match(str(ordered[0].text or "").strip()))
+    )
     columns: list[list[UnitMember]] = [[ordered[0]]]
-    for member, gap in zip(ordered[1:], gaps):
-        if gap >= threshold:
+    for index, (member, gap) in enumerate(zip(ordered[1:], gaps)):
+        if gap >= threshold and not (heading_lead and index == 0):
             columns.append([member])
         else:
             columns[-1].append(member)

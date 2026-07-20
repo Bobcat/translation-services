@@ -527,6 +527,13 @@ _CJK_CLOSING = set("。、，．！？：；）」』】｝〕》〉")
 _CJK_OPENING = set("（「『【〔《〈｛")
 
 
+# A separator that must keep its WIDTH through the wrap instead of collapsing to a word space:
+# exactly one em in every mapped face, blank (no glyph outline), and the width print uses between
+# a section number and its heading. ``break_pieces`` is where a run of whitespace becomes glue, so
+# it is the one place that has to know the difference.
+EM_SPACE = " "
+
+
 def break_pieces(text: str) -> list[tuple[str, str]]:
     """Atomic wrap units as (piece, glue) — ``glue`` is the separator to re-insert before the
     piece when it is not at a line start. Han/Kana/CJK-symbol chars each break individually
@@ -538,6 +545,7 @@ def break_pieces(text: str) -> list[tuple[str, str]]:
     word = ""
     word_glue = ""
     pending_space = False
+    pending_wide = False    # the pending separator was an EM space: keep its width, don't collapse it
     pending_open = ""      # opening punctuation held to prepend to the next piece
     pending_open_glue = ""
 
@@ -554,9 +562,11 @@ def break_pieces(text: str) -> list[tuple[str, str]]:
                 emit(word, word_glue)
                 word = ""
             pending_space = True
+            pending_wide = pending_wide or ch == EM_SPACE
             continue
-        glue = " " if pending_space else ""
+        glue = ((EM_SPACE if pending_wide else " ") if pending_space else "")
         pending_space = False
+        pending_wide = False
         if _has_cjk(ch):
             if word:
                 emit(word, word_glue)
