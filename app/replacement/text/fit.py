@@ -20,6 +20,9 @@ _MIN_SIZE = 6
 # Ultimate fallback (no family hint, or a mapped font is missing). Regular first, bold
 # second. DejaVu has no CJK glyphs, so CJK text is drawn in the CJK font instead.
 _FONT_NAMES = ("DejaVuSans.ttf", "DejaVuSans-Bold.ttf")
+# Italic counterpart of the DejaVu fallback, for text-layer-flagged italic on a unit
+# WITHOUT a family hint (a leftover cell: a figure label like an emphasised method name).
+_FONT_NAMES_ITALIC = ("DejaVuSans-Oblique.ttf", *_FONT_NAMES)
 
 # The VLM names a font per element (e.g. "Helvetica", "Times New Roman", "Courier New").
 # We don't have those exact (proprietary) faces, so map by CATEGORY to a metric-compatible
@@ -36,6 +39,14 @@ _FAMILY_FONTS = {
     "sans": ("Arimo[wght].ttf", None),
     "serif": ("Tinos-Regular.ttf", "Tinos-Bold.ttf"),
     "mono": ("Cousine-Regular.ttf", "Cousine-Bold.ttf"),
+}
+# Italic cuts of the same faces, same (regular, bold) shape. Selected when the text
+# layer flags the group's text italic (OCR carries no style axis, so scanned images
+# never take this table); a missing file degrades to the roman cut, not to DejaVu.
+_FAMILY_ITALIC_FONTS = {
+    "sans": ("Arimo-Italic[wght].ttf", None),
+    "serif": ("Tinos-Italic.ttf", "Tinos-BoldItalic.ttf"),
+    "mono": ("Cousine-Italic.ttf", "Cousine-BoldItalic.ttf"),
 }
 # Korean (Hangul) is in neither PingFang nor DejaVu, so it renders as tofu there. Route it to
 # Noto Sans KR in the same per-user fonts dir. It is a variable font whose default instance is
@@ -397,7 +408,8 @@ class FittedText:
 
 
 def load_font(
-    size: int, text: str = "", *, family: str | None = None, weight: int | None = None
+    size: int, text: str = "", *, family: str | None = None, weight: int | None = None,
+    italic: bool = False,
 ) -> ImageFont.FreeTypeFont:
     """Font for a rendered line, by script. Korean (Hangul) uses Noto Sans KR; other CJK uses the
     CJK font; a complex script (Arabic/Devanagari/Bengali/Thai/Hebrew/Tamil) uses its Noto Sans
@@ -422,10 +434,10 @@ def load_font(
     script = _load_script_font(text, size)
     if script is not None:
         return script
-    mapped = _load_mapped_font(family, weight, size)
+    mapped = _load_mapped_font(family, weight, size, italic=italic)
     if mapped is not None:
         return _with_symbol_fallback(mapped, text, size)
-    return _first_loadable(_FONT_NAMES, size)
+    return _first_loadable(_FONT_NAMES_ITALIC if italic else _FONT_NAMES, size)
 
 
 def _first_loadable(names: tuple[str | None, ...], size: int) -> ImageFont.FreeTypeFont:
@@ -448,24 +460,30 @@ def _font_category(family: str) -> str:
     return "sans"
 
 
-def _load_mapped_font(family: str | None, weight: int | None, size: int) -> ImageFont.FreeTypeFont | None:
+def _load_mapped_font(
+    family: str | None, weight: int | None, size: int, *, italic: bool = False
+) -> ImageFont.FreeTypeFont | None:
     """Mapped face for a VLM family/weight, or None to let the caller fall back to DejaVu."""
     if not str(family or "").strip():
         return None
-    regular, bold = _FAMILY_FONTS[_font_category(family)]
+    category = _font_category(family)
+    tables = (_FAMILY_ITALIC_FONTS, _FAMILY_FONTS) if italic else (_FAMILY_FONTS,)
     want_bold = weight is not None and int(weight) >= _BOLD_THRESHOLD
-    try:
-        if want_bold and bold is not None:
-            return ImageFont.truetype(str(_GF_DIR / bold), size)
-        font = ImageFont.truetype(str(_GF_DIR / regular), size)
-        if want_bold:  # variable family with no separate bold cut -> push the weight axis
-            try:
-                font.set_variation_by_axes([int(weight)])
-            except Exception:
-                pass
-        return font
-    except Exception:
-        return None
+    for table in tables:
+        regular, bold = table[category]
+        try:
+            if want_bold and bold is not None:
+                return ImageFont.truetype(str(_GF_DIR / bold), size)
+            font = ImageFont.truetype(str(_GF_DIR / regular), size)
+            if want_bold:  # variable family with no separate bold cut -> push the weight axis
+                try:
+                    font.set_variation_by_axes([int(weight)])
+                except Exception:
+                    pass
+            return font
+        except Exception:
+            continue
+    return None
 
 
 def fit_text(

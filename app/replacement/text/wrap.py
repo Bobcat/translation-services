@@ -46,6 +46,7 @@ def _fit_group(
     plane_widths: list[float],
     family: str | None = None,
     weight: int | None = None,
+    italic: bool = False,
     islands: dict[str, Any] | None = None,
     justified: bool = False,
 ) -> tuple[Any, list[str]]:
@@ -54,7 +55,7 @@ def _fit_group(
     The font is NOT reduced to fit width — the source size, and thus the header/body hierarchy,
     is preserved; width is matched by horizontal condensation in the caller. ``islands`` wraps
     the font so ⟦Mn⟧ pixel-island tokens measure (and later draw) at their source width."""
-    font = load_font(max(6, min(int(size), 160)), text, family=family, weight=weight)
+    font = load_font(max(6, min(int(size), 160)), text, family=family, weight=weight, italic=italic)
     if islands:
         font = IslandFont(font, islands)
     return font, _wrap_to_planes(font, text, plane_widths, justified=justified)

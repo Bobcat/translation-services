@@ -24,6 +24,9 @@ class UnitMember:
     # Exact em size of this member's text in image pixels, when the cell source
     # knows it (a text layer's declared size); None = derive from ink geometry.
     size_px: float | None = None
+    # Ground-truth italic from the cell source (a text layer's dominant span style);
+    # False for OCR cells, which carry no style axis.
+    italic: bool = False
     # Inline pixel islands (⟦Mn⟧ tokens in the text): [{"id": "Mn", "bbox": px}].
     # Opaque data from the cell layer; the render transplants the source pixels.
     islands: list[dict[str, Any]] | None = None
@@ -40,6 +43,8 @@ class UnitMember:
             member["polygon"] = [dict(point) for point in self.polygon]
         if self.size_px is not None:
             member["size_px"] = self.size_px
+        if self.italic:
+            member["italic"] = True
         if self.islands is not None:
             member["islands"] = [dict(island) for island in self.islands]
         return member
@@ -58,6 +63,7 @@ class UnitMember:
             if polygon is not None
             else None,
             size_px=float(size_px) if size_px is not None else None,
+            italic=bool(data.get("italic", False)),
             islands=[dict(island) for island in data["islands"]] if data.get("islands") else None,
         )
 

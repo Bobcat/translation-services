@@ -543,6 +543,17 @@ def _plan_group(
     # that carries a hint (leftovers have none -> fall back to the default font).
     family = next((u.get("font_family") for u in units if u.get("font_family")), None)
     weight = next((u.get("font_weight") for u in units if u.get("font_weight")), None)
+    # Italic is ground truth from the text layer's per-cell flag (the VLM hint carries no
+    # style axis; OCR cells never set it). One face per group, like family/weight: pick the
+    # italic cut only when italic members carry the majority of the group's characters — a
+    # lone emphasised word inside roman prose keeps the roman face (per-span styling is a
+    # named non-goal of the group renderer).
+    group_members = [
+        m for u in units for m in u.get("members") or [] if str(m.get("text") or "").strip()
+    ]
+    italic_chars = sum(len(m.get("text") or "") for m in group_members if m.get("italic"))
+    total_chars = sum(len(m.get("text") or "") for m in group_members)
+    italic = italic_chars * 2 > total_chars
 
     # "cohort" size metric: an element the VLM gave a font-size (pt) that other elements share
     # renders at the cohort's shared OCR-median size, so a list the VLM judged one size renders
@@ -612,7 +623,7 @@ def _plan_group(
     # OCR-noise cells instead of erasing far beyond the source footprint.
     group_islands = _group_islands(units, base)
     size = _group_size(planes, render_size_mode)
-    font, lines = _fit_group(joined, size=size, plane_widths=plane_widths, family=family, weight=weight,
+    font, lines = _fit_group(joined, size=size, plane_widths=plane_widths, family=family, weight=weight, italic=italic,
                              islands=group_islands)
     # A table COLUMN cell that cannot fit its per-line footprints at the source size gets ONE
     # retry with every line at the cell's union width before pt is spent: the union is the
@@ -635,12 +646,12 @@ def _plan_group(
             if "slack_px" in plane:
                 plane["slack_px"] = 0.0
         plane_widths = [plane["width"] for plane in planes]
-        font, lines = _fit_group(joined, size=size, plane_widths=plane_widths, family=family, weight=weight,
+        font, lines = _fit_group(joined, size=size, plane_widths=plane_widths, family=family, weight=weight, italic=italic,
                                  islands=group_islands)
     source_size = size
     while size > _MIN_RENDER_SIZE and _raw_condense(font, lines, planes) < _CONDENSE_FLOOR:
         size -= 1
-        font, lines = _fit_group(joined, size=size, plane_widths=plane_widths, family=family, weight=weight,
+        font, lines = _fit_group(joined, size=size, plane_widths=plane_widths, family=family, weight=weight, italic=italic,
                                  islands=group_islands)
     if _raw_condense(font, lines, planes) < _CONDENSE_FLOOR:
         return []
@@ -691,13 +702,13 @@ def _plan_group(
             retry_size = _group_size(planes, render_size_mode)
             rfont, rlines = _fit_group(
                 joined, size=retry_size, plane_widths=plane_widths, family=family,
-                weight=weight, islands=group_islands, justified=True,
+                weight=weight, italic=italic, islands=group_islands, justified=True,
             )
             while retry_size > _MIN_RENDER_SIZE and _raw_condense(rfont, rlines, planes) < _CONDENSE_FLOOR:
                 retry_size -= 1
                 rfont, rlines = _fit_group(
                     joined, size=retry_size, plane_widths=plane_widths, family=family,
-                    weight=weight, islands=group_islands, justified=True,
+                    weight=weight, italic=italic, islands=group_islands, justified=True,
                 )
             adopted = False
             fits = _raw_condense(rfont, rlines, planes) >= _CONDENSE_FLOOR

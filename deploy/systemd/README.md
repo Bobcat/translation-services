@@ -52,7 +52,10 @@ degrades gracefully (Latin falls back to DejaVu, CJK/Korean to tofu), so they mu
 provisioned per host for correct output:
 
 - **Latin** — the Google Fonts metric-compatible faces `Arimo[wght].ttf`,
-  `Tinos-Regular/Bold.ttf`, `Cousine-Regular/Bold.ttf` (Arial/Times/Courier metrics).
+  `Tinos-Regular/Bold.ttf`, `Cousine-Regular/Bold.ttf` (Arial/Times/Courier metrics),
+  plus their italic cuts `Arimo-Italic[wght].ttf`, `Tinos-Italic/BoldItalic.ttf`,
+  `Cousine-Italic/BoldItalic.ttf` — a document whose text layer flags a line italic
+  renders in them (a missing cut degrades to the roman face).
 - **Han/Kana** — PingFang, fetched lazily by PaddleX to `~/.paddlex/fonts/` on the
   first CJK render (no action needed).
 - **Korean (Hangul)** — Noto Sans KR; PingFang has no Hangul glyphs. Install with:

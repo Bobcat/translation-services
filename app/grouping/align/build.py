@@ -297,6 +297,7 @@ def _build_unit(
                 order=order,
                 polygon=[dict(point) for point in polygon] if polygon else None,
                 size_px=float(size_px) if size_px is not None else None,
+                italic=bool(cell.get("italic", False)),
                 islands=[dict(island) for island in islands] if islands else None,
             )
         )

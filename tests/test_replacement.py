@@ -1908,6 +1908,48 @@ def test_academic_serif_families_map_to_the_serif_face() -> None:
         assert face == expected, (family, face)
 
 
+def test_italic_flag_selects_the_italic_cut_of_the_mapped_face() -> None:
+    # The text layer's per-cell italic flag (ground truth on born-digital pages; OCR
+    # never sets it) picks the italic cut of the SAME category face, bold included —
+    # roman stays the default so every existing caller is untouched.
+    from pathlib import Path
+
+    cases = (
+        ("Computer Modern", 400, "Tinos-Italic.ttf"),
+        ("Computer Modern", 700, "Tinos-BoldItalic.ttf"),
+        ("Helvetica", 400, "Arimo-Italic[wght].ttf"),
+        ("Courier New", 400, "Cousine-Italic.ttf"),
+    )
+    for family, weight, expected in cases:
+        face = Path(
+            getattr(load_font(20, "sample", family=family, weight=weight, italic=True), "path", "")
+        ).name
+        assert face == expected, (family, weight, face)
+    roman = Path(getattr(load_font(20, "sample", family="Times", weight=400), "path", "")).name
+    assert roman == "Tinos-Regular.ttf", roman
+    # No family hint (a leftover cell): the DejaVu fallback takes its Oblique cut.
+    leftover = Path(getattr(load_font(20, "sample", italic=True), "path", "")).name
+    assert leftover == "DejaVuSans-Oblique.ttf", leftover
+
+
+def test_unit_member_italic_survives_the_serde_roundtrip() -> None:
+    # The no-VLM retranslate path rebuilds units from cached dicts; the italic flag must
+    # ride along or a re-render silently loses the style.
+    from app.grouping.units import UnitMember
+
+    member = UnitMember(
+        cell_id=1, text="Theorem 1.", translate=True,
+        bbox={"left": 0, "top": 0, "width": 100, "height": 20}, order=1, italic=True,
+    )
+    assert UnitMember.from_dict(member.to_dict()).italic is True
+    plain = UnitMember(
+        cell_id=2, text="Body.", translate=True,
+        bbox={"left": 0, "top": 0, "width": 100, "height": 20}, order=2,
+    )
+    assert "italic" not in plain.to_dict()
+    assert UnitMember.from_dict(plain.to_dict()).italic is False
+
+
 def test_wrap_to_planes_justified_packs_greedy_full_lines() -> None:
     # Justified setting packs each line as full as its plane allows and leaves the
     # remainder to the last (ragged-by-design) line; the balanced fill spreads leftover
