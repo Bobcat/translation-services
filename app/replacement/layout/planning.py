@@ -30,6 +30,7 @@ from app.replacement.text.fit import fold_lone_fullwidth_punctuation
 from app.replacement.text.fit import is_cjk_text
 from app.replacement.ground.color import _CHROMA_SNAP_SPREAD
 from app.replacement.ground.color import sample_oriented_colors
+from app.replacement.layout.bands import band_margin_at
 from app.replacement.layout.tables import _split_table_row
 from app.replacement.layout.tables import _reproduced_in
 from app.replacement.layout.markers import _cell_marker
@@ -297,6 +298,7 @@ def _plan_group(
     ink_fill: bool = False,
     angle_field: tuple[float, float] | None = None,
     size_cohorts: dict[int, float] | None = None,
+    text_bands: list[dict[str, float]] | None = None,
     base_arr: np.ndarray | None = None,
     protected_boxes: list[dict[str, Any]] | None = None,
     sweep_ok: bool | None = None,
@@ -332,6 +334,7 @@ def _plan_group(
                     ink_fill=ink_fill,
                     angle_field=angle_field,
                     size_cohorts=size_cohorts,
+                    text_bands=text_bands,
                     base_arr=base_arr,
                     protected_boxes=protected_boxes,
                     sweep_ok=sweep_ok,
@@ -596,9 +599,19 @@ def _plan_group(
     # leaves the plane at its footprint width, i.e. exactly the "footprint" behaviour. Only
     # for axis-aligned groups (the scan is axis-aligned — same honest limit as the ink
     # sweep) and never for centered ones (growing right would break the centring).
-    if width_fit_mode == "extend" and angle == 0.0 and not centered:
+    # "extend_to_margin" adds ONE ceiling on top of that scan: the right margin of the text
+    # band the line is set in (layout/bands.py). The scan itself cannot see a margin — it
+    # stops at ~1 em from the IMAGE edge, which is the only frame a photo or sign has and
+    # the wrong one for a document. Without the ceiling a line grows across a two-column
+    # page's gutter into its neighbour, or ~260px past a paper's own right margin.
+    if width_fit_mode in ("extend", "extend_to_margin") and angle == 0.0 and not centered:
         for plane, (bg, _fg) in zip(planes, colors):
-            plane["width"] += _clean_right_extension(base_arr, plane, bg, protected_boxes or [])
+            extension = _clean_right_extension(base_arr, plane, bg, protected_boxes or [])
+            if width_fit_mode == "extend_to_margin" and text_bands:
+                margin = band_margin_at(text_bands, float(plane["frame"][2]))
+                if margin is not None:
+                    extension = min(extension, max(0.0, margin - float(plane["frame"][3])))
+            plane["width"] += extension
     elif angle == 0.0 and not centered:
         # Footprint mode: the 4% width slack (wrap._WIDTH_SLACK) must not carry a line INTO an
         # adjacent panel — clamp it at a WALL: a colour step inside the slack window that stays

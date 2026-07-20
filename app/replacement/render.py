@@ -52,6 +52,7 @@ from PIL import ImageDraw
 
 from app.replacement.ground.inpaint import inpaint_mask
 from app.replacement.jobs import _Job
+from app.replacement.layout.bands import text_bands
 from app.replacement.layout.groups import _groups
 from app.replacement.layout.planning import _plan_group
 from app.replacement.text.angle import _document_angle_field
@@ -128,6 +129,9 @@ def render_translated_image(
     band_ratio = _document_band_ratio(base, translation_units) if size_metric_mode == "band" else None
     angle_field = _document_angle_field(translation_units)
     size_cohorts = _document_size_cohorts(translation_units) if size_cohort_mode == "vlm" else None
+    # One pass over the page's own boxes, shared by every group: the text bands and their
+    # right margins that bound the "extend_to_margin" width fit.
+    bands = text_bands(protected_boxes) if width_fit_mode == "extend_to_margin" else None
     for group in groups:
         jobs.extend(
             _plan_group(
@@ -140,6 +144,7 @@ def render_translated_image(
                 ink_fill=size_metric_mode == "fill",
                 angle_field=angle_field,
                 size_cohorts=size_cohorts,
+                text_bands=bands,
                 base_arr=base_arr,
                 protected_boxes=protected_boxes,
                 document_member_texts=document_member_texts,

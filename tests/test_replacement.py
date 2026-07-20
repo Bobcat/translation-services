@@ -1908,6 +1908,46 @@ def test_academic_serif_families_map_to_the_serif_face() -> None:
         assert face == expected, (family, face)
 
 
+def _box(left: int, width: int, top: int = 0) -> dict[str, int]:
+    return {"left": left, "top": top, "width": width, "height": 20}
+
+
+def test_text_bands_split_on_a_gutter_and_carry_each_column_margin() -> None:
+    from app.replacement.layout.bands import band_margin_at
+    from app.replacement.layout.bands import text_bands
+
+    # Two columns with a 40px empty corridor between them: each column's margin is its own
+    # rightmost line, so a line may never grow across the gutter into its neighbour.
+    boxes = [_box(100, 300, y) for y in (0, 40, 80)] + [_box(440, 300, y) for y in (0, 40, 80)]
+    boxes.append(_box(100, 250, 120))          # a shorter last line in the left column
+    bands = text_bands(boxes)
+    assert len(bands) == 2, bands
+    assert bands[0]["margin"] == 400.0
+    assert bands[1]["margin"] == 740.0
+    assert band_margin_at(bands, 100) == 400.0
+    assert band_margin_at(bands, 440) == 740.0
+
+
+def test_text_bands_do_not_cut_on_a_trailing_empty_margin() -> None:
+    from app.replacement.layout.bands import text_bands
+
+    # A design image: free space right of the longest line is exactly what the extend fit is
+    # for, so it must NOT read as a gutter — one band, its margin the longest line.
+    boxes = [_box(20, 200), _box(20, 120, 40), _box(20, 80, 80)]
+    bands = text_bands(boxes)
+    assert len(bands) == 1, bands
+    assert bands[0]["margin"] == 220.0
+
+
+def test_band_margin_is_none_outside_every_band() -> None:
+    from app.replacement.layout.bands import band_margin_at
+    from app.replacement.layout.bands import text_bands
+
+    bands = text_bands([_box(10, 100), _box(10, 60, 40)])
+    assert band_margin_at(bands, 5000) is None      # past the page's boxes: nothing to bound
+    assert band_margin_at([], 10) is None           # no evidence at all: caller keeps its limits
+
+
 def test_italic_flag_selects_the_italic_cut_of_the_mapped_face() -> None:
     # The text layer's per-cell italic flag (ground truth on born-digital pages; OCR
     # never sets it) picks the italic cut of the SAME category face, bold included —
