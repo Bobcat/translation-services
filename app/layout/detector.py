@@ -25,6 +25,14 @@ TEXT_LABELS = {
     "text", "content", "paragraph_title", "doc_title", "abstract", "aside_text",
     "list", "header", "footer", "figure_title", "table_title", "reference",
 }
+# Labels that form a BODY COLUMN — the subset of TEXT_LABELS whose region marks a strip of
+# running text with its own left and right margin. Deliberately narrower: a doc/figure/table
+# title, a header and a footer are flow text but SPAN or stand apart, so they must never set a
+# column's margin (measured: those are exactly the elements that make a page read as one
+# column; see app.replacement.layout.bands).
+COLUMN_LABELS = {
+    "text", "content", "paragraph_title", "abstract", "aside_text", "list", "reference",
+}
 # Labels whose inner text keeps its original pixels (see app.layout.evidence).
 PRESERVE_LABELS = {"image", "chart"}
 # Labels that are document structure but not flow columns; their cells count as document

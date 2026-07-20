@@ -91,6 +91,7 @@ def render_translated_image(
     size_cohort_mode: str = "off",
     preserve_unchanged_text: bool = False,
     image_category: str = "",
+    layout_regions: list[dict[str, Any]] | None = None,
 ) -> bytes:
     opened = Image.open(input_path)
     # Carry the source's ICC colour profile onto the output. ``convert("RGB")`` keeps the raw pixel
@@ -131,7 +132,11 @@ def render_translated_image(
     size_cohorts = _document_size_cohorts(translation_units) if size_cohort_mode == "vlm" else None
     # One pass over the page's own boxes, shared by every group: the text bands and their
     # right margins that bound the "extend_to_margin" width fit.
-    bands = text_bands(protected_boxes) if width_fit_mode == "extend_to_margin" else None
+    bands = (
+        text_bands(protected_boxes, layout_regions or [])
+        if width_fit_mode == "extend_to_margin"
+        else None
+    )
     for group in groups:
         jobs.extend(
             _plan_group(

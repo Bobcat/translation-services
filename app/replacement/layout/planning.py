@@ -608,7 +608,8 @@ def _plan_group(
         for plane, (bg, _fg) in zip(planes, colors):
             extension = _clean_right_extension(base_arr, plane, bg, protected_boxes or [])
             if width_fit_mode == "extend_to_margin" and text_bands:
-                margin = band_margin_at(text_bands, float(plane["frame"][2]))
+                _x_axis, _y_axis, xmin, _xmax, ymin, ymax = plane["frame"]
+                margin = band_margin_at(text_bands, float(xmin), (float(ymin) + float(ymax)) / 2.0)
                 if margin is not None:
                     extension = min(extension, max(0.0, margin - float(plane["frame"][3])))
             plane["width"] += extension

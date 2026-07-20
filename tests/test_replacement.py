@@ -1924,8 +1924,64 @@ def test_text_bands_split_on_a_gutter_and_carry_each_column_margin() -> None:
     assert len(bands) == 2, bands
     assert bands[0]["margin"] == 400.0
     assert bands[1]["margin"] == 740.0
-    assert band_margin_at(bands, 100) == 400.0
-    assert band_margin_at(bands, 440) == 740.0
+    assert band_margin_at(bands, 100, 0) == 400.0
+    assert band_margin_at(bands, 440, 0) == 740.0
+
+
+def test_a_page_wide_element_hides_the_gutter_from_the_projection_but_not_from_the_regions() -> None:
+    # The measured failure: one page-wide element (a figure caption, a centred page number)
+    # fills the empty corridor, so the projection reads the whole page as ONE column and the
+    # ceiling lands at the far column's edge — stopping nothing. A labelled body region knows
+    # better, and its margin is the rightmost BOX inside it, so a region drawn too wide
+    # cannot inflate it either.
+    from app.replacement.layout.bands import band_margin_at
+    from app.replacement.layout.bands import text_bands
+
+    boxes = [_box(100, 300, y) for y in (100, 140)] + [_box(440, 300, y) for y in (100, 140)]
+    boxes.append(_box(100, 640, 0))            # the caption, spanning both columns
+    assert len(text_bands(boxes)) == 1         # projection alone: one band...
+    assert text_bands(boxes)[0]["margin"] == 740.0   # ...whose margin is the far column's edge
+
+    regions = [
+        {"label": "text", "score": 0.9, "coordinate": [90, 90, 420, 200]},
+        {"label": "text", "score": 0.9, "coordinate": [430, 90, 800, 200]},
+        {"label": "figure_title", "score": 0.9, "coordinate": [90, -10, 760, 30]},
+    ]
+    bands = text_bands(boxes, regions)
+    assert band_margin_at(bands, 100, 110) == 400.0   # left column keeps its own margin
+    assert band_margin_at(bands, 440, 110) == 740.0
+    # Knowing which boxes are body text also un-collapses the PROJECTION: the caption no
+    # longer votes, so the gutter appears there too and the lines the regions did not claim
+    # get a column margin as well. The caption's own row lands on a margin below its own
+    # right edge, so it simply does not grow.
+    assert band_margin_at(bands, 100, 5) == 400.0
+
+
+def test_overlapping_bands_yield_the_tightest_margin() -> None:
+    # Regions overlap each other and always overlap the projection band beneath them. Taking
+    # the tightest covering margin means an overlap can only bound a line MORE — at worst the
+    # extension is withdrawn and the line keeps its footprint.
+    from app.replacement.layout.bands import band_margin_at
+    from app.replacement.layout.bands import text_bands
+
+    # Two strips too close to read as a gutter, so the projection gives ONE band and the
+    # regions are the only thing that can differ here.
+    boxes = [_box(100, 300, y) for y in (100, 140)] + [_box(410, 330, y) for y in (100, 140)]
+    wide = {"label": "text", "score": 0.9, "coordinate": [90, 90, 800, 200]}
+    narrow = {"label": "text", "score": 0.9, "coordinate": [90, 90, 405, 200]}
+    assert band_margin_at(text_bands(boxes, [wide]), 100, 110) == 740.0
+    assert band_margin_at(text_bands(boxes, [wide, narrow]), 100, 110) == 400.0
+
+
+def test_a_region_holding_no_text_is_not_evidence() -> None:
+    from app.replacement.layout.bands import band_margin_at
+    from app.replacement.layout.bands import text_bands
+
+    boxes = [_box(100, 300, y) for y in (100, 140)]
+    empty = [{"label": "text", "score": 0.9, "coordinate": [900, 90, 1400, 200]}]
+    bands = text_bands(boxes, empty)
+    assert all(band["left"] < 900 for band in bands), bands
+    assert band_margin_at(bands, 900, 110) is None   # nothing claims that strip
 
 
 def test_text_bands_do_not_cut_on_a_trailing_empty_margin() -> None:
@@ -1944,8 +2000,8 @@ def test_band_margin_is_none_outside_every_band() -> None:
     from app.replacement.layout.bands import text_bands
 
     bands = text_bands([_box(10, 100), _box(10, 60, 40)])
-    assert band_margin_at(bands, 5000) is None      # past the page's boxes: nothing to bound
-    assert band_margin_at([], 10) is None           # no evidence at all: caller keeps its limits
+    assert band_margin_at(bands, 5000, 0) is None   # past the page's boxes: nothing to bound
+    assert band_margin_at([], 10, 0) is None        # no evidence at all: caller keeps its limits
 
 
 def test_italic_flag_selects_the_italic_cut_of_the_mapped_face() -> None:

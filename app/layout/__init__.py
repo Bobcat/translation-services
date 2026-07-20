@@ -12,6 +12,7 @@ the component, not its file layout.
 """
 from app.layout.detector import PRESERVE_LABELS
 from app.layout.detector import STRUCTURE_LABELS
+from app.layout.detector import COLUMN_LABELS
 from app.layout.detector import TEXT_LABELS
 from app.layout.detector import detect_layout_regions
 from app.layout.evidence import cell_columns
@@ -21,6 +22,7 @@ from app.layout.evidence import preserved_cell_indices
 __all__ = [
     "PRESERVE_LABELS",
     "STRUCTURE_LABELS",
+    "COLUMN_LABELS",
     "TEXT_LABELS",
     "detect_layout_regions",
     "cell_columns",

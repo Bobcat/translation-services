@@ -80,6 +80,7 @@ def replay_fixture(
         size_cohort_mode=fixture.size_cohort_mode,
         preserve_unchanged_text=fixture.preserve_unchanged_text,
         image_category=str(grouping.metadata.get("category") or ""),
+        layout_regions=fixture.layout_regions or [],
     )
     render_ms = (time.perf_counter() - render_started) * 1000.0
     return actual_units, actual_ignored, rendered_png, {"group_ms": group_ms, "render_ms": render_ms}
