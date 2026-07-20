@@ -13,14 +13,28 @@ from dataclasses import field
 from typing import Any
 
 
+def _box_number(value: Any) -> int | float:
+    """One bbox/polygon coordinate, its precision intact.
+
+    OCR boxes are whole pixels, but a PDF text layer's are not (a line top of 138.69 px at the
+    analysis dpi), and truncating them to int on the way BACK from JSON silently re-renders a
+    cached run on boxes up to a pixel smaller than the run that produced them — every re-entry
+    (re-render, re-translate) then drifts from the original render it is supposed to reproduce.
+    Whole values stay ``int`` so an OCR run's artifacts keep their exact shape.
+    """
+    number = float(value)
+    return int(number) if number.is_integer() else number
+
+
 @dataclass(frozen=True)
 class UnitMember:
     cell_id: int
     text: str
     translate: bool
-    bbox: dict[str, int]
+    # Whole pixels from OCR; fractional from a PDF text layer (see _box_number).
+    bbox: dict[str, int | float]
     order: int
-    polygon: list[dict[str, int]] | None = None
+    polygon: list[dict[str, int | float]] | None = None
     # Exact em size of this member's text in image pixels, when the cell source
     # knows it (a text layer's declared size); None = derive from ink geometry.
     size_px: float | None = None
@@ -57,9 +71,9 @@ class UnitMember:
             cell_id=int(data["cell_id"]),
             text=str(data.get("text") or ""),
             translate=bool(data.get("translate", True)),
-            bbox={key: int(value) for key, value in dict(data["bbox"]).items()},
+            bbox={key: _box_number(value) for key, value in dict(data["bbox"]).items()},
             order=int(data.get("order") or 0),
-            polygon=[{key: int(value) for key, value in dict(point).items()} for point in polygon]
+            polygon=[{key: _box_number(value) for key, value in dict(point).items()} for point in polygon]
             if polygon is not None
             else None,
             size_px=float(size_px) if size_px is not None else None,
@@ -73,7 +87,7 @@ class TranslationUnit:
     id: int
     order: int
     members: list[UnitMember]
-    bbox: dict[str, int]
+    bbox: dict[str, int | float]
     source_text: str
     # Index of the VLM hint line this unit matched (into GroupingResult.hint_units), so
     # the structured translation can map each translated line back onto its unit. None
@@ -129,7 +143,7 @@ class TranslationUnit:
             id=int(data["id"]),
             order=int(data.get("order") or 0),
             members=[UnitMember.from_dict(member) for member in data.get("members") or []],
-            bbox={key: int(value) for key, value in dict(data["bbox"]).items()},
+            bbox={key: _box_number(value) for key, value in dict(data["bbox"]).items()},
             source_text=str(data.get("source_text") or ""),
             hint_index=int(hint_index) if hint_index is not None else None,
             level=data.get("level"),

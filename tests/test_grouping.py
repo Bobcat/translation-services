@@ -1126,3 +1126,32 @@ def test_cell_marker_makes_the_unit_a_bullet() -> None:
 
     plain = _build_unit(cells=[dict(cells[1])], indices=[0], unit_id=2)
     assert plain.bullet is False
+
+
+def test_unit_serde_keeps_a_text_layer_box_at_full_precision() -> None:
+    # A PDF text layer's boxes are fractional pixels. Truncating them on the way back from
+    # JSON re-renders a cached run on boxes up to a pixel smaller than the run that produced
+    # them, so every re-entry (re-render, re-translate) drifts from the render it reproduces.
+    from app.grouping.units import TranslationUnit
+    from app.grouping.units import UnitMember
+
+    member = UnitMember(
+        cell_id=1, text="Attention", translate=True, order=1,
+        bbox={"left": 160.0, "top": 138.69, "width": 484.92, "height": 32.34},
+        polygon=[{"x": 160.0, "y": 138.69}],
+    )
+    unit = TranslationUnit(
+        id=1, order=1, members=[member], source_text="Attention",
+        bbox={"left": 160.0, "top": 138.69, "width": 484.92, "height": 32.34},
+    )
+    restored = TranslationUnit.from_dict(unit.to_dict())
+    assert restored.bbox == {"left": 160, "top": 138.69, "width": 484.92, "height": 32.34}
+    assert restored.members[0].bbox == restored.bbox
+    assert restored.members[0].polygon == [{"x": 160, "y": 138.69}]
+    # An OCR run's whole pixels stay int, so its artifacts keep their exact shape.
+    ocr = UnitMember(
+        cell_id=2, text="HELLO", translate=True, order=1,
+        bbox={"left": 40, "top": 20, "width": 160, "height": 20},
+    )
+    assert UnitMember.from_dict(ocr.to_dict()).bbox == {"left": 40, "top": 20, "width": 160, "height": 20}
+    assert all(isinstance(v, int) for v in UnitMember.from_dict(ocr.to_dict()).bbox.values())
