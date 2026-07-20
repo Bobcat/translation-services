@@ -1848,3 +1848,47 @@ def test_island_font_measures_and_draws_the_transplant() -> None:
     x0 = int(inner.getlength("voor "))
     slot = canvas.crop((x0, 0, x0 + 40, 30))
     assert any(px[3] > 0 for px in slot.getdata())  # the transplant left ink in its slot
+
+
+def test_restore_table_rules_recovers_a_rule_the_erase_covered() -> None:
+    # A thin wide horizontal rule sits in a row gap; a cell's erase quad grown by its pad
+    # reaches the rule row and paints background over part of it. The restore copies the
+    # source rule pixels back where the erase covered them, so the rule stays intact.
+    from app.replacement.ground.erase import _restore_table_rules
+    from app.replacement.jobs import _Job
+
+    original = np.full((120, 400, 3), 255, dtype=np.uint8)
+    original[60, 20:380] = 0  # a 360px-wide hairline rule at y=60
+    original[30, 120:200] = 0  # a word-ish short stroke (80px) at y=30 — NOT a rule
+
+    canvas = original.copy()
+    # An erase quad that paints white over the middle of the rule (breaking it) and over the
+    # short stroke entirely.
+    quad = [(100, 25), (300, 25), (300, 65), (100, 65)]
+    canvas[25:65, 100:300] = 255  # simulate the erase fill
+    assert (canvas[60, 100:300] == 255).all()  # rule broken by the erase
+
+    _restore_table_rules(canvas, original, [_Job(erase_quads=[quad], bg_color=(255, 255, 255), tile=None, dst_quad=None)])
+
+    assert (canvas[60, 20:380] == 0).all()  # the full rule is back
+    assert (canvas[30, 120:200] == 255).all()  # the short stroke stays erased (not a rule)
+
+
+def test_restore_table_rules_leaves_untouched_rules_and_bare_pages_alone() -> None:
+    from app.replacement.ground.erase import _restore_table_rules
+    from app.replacement.jobs import _Job
+
+    # No rule at all: a blank canvas is unchanged (and the detector short-circuits).
+    blank = np.full((80, 300, 3), 255, dtype=np.uint8)
+    canvas = blank.copy()
+    _restore_table_rules(canvas, blank, [])
+    assert (canvas == blank).all()
+
+    # A rule the erase never covered is left exactly as the canvas already had it.
+    original = np.full((80, 300, 3), 255, dtype=np.uint8)
+    original[40, 10:290] = 0
+    canvas = original.copy()
+    canvas[40, 150] = 128  # a stray canvas pixel far from any erase quad
+    _restore_table_rules(canvas, original, [_Job(erase_quads=[[(0, 0), (5, 0), (5, 5), (0, 5)]],
+                                                 bg_color=(255, 255, 255), tile=None, dst_quad=None)])
+    assert (canvas[40, 150] == 128).all()  # untouched: the erase quad did not cover this pixel

@@ -22,6 +22,25 @@ if TYPE_CHECKING:
 # Residue swallow: how far past the erase quads leftover ink of the erased text is searched.
 # Descenders and anti-alias fringes reach a few px; anything farther is not ours to erase.
 _RESIDUE_MARGIN = 12
+
+# Table rules: a thin, wide horizontal dark line is structure, not text. A cell's erase quad
+# grown by its AA pad reaches into the row gap where a rule sits and paints background over it,
+# breaking the rule into fragments (measured: 5 of 7 interior rules of a booktabs table erased).
+# Detect rules in the source and restore them where an erase quad covered them.
+_RULE_DARK = 128          # a rule pixel is at least this dark (0-255)
+_RULE_MIN_WIDTH = 150     # a continuous horizontal dark run this wide is a rule, not a glyph stroke
+_RULE_MAX_HEIGHT = 4      # rules are hairlines; taller solid bands are filled cells, not rules
+# A table rule is ISOLATED: it sits in a row gap with background a few px above AND below. This
+# is what separates it from the horizontal lines a naive detector also catches — a photo edge
+# (dark content around it) or an underline welded to its text (ink directly above). Without this
+# those get restored too and re-glue words the erase had cleanly separated (measured across the
+# scanned brochure and the weather fixtures).
+_RULE_ISOLATION_LIGHT = 200   # background is at least this light (0-255)
+_RULE_ISOLATION_GAP = 2       # rows above and below that must be background for a rule to qualify
+# A table rule is ACHROMATIC (black/grey ink). A saturated horizontal line is a designed accent,
+# not table structure: restoring one changed nothing visible (17 px on the measured quickguide)
+# but destabilised the re-OCR of the styled graphic beside it. Leave colour to the erase.
+_RULE_MAX_CHROMA = 40         # max channel spread (max-min) for a rule pixel
 # Growth of the Tier-2 inpaint mask past the erase quads. The quads' vertical margin is a
 # tight anti-alias allowance tuned for the flat paint; the model additionally needs the
 # fringe pixels MASKED (not just covered) or it treats them as context to continue.
@@ -181,6 +200,50 @@ def _needs_model_fill(original: np.ndarray, job: _Job, occupied: np.ndarray) -> 
 
 def _ellipse(radius_px: int) -> np.ndarray:
     return cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (radius_px, radius_px))
+
+
+def _restore_table_rules(canvas: np.ndarray, original: np.ndarray, jobs: list["_Job"]) -> None:
+    """Restore table rules the erase pass broke. A rule is a thin (<= _RULE_MAX_HEIGHT px), wide
+    (>= _RULE_MIN_WIDTH px) horizontal dark line — table structure that sits in the row gaps.
+    A cell's erase quad, grown by its AA pad, reaches into the gap and paints background over the
+    rule; this copies the source rule pixels back onto ``canvas`` wherever an erase quad covered
+    them. Restore-only-where-erased means untouched rules stay as-is and text ink is never
+    affected; called BEFORE the text composite, so text that genuinely overlaps a rule still wins.
+    Generalizes to any ruled table or line-art (a floor plan's walls) — anything the erase clipped."""
+    gray = cv2.cvtColor(original, cv2.COLOR_RGB2GRAY) if original.ndim == 3 else original
+    dark = gray < _RULE_DARK
+    if original.ndim == 3:  # black/grey ink only — a coloured accent line is not table structure
+        spread = original.max(axis=2).astype(np.int16) - original.min(axis=2).astype(np.int16)
+        dark &= spread <= _RULE_MAX_CHROMA
+    dark = dark.astype(np.uint8)
+    # Keep only pixels on a long horizontal run (a rule); a glyph stroke is far shorter.
+    horizontal = cv2.morphologyEx(
+        dark, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_RECT, (_RULE_MIN_WIDTH, 1))
+    )
+    # Drop tall solid bands (a filled dark cell has long horizontal runs too, but is not a rule).
+    thick = cv2.morphologyEx(
+        horizontal, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_RECT, (1, _RULE_MAX_HEIGHT + 2))
+    )
+    rules = cv2.subtract(horizontal, thick)
+    if not rules.any():
+        return
+    # Isolation gate: keep only rule pixels with background a few rows above AND below, so a
+    # photo edge or a text underline (dark neighbours) is not mistaken for a table rule.
+    light = gray >= _RULE_ISOLATION_LIGHT
+    gap = _RULE_ISOLATION_GAP
+    above = np.zeros_like(light)
+    above[gap:] = light[:-gap]  # background 'gap' rows above each pixel
+    below = np.zeros_like(light)
+    below[:-gap] = light[gap:]  # background 'gap' rows below
+    rules = rules & (above & below).astype(np.uint8)
+    if not rules.any():
+        return
+    erased = np.zeros(gray.shape, dtype=np.uint8)
+    for job in jobs:
+        for quad in job.erase_quads:
+            cv2.fillPoly(erased, [np.asarray(quad, dtype=np.int32)], 255)
+    restore = (rules > 0) & (erased > 0)
+    canvas[restore] = original[restore]
 
 
 def _erase_mask(original: np.ndarray, jobs: list[_Job]) -> np.ndarray:

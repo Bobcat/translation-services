@@ -63,6 +63,7 @@ from app.replacement.ground.erase import _GROUND_RING_INNER_PX
 from app.replacement.ground.erase import _ellipse
 from app.replacement.ground.erase import _erase_mask
 from app.replacement.ground.erase import _needs_model_fill
+from app.replacement.ground.erase import _restore_table_rules
 from app.replacement.ground.erase import _swallow_erase_residue
 
 
@@ -182,6 +183,10 @@ def render_translated_image(
                 erase.polygon(quad, fill=job.bg_color)
         canvas = np.asarray(base).copy()
         _swallow_erase_residue(canvas, original, jobs)
+
+    # Table rules the per-cell erase quads clipped are structure, not text — restore them from
+    # the source before the tiles go on, so a ruled table (or line-art) keeps its lines.
+    _restore_table_rules(canvas, original, jobs)
 
     # Pass 2: warp each text tile onto its oriented region.
     for job in jobs:
