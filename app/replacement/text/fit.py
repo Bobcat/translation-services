@@ -54,7 +54,15 @@ _SCRIPT_FONTS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
     ("NotoSansHebrew[wght].ttf", (("֐", "׿"),)),
     ("NotoSansTamil[wght].ttf", (("஀", "௿"),)),
 )
-_SERIF_HINTS = ("times", "georgia", "serif", "garamond", "minion", "cambria", "palatino", "baskerville", "didot", "book antiqua")
+_SERIF_HINTS = (
+    "times", "georgia", "serif", "garamond", "minion", "cambria", "palatino",
+    "baskerville", "didot", "book antiqua",
+    # The academic (LaTeX) serifs: the VLM names "Computer Modern" on every classic paper,
+    # and the text layer's own faces are Latin/Nimbus clones of it. Unmapped these fell to
+    # the SANS fallback, flipping a serif paper's whole character (islands design doc:
+    # transplanted serif formulas sat inside sans prose).
+    "computer modern", "latin modern", "lmroman", "cmr", "nimbus rom", "nimbusrom",
+)
 _MONO_HINTS = ("courier", "mono", "consol", "menlo", "monaco", "typewriter")
 
 

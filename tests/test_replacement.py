@@ -1892,3 +1892,36 @@ def test_restore_table_rules_leaves_untouched_rules_and_bare_pages_alone() -> No
     _restore_table_rules(canvas, original, [_Job(erase_quads=[[(0, 0), (5, 0), (5, 5), (0, 5)]],
                                                  bg_color=(255, 255, 255), tile=None, dst_quad=None)])
     assert (canvas[40, 150] == 128).all()  # untouched: the erase quad did not cover this pixel
+
+
+def test_academic_serif_families_map_to_the_serif_face() -> None:
+    # The VLM names "Computer Modern" on every classic LaTeX paper (and the text layer's
+    # own faces are Nimbus clones of it); unmapped these fell to the SANS fallback and
+    # flipped a serif paper's whole character. The sans/mono families stay put.
+    from pathlib import Path
+
+    for family in ("Computer Modern", "Latin Modern", "CMR10", "NimbusRomNo9L-Regu"):
+        face = Path(getattr(load_font(20, "sample", family=family, weight=400), "path", "")).name
+        assert face == "Tinos-Regular.ttf", (family, face)
+    for family, expected in (("Helvetica", "Arimo[wght].ttf"), ("Courier New", "Cousine-Regular.ttf")):
+        face = Path(getattr(load_font(20, "sample", family=family, weight=400), "path", "")).name
+        assert face == expected, (family, face)
+
+
+def test_wrap_to_planes_justified_packs_greedy_full_lines() -> None:
+    # Justified setting packs each line as full as its plane allows and leaves the
+    # remainder to the last (ragged-by-design) line; the balanced fill spreads leftover
+    # over every line, which under a narrow serif face pushed lines past the justify
+    # stretch cap and flipped whole blocks ragged.
+    from app.replacement.text.wrap import _wrap_to_planes
+
+    font = load_font(20, "x")
+    words = "een twee drie vier vijf zes zeven acht negen tien elf twaalf"
+    widths = [220.0, 220.0, 220.0, 220.0]
+    balanced = _wrap_to_planes(font, words, widths)
+    greedy = _wrap_to_planes(font, words, widths, justified=True)
+    assert len(greedy) <= len(widths)
+    # Every greedy line except the last is fuller than (or as full as) its balanced peer.
+    for g_line in greedy[:-1]:
+        assert font.getlength(g_line) <= 220.0  # still fits its plane
+    assert font.getlength(greedy[0]) >= font.getlength(balanced[0])

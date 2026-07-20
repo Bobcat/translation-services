@@ -680,7 +680,46 @@ def _plan_group(
         # 4-line block with one bad line sat at 75% and flipped the whole block ragged on
         # live-run translation wobble), beyond that ~a fifth of the block.
         if body and (len(body) - feasible) > max(1, len(body) // _JUSTIFY_SOFT_FRACTION):
-            justified = False
+            # GREEDY RETRY before giving up on the flush margin. The balanced fill spreads
+            # the block's leftover over EVERY line; under a face narrower than the fit was
+            # calibrated on (the academic serif mapping) that pushes many lines past the
+            # per-gap stretch cap at once (measured: 7 of 23 lines, tail 3.5x the space
+            # width). Justified setting wants the opposite — every line as full as its
+            # plane allows, the remainder on the last (ragged-by-design) line — so re-wrap
+            # greedily and re-evaluate. Only runs when balanced FAILED the consistency
+            # gate: every block the balanced fill serves well stays byte-identical.
+            retry_size = _group_size(planes, render_size_mode)
+            rfont, rlines = _fit_group(
+                joined, size=retry_size, plane_widths=plane_widths, family=family,
+                weight=weight, islands=group_islands, justified=True,
+            )
+            while retry_size > _MIN_RENDER_SIZE and _raw_condense(rfont, rlines, planes) < _CONDENSE_FLOOR:
+                retry_size -= 1
+                rfont, rlines = _fit_group(
+                    joined, size=retry_size, plane_widths=plane_widths, family=family,
+                    weight=weight, islands=group_islands, justified=True,
+                )
+            adopted = False
+            fits = _raw_condense(rfont, rlines, planes) >= _CONDENSE_FLOOR
+            if fits and all(plane.get("exact_size") for plane in planes):
+                fits = retry_size >= max(
+                    _MIN_RENDER_SIZE, int(round(_SQUEEZE_PRESERVE_FLOOR * source_size))
+                )
+            if fits:
+                rcondense = _condense_scale(rfont, rlines, planes)
+                rlast = max((i for i, l in enumerate(rlines) if l), default=-1)
+                rbody = [(rlines[i], planes[i]) for i in range(min(rlast, len(planes))) if rlines[i]]
+                rfeasible = sum(
+                    _justify_feasible(rfont, line, float(plane["width"]) / max(rcondense, 0.01))
+                    for line, plane in rbody
+                )
+                if rbody and (len(rbody) - rfeasible) <= max(1, len(rbody) // _JUSTIFY_SOFT_FRACTION):
+                    size, font, lines = retry_size, rfont, rlines
+                    condense, last_text_index = rcondense, rlast
+                    ascent, descent = font.getmetrics()
+                    adopted = True
+            if not adopted:
+                justified = False
 
     # After every consumer of the measured frames (colour sampling, slack/extend scans,
     # justify evidence): regularise the RENDER anchors onto the source's uniform line grid.

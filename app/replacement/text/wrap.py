@@ -47,6 +47,7 @@ def _fit_group(
     family: str | None = None,
     weight: int | None = None,
     islands: dict[str, Any] | None = None,
+    justified: bool = False,
 ) -> tuple[Any, list[str]]:
     """Render at the source ``size`` (true line height) in the unit's VLM font ``family`` /
     ``weight``, wrapped so each line fits the width of the plane it lands on (``plane_widths``).
@@ -56,7 +57,7 @@ def _fit_group(
     font = load_font(max(6, min(int(size), 160)), text, family=family, weight=weight)
     if islands:
         font = IslandFont(font, islands)
-    return font, _wrap_to_planes(font, text, plane_widths)
+    return font, _wrap_to_planes(font, text, plane_widths, justified=justified)
 
 def _raw_condense(font: Any, lines: list[str], planes: list[dict[str, Any]]) -> float:
     """Unclamped horizontal scale needed to bring every line within its plane width + slack.
@@ -80,7 +81,9 @@ def _condense_scale(font: Any, lines: list[str], planes: list[dict[str, Any]]) -
     squeeze past the floor (the pt size is reduced upstream instead)."""
     return max(_CONDENSE_FLOOR, min(1.0, _raw_condense(font, lines, planes)))
 
-def _wrap_to_planes(font: Any, text: str, plane_widths: list[float]) -> list[str]:
+def _wrap_to_planes(
+    font: Any, text: str, plane_widths: list[float], *, justified: bool = False
+) -> list[str]:
     """Wrap so each rendered line fits the width of the PLANE it lands on, in order, and the words
     are BALANCED across those lines — not greedily dumped.
 
@@ -104,6 +107,14 @@ def _wrap_to_planes(font: Any, text: str, plane_widths: list[float]) -> list[str
     # sliver. ``break_pieces`` breaks CJK per character (with kinsoku) and keeps Latin/Hangul/digits
     # as whitespace words, so each piece carries the ``glue`` to re-insert when it is not a line start.
     pieces = break_pieces(content)
+    if justified:
+        # Justified setting packs each line as FULL as its plane allows and leaves the
+        # remainder to the last line — which justify renders ragged anyway (how a set
+        # paragraph ends). The balanced fill below spreads the leftover over EVERY line
+        # instead; under a narrow serif face that pushed many lines past the per-gap
+        # stretch cap and flipped whole justified blocks to ragged (measured: 7 of 23
+        # lines infeasible, tail to 3.5x the space width).
+        return _greedy_wrap(font, pieces, plane_widths)
     line_count = len(_greedy_wrap(font, pieces, plane_widths))  # fewest lines at natural plane width
     caps = plane_widths[:line_count]
     # Smallest scale on the plane widths that still packs the pieces into ``line_count`` lines: this
