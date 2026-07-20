@@ -406,7 +406,11 @@ def load_font(
         # Noto Sans KR not provisioned: fall through to the CJK font (tofu for Hangul, graceful).
     if _has_cjk(text) or _has_hangul(text):
         cjk = _cjk_font_path()
-        return _first_loadable((cjk, *_FONT_NAMES) if cjk else _FONT_NAMES, size)
+        font = _first_loadable((cjk, *_FONT_NAMES) if cjk else _FONT_NAMES, size)
+        # A CJK-mixed line's Latin run can carry a glyph the CJK face lacks (PingFang has no
+        # U+0141 "Ł" — the Łukasz author refs dropped their initial). Same per-character DejaVu
+        # fallback the mapped path already applies, so the missing glyph draws instead of vanishing.
+        return _with_symbol_fallback(font, text, size)
     script = _load_script_font(text, size)
     if script is not None:
         return script

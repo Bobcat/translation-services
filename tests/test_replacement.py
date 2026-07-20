@@ -1502,6 +1502,22 @@ def test_load_font_falls_back_per_character_for_uncovered_symbols() -> None:
     assert not isinstance(plain, FallbackFont)
 
 
+def test_cjk_mixed_line_falls_back_for_a_latin_glyph_the_cjk_face_lacks() -> None:
+    # A CJK-mixed reference line carries "Łukasz"; the CJK face (PingFang) has no U+0141,
+    # so the initial dropped. The Latin run must route its uncovered glyph to DejaVu while
+    # the CJK text keeps the CJK face; a pure-CJK line keeps the plain single-face path.
+    from pathlib import Path
+    from app.replacement.text.fit import FallbackFont
+
+    font = load_font(22, "Łukasz Kaiser 主动记忆可以取代注意力吗？")
+    assert isinstance(font, FallbackFont)
+    faces = {Path(getattr(face, "path", "")).name for face, _ in font.runs("Łukasz")}
+    assert "DejaVuSans.ttf" in faces  # the Ł draws in DejaVu, not tofu
+
+    plain = load_font(22, "主动记忆可以取代注意力吗？")
+    assert not isinstance(plain, FallbackFont)
+
+
 def test_mixed_ink_body_prose_demotes_accent_lines_to_the_base_ink(tmp_path) -> None:
     # A body paragraph whose last source line is a chromatic citation run: the translation
     # re-wraps over the planes, so per-line colour would land on the wrong words — the group
