@@ -13,6 +13,7 @@ from dataclasses import replace
 from typing import Any
 
 from app.grouping.align import build_units_from_hint
+from app.grouping.align.overclaim import trim_overclaimed_hint_lines
 from app.grouping.units import GroupingResult
 from app.grouping.units import TranslationUnit
 from app.grouping.units import UnitMember
@@ -65,10 +66,14 @@ def group_cells_into_units(
         layout_regions=layout_regions,
         preserve_image_regions=preserve_image_regions,
     )
+    # The hint lines the TRANSLATOR sees, with any suffix a line swallowed from the next one
+    # removed (align/overclaim.py). Runs here, on the built units, because the cells are the
+    # evidence for what a line may carry; the list keeps its length so every parallel hint
+    # list stays indexable by hint_index.
     return replace(
         result,
         hint_raw=hint.raw,
-        hint_units=list(hint.units),
+        hint_units=trim_overclaimed_hint_lines(result.units, list(hint.units)),
         hint_levels=list(hint.levels),
         hint_block_ids=list(hint.block_ids),
         hint_alignments=list(hint.alignments),

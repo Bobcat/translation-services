@@ -1155,3 +1155,45 @@ def test_unit_serde_keeps_a_text_layer_box_at_full_precision() -> None:
     )
     assert UnitMember.from_dict(ocr.to_dict()).bbox == {"left": 40, "top": 20, "width": 160, "height": 20}
     assert all(isinstance(v, int) for v in UnitMember.from_dict(ocr.to_dict()).bbox.values())
+
+
+def test_overclaimed_hint_suffix_is_trimmed_but_an_honest_repeat_is_not() -> None:
+    # The grouping VLM reads a page as running prose, so a sentence that breaks across a
+    # column can be written out in full on the line where it STARTS and again as the
+    # continuation's own line. Both match cells, so the tail translates and renders twice.
+    from app.grouping.align.overclaim import trim_overclaimed_hint_lines
+    from app.grouping.units import TranslationUnit
+    from app.grouping.units import UnitMember
+
+    def unit(uid: int, hint_index: int, *texts: str) -> TranslationUnit:
+        members = [
+            UnitMember(cell_id=uid * 10 + n, text=text, translate=True, order=n,
+                       bbox={"left": 0, "top": n * 20, "width": 100, "height": 18})
+            for n, text in enumerate(texts, start=1)
+        ]
+        return TranslationUnit(
+            id=uid, order=uid, members=members, source_text=" ".join(texts),
+            bbox={"left": 0, "top": 0, "width": 100, "height": 18}, hint_index=hint_index,
+        )
+
+    tail = "high-quality dataset. An example of these differences is in Figure 2."
+    hints = [f"2022) advances methods that are also suitable for {tail}", tail]
+    units = [unit(1, 0, "2022) advances methods that are also suitable for"),
+             unit(2, 1, "high-quality dataset. An example of these", "differences is in Figure 2.")]
+    trimmed = trim_overclaimed_hint_lines(units, hints)
+    assert trimmed[0] == "2022) advances methods that are also suitable for"
+    assert trimmed[1] == tail          # the line that legitimately owns the text is untouched
+
+    # An equal-length repeat is two honest lines (a warning printed twice): both keep their
+    # text, or the second occurrence would render untranslated.
+    repeat = "Danger! Do not enter this area without protective equipment"
+    units = [unit(1, 0, repeat), unit(2, 1, repeat)]
+    assert trim_overclaimed_hint_lines(units, [repeat, repeat]) == [repeat, repeat]
+
+    # A line whose OWN cells print the tail keeps it: that is a real second print on the page,
+    # not another line's text.
+    own = [f"Intro line {tail}", tail]
+    units = [unit(1, 0, "Intro line", "high-quality dataset. An example of these",
+                  "differences is in Figure 2."),
+             unit(2, 1, tail)]
+    assert trim_overclaimed_hint_lines(units, own) == own
