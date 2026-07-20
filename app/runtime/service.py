@@ -15,6 +15,7 @@ from app.core.schemas import RequestPayload
 from app.tasks.rerender_image import run_rerender_image_pipeline
 from app.tasks.retranslate_image import run_retranslate_image_pipeline
 from app.tasks.translate_image import run_translate_image_pipeline
+from app.tasks.rerender_pdf import run_rerender_pdf_pipeline
 from app.tasks.translate_pdf import run_translate_pdf_pipeline
 from app.core.util import iso_utc
 from app.core.util import safe_token
@@ -117,7 +118,7 @@ class RequestRuntime:
 
         # The stored input file rides outside the schema: ``image`` for the image tasks,
         # ``document`` for translate_pdf — each injected by the intake in app.main.
-        source_key = "document" if payload.task == "translate_pdf" else "image"
+        source_key = "document" if payload.task in {"translate_pdf", "rerender_pdf"} else "image"
         source = dict(raw_payload.get(source_key) or {})
         if not str(source.get("local_path") or "").strip():
             return 400, {
@@ -417,9 +418,11 @@ class RequestRuntime:
     async def submit_rerender(
         self, *, source_request_id: str, body: dict[str, Any]
     ) -> tuple[int, dict[str, Any]]:
-        """Queue a ``rerender_image`` run that re-renders the source run's cached translations
-        with new render flags (``render_size_mode``/``erase_fill_mode``) — no LLM call, so a
-        render-flag A/B compares exactly the render, with zero translation run-variance."""
+        """Queue a re-render of the source run's cached translations with new render flags — no
+        LLM call, so a render-flag A/B compares exactly the render, with zero translation
+        run-variance. A document source queues ``rerender_pdf`` (its pages carry their own cached
+        grouping/translation and are re-rendered and reassembled); an image source queues
+        ``rerender_image``. Same endpoint either way: the caller changed a render flag, not a task."""
         sid = str(source_request_id or "").strip()
         async with self._lock:
             source = self._record_store.get(sid)
@@ -432,19 +435,26 @@ class RequestRuntime:
                 }
             source_request = dict(source.request)
         job_root = (self.work_root / safe_token(sid)).resolve()
-        if not (job_root / "grouping.json").exists() or not (job_root / "translation.json").exists():
+        is_document = str(source_request.get("task") or "") in {"translate_pdf", "rerender_pdf"}
+        cached = (
+            [job_root / "document.json", job_root / "pages"]
+            if is_document
+            else [job_root / "grouping.json", job_root / "translation.json"]
+        )
+        if not all(path.exists() for path in cached):
             return 409, {
                 "code": "REQUEST_SOURCE_TRANSLATION_MISSING",
                 "message": "source run has no cached translations to re-render (it may have been pruned)",
                 "retryable": False,
                 "details": {"request_id": sid},
             }
-        # Only the two render flags are caller-controlled; everything else carries over verbatim
+        # Only the render flags are caller-controlled; everything else carries over verbatim
         # from the source run — a re-render by definition changes nothing upstream of render.
         payload: dict[str, Any] = {
-            "task": "rerender_image",
+            "task": "rerender_pdf" if is_document else "rerender_image",
             "source_request_id": sid,
             "image": dict(source_request.get("image") or {}),
+            "document": dict(source_request.get("document") or {}),
             "source_lang_code": source_request.get("source_lang_code"),
             "target_lang_code": source_request.get("target_lang_code"),
             "translator_model": source_request.get("translator_model"),
@@ -489,6 +499,8 @@ class RequestRuntime:
             return self._process_retranslate_image_request(request_id, request)
         if str(request.get("task")) == "rerender_image":
             return self._process_rerender_image_request(request_id, request)
+        if str(request.get("task")) == "rerender_pdf":
+            return self._process_rerender_pdf_request(request_id, request)
         if str(request.get("task")) == "translate_pdf":
             return self._process_translate_pdf_request(request_id, request)
         return self._process_translate_image_request(request_id, request)
@@ -516,6 +528,28 @@ class RequestRuntime:
             checkpoint=self._cancel_checkpoint_for(request_id),
         )
         return self._persist_result(request_id, request, input_path, str(image.get("mime_type") or "image/png"), result)
+
+    def _process_rerender_pdf_request(self, request_id: str, request: dict[str, Any]) -> dict[str, Any]:
+        document = dict(request.get("document") or {})
+        input_path = Path(str(document.get("local_path") or "")).resolve()
+        if not input_path.exists() or not input_path.is_file():
+            raise RuntimeError("source input document file is missing")
+        source_request_id = str(request.get("source_request_id") or "").strip()
+        source_root = (self.work_root / safe_token(source_request_id)).resolve()
+        document_path = source_root / "document.json"
+        if not document_path.exists():
+            raise RuntimeError("source run document summary is missing (it may have been pruned)")
+        job_root = (self.work_root / safe_token(request_id)).resolve()
+        result = run_rerender_pdf_pipeline(
+            settings=self._settings,
+            source_pages_root=source_root / "pages",
+            source_document=json.loads(document_path.read_text(encoding="utf-8")),
+            request=request,
+            pages_root=job_root / "pages",
+            checkpoint=self._cancel_checkpoint_for(request_id),
+            progress=self._pages_progress_for(request_id),
+        )
+        return self._persist_pdf_result(request_id, request, input_path, result)
 
     def _process_retranslate_image_request(self, request_id: str, request: dict[str, Any]) -> dict[str, Any]:
         image = dict(request.get("image") or {})
@@ -750,4 +784,6 @@ class RequestRuntime:
             return "ocr_inspect"
         if task == "translate_pdf":
             return "census"
+        if task == "rerender_pdf":
+            return "pages"
         return "running"

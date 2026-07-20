@@ -7,7 +7,9 @@ from pydantic import BaseModel
 from pydantic import Field
 
 
-TaskName = Literal["translate_image", "retranslate_image", "rerender_image", "translate_pdf"]
+TaskName = Literal[
+    "translate_image", "retranslate_image", "rerender_image", "translate_pdf", "rerender_pdf"
+]
 RequestState = Literal["queued", "running", "completed", "failed", "cancelled", "cancel_requested"]
 TranslatorMode = Literal["translategemma", "generic"]
 
