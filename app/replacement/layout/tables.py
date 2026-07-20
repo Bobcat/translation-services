@@ -72,6 +72,7 @@ def _split_table_row(
     if not columns:
         return None
     _rehome_column_strays(columns, pairs)
+    _redistribute_duplicate_value_fields(columns, pairs)
     # A field with no member of its own shares a column (a 'PRIJS | BEDRAG' hint OCR read as one
     # box): attach its translation to the column whose members it best matches, kept in field
     # order so the cell renders the fields as written.
@@ -268,6 +269,48 @@ def _rehome_column_strays(
                     members.remove(member)
                     other_members.append(member)
                     break
+
+
+def _redistribute_duplicate_value_fields(
+    columns: dict[int, list[dict[str, Any]]], pairs: list[tuple[str, str]]
+) -> None:
+    """A DUPLICATED column-header value (a multi-level header: "EN-DE"/"EN-FR" appear once
+    under each group header) is the case _rehome_column_strays cannot fix: both cells match
+    the FIRST same-value field, so both bind there and the second field stays empty — the two
+    physical columns collapse into one ("EN-DE EN-DE") and the far cells erase with nothing
+    redrawn. Here the target field is empty, so the stray has nowhere to move under the x-
+    overlap rule. Pool the members of all same-value fields, cluster them into physical columns
+    by x, and lay one cluster per field occurrence (x-order to field-index order) so each column
+    renders at its own x. Only acts when the physical column count matches the field count — an
+    exact multi-level header — leaving every other table untouched (the values are identical, so
+    which field-index a column takes does not change its rendered text)."""
+    fields_by_value: dict[str, list[int]] = {}
+    for index, (source, _translated) in enumerate(pairs):
+        fields_by_value.setdefault(_field_key(source), []).append(index)
+    for indices in fields_by_value.values():
+        if len(indices) < 2:
+            continue
+        pooled = [member for index in indices for member in columns.get(index, [])]
+        clusters = _cluster_members_by_x(pooled)
+        if len(clusters) != len(indices):
+            continue  # not an exact one-column-per-field split: leave the text match's result
+        clusters.sort(key=lambda cluster: min(float((m.get("bbox") or {}).get("left") or 0.0) for m in cluster))
+        for index, cluster in zip(indices, clusters):
+            columns[index] = cluster
+
+
+def _cluster_members_by_x(members: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
+    """Group members into physical columns: a member joins a cluster it x-overlaps (wrapped
+    lines of one column stack in x); otherwise it starts a new column."""
+    clusters: list[list[dict[str, Any]]] = []
+    for member in sorted(members, key=lambda m: float((m.get("bbox") or {}).get("left") or 0.0)):
+        for cluster in clusters:
+            if any(_x_overlap_fraction(member, other) >= _COLUMN_STACK_OVERLAP for other in cluster):
+                cluster.append(member)
+                break
+        else:
+            clusters.append([member])
+    return clusters
 
 
 def _x_overlap_fraction(a: dict[str, Any], b: dict[str, Any]) -> float:

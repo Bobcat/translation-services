@@ -85,6 +85,36 @@ def test_split_table_row_groups_a_wrapped_column_into_one_cell() -> None:
     assert "advertising" in by_left[656]["translated_text"]
 
 
+def test_split_table_row_separates_duplicated_multilevel_column_headers() -> None:
+    # A multi-level header repeats a subheader value under each group header: "EN-DE"/"EN-FR"
+    # appear once under BLEU and once under Training Cost. Both same-value cells bound to the
+    # first matching field, collapsing two physical columns into one ("EN-DE EN-DE") while the
+    # far cells erased blank. Each subheader must render as its own column at its own x.
+    unit = {
+        "field_translations": [
+            ("Model", "模型"), ("BLEU", "BLEU"), ("Training Cost", "训练成本"),
+            ("EN-DE", "EN-DE"), ("EN-FR", "EN-FR"), ("EN-DE", "EN-DE"), ("EN-FR", "EN-FR"),
+        ],
+        "members": [
+            {"text": "Model", "translate": True, "bbox": {"left": 300, "top": 236, "width": 60, "height": 20}},
+            {"text": "BLEU", "translate": True, "bbox": {"left": 690, "top": 210, "width": 60, "height": 20}},
+            {"text": "Training Cost", "translate": True, "bbox": {"left": 850, "top": 210, "width": 120, "height": 20}},
+            {"text": "EN-DE", "translate": True, "bbox": {"left": 641, "top": 252, "width": 66, "height": 20}},
+            {"text": "EN-FR", "translate": True, "bbox": {"left": 734, "top": 252, "width": 64, "height": 20}},
+            {"text": "EN-DE", "translate": True, "bbox": {"left": 861, "top": 252, "width": 66, "height": 20}},
+            {"text": "EN-FR", "translate": True, "bbox": {"left": 977, "top": 252, "width": 64, "height": 20}},
+        ],
+    }
+    cells = _split_table_row(unit)
+    assert cells is not None
+    lefts = sorted(min(m["bbox"]["left"] for m in c["members"]) for c in cells)
+    assert lefts == [300, 641, 690, 734, 850, 861, 977]
+    # Each subheader column carries exactly ONE "EN-DE"/"EN-FR", not a doubled value.
+    sub = [c for c in cells if c["translated_text"] in ("EN-DE", "EN-FR")]
+    assert len(sub) == 4
+    assert all(len(c["members"]) == 1 for c in sub)
+
+
 def test_split_table_row_pulls_a_reproduced_number_line_into_its_column() -> None:
     # The spend column's last line "2025" is a pure number -> non-translatable, but the spend
     # translation re-emits it. It must join the spend cell so the column erase covers it, instead
