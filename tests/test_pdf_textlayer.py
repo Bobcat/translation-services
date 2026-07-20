@@ -156,6 +156,31 @@ def test_island_runs_absorbs_a_roman_subscript_by_size() -> None:
     assert len(runs[0]) == 3  # CMMI d + subscript + "= 512 ,"
 
 
+def test_island_runs_short_name_with_footnote_star_is_not_a_formula() -> None:
+    # An author name "Ashish Vaswani*" is 2 prose words plus a 1-char CMSY footnote star.
+    # The min-prose-words floor must NOT drop it as a formula (that left the author grid
+    # without a name anchor); the star becomes an island, the name stays prose.
+    spans = [
+        _span("QTGBAA+NimbusRomNo9L-Medi", "Ashish Vaswani"),
+        _span("GFJLNS+CMSY7", "*", size=7.0),
+    ]
+    runs = _runs(spans)
+    assert isinstance(runs, list) and len(runs) == 1
+    assert _span_text_of(runs[0]) == "*"
+    # A big formula with only 2 prose words still drops (the floor still guards those).
+    from app.pdf.textlayer import _FORMULA_LINE
+
+    big = [
+        _span("NimbusRomNo9L-Regu", "where also"),
+        _span("GFJLNS+CMMI10", " QW KW VW softmax d head"),
+    ]
+    assert _runs(big) is _FORMULA_LINE
+
+
+def _span_text_of(run) -> str:
+    return "".join("".join(ch.get("c", "") for ch in s.get("chars", [])) for s in run).strip()
+
+
 def test_island_runs_display_equation_without_body_prose_is_formula() -> None:
     from app.pdf.textlayer import _FORMULA_LINE
 

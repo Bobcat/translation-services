@@ -340,7 +340,12 @@ def _island_runs(
     )
     if total_chars <= 0 or math_chars / total_chars > _ISLAND_MAX_MATH_SHARE:
         return _FORMULA_LINE
-    if prose_words < _ISLAND_MIN_PROSE_WORDS:
+    # The min-prose-words floor guards display-equation ANNOTATIONS ("where head_i = ..."),
+    # which are prose-sparse. It must not drop a short prose line carrying only a footnote-
+    # sized mark: an author name "Ashish Vaswani*" is 2 prose words + a 1-char CMSY star, and
+    # dropping it left the author grid without a name anchor (small hallucinated duplicates).
+    # A math run of at most a marker's length is never a formula worth whole-line preservation.
+    if prose_words < _ISLAND_MIN_PROSE_WORDS and math_chars > _MARKER_MAX_CHARS:
         return _FORMULA_LINE
     if dominant_family is not None and not any(
         _text_family(span) == dominant_family
