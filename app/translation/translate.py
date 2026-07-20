@@ -283,11 +283,33 @@ def translate_units(
                 route = f"{decision.translation_route}_batch_fallback" if batched else decision.translation_route
         if translated and _tex_leak_mismatch(source_text, translated):
             # The unit's own cells carry no math (formula lines drop before grouping), so a
-            # TeX-bearing translation came from the hint's reading of dropped lines: rendering
-            # it would print markup AND duplicate content whose pixels remain. Preserve —
-            # a fragment retry over the surviving cells would only produce mid-sentence soup.
-            translated = ""
-            route = f"{route}_tex_leak"
+            # TeX-bearing translation came from the hint's reading of dropped lines. Salvage
+            # what is safely ours before falling back to preserve:
+            # - a FIELD ROW (a complexity table): fields whose source is itself TeX describe
+            #   preserved formula pixels, never our cells — drop those pairs, keep the labels;
+            # - PROSE with only decoration TeX (a footnote marker): strip it when the removed
+            #   share is tiny and real prose remains.
+            # Everything else keeps the preserve: rendering a formula-heavy translation's
+            # remainder would duplicate content whose dropped-line pixels remain.
+            fields = batch_fields.get(unit.id)
+            salvaged = ""
+            if fields:
+                clean = [(s, t) for s, t in fields if not (_tex_markup(s) or _tex_markup(t))]
+                if clean and len(clean) < len(fields):
+                    batch_fields[unit.id] = clean
+                    salvaged = " ".join(t for _s, t in clean)
+                    route = f"{route}_tex_fields_dropped"
+            elif len(re.findall(r"\w+", source_text)) >= _TEX_STRIP_MIN_SOURCE_WORDS:
+                stripped = _strip_tex_markup(translated)
+                removed = max(0, len(translated) - len(stripped))
+                if stripped and removed <= _TEX_STRIP_MAX_SHARE * len(translated):
+                    salvaged = stripped
+                    route = f"{route}_tex_stripped"
+            if salvaged and not _tex_leak_mismatch(source_text, salvaged):
+                translated = salvaged
+            else:
+                translated = ""
+                route = f"{route}_tex_leak"
         if translated and _island_token_mismatch(source_text, translated):
             # The islands contract (islands design doc, phase 3): every ⟦Mn⟧ token of the
             # source must appear exactly once in the translation — reordering is fine (the
@@ -745,13 +767,38 @@ def _tex_markup(text: str) -> bool:
     if _TEX_COMMAND_RE.search(text):
         return True
     return any(
-        re.search(r"[_^{}\\]", content) or re.fullmatch(r"[A-Za-z0-9]{1,4}", content.strip())
+        re.search(r"[_^{}\\]", content) or re.fullmatch(r"[A-Za-z0-9(),./]{1,6}", content.strip())
         for content in _TEX_DOLLAR_RE.findall(text)
     )
 
 
 def _tex_leak_mismatch(source_text: str, translated: str) -> bool:
     return _tex_markup(str(translated)) and not _tex_markup(str(source_text))
+
+
+# Salvage bounds for a TeX-bearing translation (islands design doc, tex gate). Decoration
+# TeX (a footnote marker "$^5$") is a tiny share of the translation and strips cleanly; a
+# formula-heavy translation covers dropped math lines whose pixels remain, and rendering
+# its stripped remainder would duplicate that content — those keep the preserve.
+_TEX_STRIP_MAX_SHARE = 0.12
+_TEX_STRIP_MIN_SOURCE_WORDS = 3
+
+
+def _strip_tex_markup(translated: str) -> str:
+    """``translated`` without its TeX spans: math-like $...$ pairs and bare commands are
+    removed, whitespace collapsed and space-before-punctuation tidied."""
+    out = str(translated)
+
+    def _drop_pair(match):
+        content = match.group(1)
+        if re.search(r"[_^{}\\]", content) or re.fullmatch(r"[A-Za-z0-9(),./]{1,6}", content.strip()):
+            return " "
+        return match.group(0)
+
+    out = _TEX_DOLLAR_RE.sub(_drop_pair, out)
+    out = _TEX_COMMAND_RE.sub(" ", out)
+    out = re.sub(r"\s+([,.;:!?)\]])", r"\1", re.sub(r"\s+", " ", out)).strip()
+    return out
 
 
 def _island_token_mismatch(source_text: str, translated: str) -> bool:

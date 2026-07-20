@@ -138,6 +138,15 @@ Three findings from the first live runs, each now part of the design:
   unit degrades to preserve (a fragment retry over the surviving cells would
   only produce mid-sentence soup). Money pairs ("$5 and $10") stay out of the
   net. Measured on the paper: 11 units preserved, zero TeX in the output.
+  **Salvage (second pass, measured on those 11):** before falling back to
+  preserve, two safely-ours shapes are salvaged. A FIELD ROW drops the pairs
+  whose source is itself TeX (they describe preserved formula pixels — a
+  complexity table's O(n²·d) columns) and keeps the clean labels: the four
+  row labels of the complexity table now translate. PROSE strips decoration
+  TeX (a footnote marker "$^5$") when the removed share is tiny (≤12%) and
+  real prose remains: three paragraphs recovered. Formula-heavy prose and
+  bare equation numbers keep the preserve (3 of 11) — rendering their
+  stripped remainder would duplicate dropped-line content.
 
 ## Named limits
 

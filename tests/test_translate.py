@@ -928,3 +928,70 @@ def test_tex_bearing_batch_translation_degrades_to_preserve(monkeypatch) -> None
 
     assert out[1].translated_text == ""  # pixels stay: no literal TeX, no duplicate content
     assert out[1].translation_route.endswith("_tex_leak")
+
+
+def test_tex_gate_drops_tex_fields_and_keeps_clean_labels(monkeypatch) -> None:
+    # A complexity-table row: the label field is clean, the formula fields are TeX on BOTH
+    # sides (they describe preserved math pixels, never our cells). The gate drops those
+    # pairs and keeps the translated label instead of preserving the whole row.
+    calls: list[dict] = []
+
+    def fake_post(url, json, timeout):  # noqa: A002
+        calls.append(json)
+        return _FakeResponse({"output_text": "Kaarthouder\n###\n自注意力|$O(n^2 \\cdot d)$|$O(1)$"})
+
+    monkeypatch.setattr(translate_module.httpx, "post", fake_post)
+
+    out = translate_units(
+        settings=AppSettings(),
+        units=[
+            _unit(1, "Kaarthouder", hint_index=0),
+            _unit(2, "Self-Attention", hint_index=1),
+        ],
+        source_lang_code="en",
+        target_lang_code="zh",
+        translator_model="gemma",
+        translator_mode="generic",
+        hint_units=["Kaarthouder", "Self-Attention|$O(n^2 \\cdot d)$|$O(1)$"],
+        hint_block_ids=[0, 1],
+    )
+
+    assert out[1].translated_text == "自注意力"
+    assert out[1].translation_route.endswith("_tex_fields_dropped")
+    assert out[1].field_translations == [("Self-Attention", "自注意力")]
+
+
+def test_tex_gate_strips_decoration_but_preserves_formula_heavy_prose(monkeypatch) -> None:
+    calls: list[dict] = []
+
+    def fake_post(url, json, timeout):  # noqa: A002
+        calls.append(json)
+        return _FakeResponse({"output_text":
+            "$^5$我们分别使用了 2.8、3.7、6.0 和 9.5 TFLOPS 的值。\n###\n"
+            "序列 $(x_1, \\dots, x_n)$ 映射到 $(z_1, \\dots, z_n)$ 的隐藏层。"})
+
+    monkeypatch.setattr(translate_module.httpx, "post", fake_post)
+
+    out = translate_units(
+        settings=AppSettings(),
+        units=[
+            _unit(1, "We used values of 2.8, 3.7, 6.0 and 9.5 TFLOPS.", hint_index=0),
+            _unit(2, "mapping one sequence to another of equal length such as a hidden layer", hint_index=1),
+        ],
+        source_lang_code="en",
+        target_lang_code="zh",
+        translator_model="gemma",
+        translator_mode="generic",
+        hint_units=[
+            "$^5$We used values of 2.8, 3.7, 6.0 and 9.5 TFLOPS.",
+            "mapping one sequence $(x_1, ..., x_n)$ to another $(z_1, ..., z_n)$ such as a hidden layer",
+        ],
+        hint_block_ids=[0, 1],
+    )
+
+    # Decoration TeX (a footnote marker): stripped, the prose renders.
+    assert out[0].translated_text == "我们分别使用了 2.8、3.7、6.0 和 9.5 TFLOPS 的值。"
+    assert out[0].translation_route.endswith("_tex_stripped")
+    # Formula-heavy: the stripped remainder would duplicate dropped-line content — preserve.
+    assert out[1].translated_text == ""
+    assert out[1].translation_route.endswith("_tex_leak")
