@@ -888,6 +888,50 @@ def test_island_unit_with_lost_token_stays_untranslated(monkeypatch) -> None:
     assert out[1].translation_route.endswith("_island_mismatch")
 
 
+def test_emphasis_strip_removes_model_markup_but_spares_real_asterisks() -> None:
+    from app.translation.translate import _emphasis_leak
+    from app.translation.translate import _strip_emphasis_markup
+
+    # The two measured forms: an orphaned closer (the structured parser strips the run-in
+    # heading's OPENING pair at the line edge) and a pair around a citation phrase.
+    assert _emphasis_leak("Residual Dropout We apply dropout", "Residual Dropout** We passen dropout")
+    assert _strip_emphasis_markup("Residual Dropout** We passen dropout") == "Residual Dropout We passen dropout"
+    assert _strip_emphasis_markup("Vergelijking met (*Bahdanau et al., 2015*)") == (
+        "Vergelijking met (Bahdanau et al., 2015)"
+    )
+    assert _strip_emphasis_markup("**Aandachtslaag**") == "Aandachtslaag"
+    # A real footnote marker: the SOURCE carries the asterisk, so the gate never opens.
+    assert not _emphasis_leak("Ashish Vaswani*", "Ashish Vaswani*")
+    # Subscript identifiers are not emphasis — underscores are out of scope by design.
+    assert not _emphasis_leak("train PPL BLEU params", "N d_model d_ff h d_k P_drop e_ls")
+    # A product keeps its operator: word characters on BOTH sides is not markdown emphasis.
+    assert _strip_emphasis_markup("oppervlak is a*b") == "oppervlak is a*b"
+
+
+def test_emphasised_batch_translation_renders_without_the_markers(monkeypatch) -> None:
+    def fake_post(url, json, timeout):  # noqa: A002
+        return _FakeResponse({"output_text": "Kaarthouder\n###\nVergelijking met (*Bahdanau et al., 2015*)"})
+
+    monkeypatch.setattr(translate_module.httpx, "post", fake_post)
+
+    out = translate_units(
+        settings=AppSettings(),
+        units=[
+            _unit(1, "Kaarthouder", hint_index=0),
+            _unit(2, "Comparison to (Bahdanau et al., 2015)", hint_index=1),
+        ],
+        source_lang_code="en",
+        target_lang_code="nl",
+        translator_model="gemma",
+        translator_mode="generic",
+        hint_units=["Kaarthouder", "Comparison to (Bahdanau et al., 2015)"],
+        hint_block_ids=[0, 1],
+    )
+
+    assert out[1].translated_text == "Vergelijking met (Bahdanau et al., 2015)"
+    assert out[1].translation_route.endswith("_emphasis_stripped")
+
+
 def test_tex_leak_mismatch_gate() -> None:
     from app.translation.translate import _tex_leak_mismatch
 

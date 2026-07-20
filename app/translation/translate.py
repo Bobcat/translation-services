@@ -281,6 +281,20 @@ def translate_units(
                     )
                     continue
                 route = f"{decision.translation_route}_batch_fallback" if batched else decision.translation_route
+        if translated and _emphasis_leak(source_text, translated):
+            # Runs BEFORE the TeX gate and the unchanged-text check, so both judge the text
+            # that will actually render. Field pairs are cleaned per pair (a table's "**Header**"
+            # cell renders from field_translations, not from the unit text).
+            cleaned = _strip_emphasis_markup(translated)
+            if cleaned:
+                translated = cleaned
+                fields = batch_fields.get(unit.id)
+                if fields:
+                    batch_fields[unit.id] = [
+                        (source, _strip_emphasis_markup(text) if _emphasis_leak(source, text) else text)
+                        for source, text in fields
+                    ]
+                route = f"{route}_emphasis_stripped"
         if translated and _tex_leak_mismatch(source_text, translated):
             # The unit's own cells carry no math (formula lines drop before grouping), so a
             # TeX-bearing translation came from the hint's reading of dropped lines. Salvage
@@ -799,6 +813,33 @@ def _strip_tex_markup(translated: str) -> str:
     out = _TEX_COMMAND_RE.sub(" ", out)
     out = re.sub(r"\s+([,.;:!?)\]])", r"\1", re.sub(r"\s+", " ", out)).strip()
     return out
+
+
+# Markdown emphasis in a TRANSLATION whose source has none is the model's formatting, never
+# content: it marks a run-in heading or a phrase it read as emphasised, and the renderer prints
+# the asterisks as literal glyphs. Two measured forms: a PAIR around a phrase ("(*Bahdanau et
+# al., 2015*)") and an orphaned CLOSER ("Residual Dropout** We apply ...") — the structured
+# parser strips markup at the line EDGE, so the opening pair of a run-in heading disappears and
+# its closer is left behind mid-line. Gated on the source carrying no asterisk at all, which is
+# what keeps a real footnote marker ("Ashish Vaswani*") out of the net.
+# Underscores are deliberately NOT emphasis here: a translation's "d_model"/"P_drop" are
+# subscript identifiers (measured on a table header whose source had none), and folding them
+# would corrupt the symbol, not clean it.
+_EMPHASIS_PAIR_RE = re.compile(r"\*{1,2}(?=\S)(.+?)(?<=\S)\*{1,2}")
+# A stray marker flanks a WORD on one side only: "Dropout**", "*Bahdanau". A "*" with word
+# characters on BOTH sides is not markdown emphasis (an "a*b" product) and stays.
+_EMPHASIS_STRAY_RE = re.compile(r"(?<=\w)\*{1,2}(?!\w)|(?<!\w)\*{1,2}(?=\w)")
+
+
+def _emphasis_leak(source_text: str, translated: str) -> bool:
+    return "*" in str(translated) and "*" not in str(source_text)
+
+
+def _strip_emphasis_markup(translated: str) -> str:
+    """``translated`` without its markdown emphasis markers, the emphasised words kept."""
+    out = _EMPHASIS_PAIR_RE.sub(r"\1", str(translated))
+    out = _EMPHASIS_STRAY_RE.sub("", out)
+    return re.sub(r"\s{2,}", " ", out).strip()
 
 
 def _island_token_mismatch(source_text: str, translated: str) -> bool:
