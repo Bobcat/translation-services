@@ -2165,3 +2165,28 @@ def test_a_step_badge_number_keeps_its_artwork_but_print_numbering_is_redrawn() 
     printed = unit({"left": 40, "top": 55, "width": 22, "height": 30},
                    {"left": 110, "top": 55, "width": 180, "height": 30})
     assert _heading_number_is_badge(np.asarray(plain), printed) is False
+
+
+def test_a_raised_math_fragment_stops_dragging_its_line_anchor_up() -> None:
+    # A fraction's numerator sits above its own text line and is shorter than it. The line
+    # frame spans every cell, so the fragment dragged the line's TOP up — and the top is the
+    # anchor the translated line is drawn on, which turned an even paragraph into 20px/33px
+    # pitches around it. Only DECLARED sizes count as evidence: an OCR box measures the same
+    # way for a receipt's quantity column, which is ordinary text on the baseline.
+    from app.replacement.layout.planning import _body_top
+
+    def quad(left, top, width, height):
+        return [(left, top), (left + width, top), (left + width, top + height), (left, top + height)]
+
+    numerator = quad(266, 1154, 12, 15)          # raised and short
+    body = [quad(240, 1158, 20, 22), quad(300, 1158, 300, 22)]
+    quads = [numerator, *body]
+    with_math = {id(body[1]): [{"left": 266, "top": 1154, "width": 42, "height": 31}]}
+    assert _body_top(quads, 0.0, 22.2, 1154.0, with_math) == 1158.0
+    # No island on the line: shape alone is not evidence (a receipt's quantity column measures
+    # the same), so the anchor stays exactly where it was.
+    assert _body_top(quads, 0.0, 22.2, 1154.0, None) == 1154.0
+    assert _body_top(quads, 0.0, 22.2, 1154.0, {}) == 1154.0
+    # An ordinary line (nothing raised) is untouched even with math on it.
+    plain = [quad(240, 1158, 20, 22), quad(300, 1158, 300, 22)]
+    assert _body_top(plain, 0.0, 22.2, 1158.0, {id(plain[1]): [{"left": 0, "top": 0}]}) == 1158.0

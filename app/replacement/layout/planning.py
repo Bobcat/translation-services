@@ -149,6 +149,51 @@ _JUSTIFY_MAX_SHRINK = 0.25
 # line height.
 _PITCH_SNAP_MIN_LINES = 3
 _PITCH_SNAP_NOISE_RATIO = 0.2  # top-residual tolerance, x line height
+# A RAISED FRAGMENT is a cell that sits above its line and is shorter than it: a fraction's
+# numerator, a superscript, an exponent. The line frame spans every cell of the cluster, so such
+# a fragment drags the line's TOP up — and the top is the anchor the translated line is drawn on.
+# Measured on a paper's inline fraction: the numerator's cell sits 4px (0.18x line) above its own
+# text line, which pulled that line 4px up and pushed the gap to the next line 4px out — 20px and
+# 33px where every other pitch was 24px, the ragged rhythm read as a paragraph break. The pitch
+# snap could not repair it either: its glyph-extent alibi only forgives a top that is high
+# BECAUSE the line measures taller, and a numerator makes the line no taller at all.
+# The fragment keeps its own erase quad — only the line's anchor stops following it.
+# GATED ON THE LINE CARRYING MATH, because that is the reason a cell is raised at all. Shape
+# alone cannot decide it: a receipt's quantity column measures 0.73x the line height and 0.24
+# line above it, against 0.70x and 0.18 for the measured numerator — but the quantity is
+# ordinary text on the baseline and its anchor must not move. An inline-math island on the same
+# line is the evidence that the short raised cell is part of a formula.
+_RAISED_FRAGMENT_LIFT = 0.15    # min rise above the line's median top, x line height
+_RAISED_FRAGMENT_HEIGHT = 0.8   # max height to count as a fragment, x line height
+
+
+def _body_top(
+    quads: list,
+    angle: float,
+    true_height: float,
+    frame_top: float,
+    island_quads: dict[int, list] | None = None,
+) -> float:
+    """The top of the line's BODY text: ``frame_top`` with any raised fragment discounted, on a
+    line that carries an inline-math island (see the _RAISED_FRAGMENT_* rationale)."""
+    if len(quads) < 2 or true_height <= 0:
+        return frame_top
+    if not any(island_quads and island_quads.get(id(quad)) for quad in quads):
+        return frame_top
+    tops = [geo.oriented_frame([quad], angle)[4] for quad in quads]
+    heights = [geo.line_height(quad) for quad in quads]
+    middle = median(tops)
+    body = [
+        top
+        for top, height in zip(tops, heights)
+        if not (
+            top < middle - _RAISED_FRAGMENT_LIFT * true_height
+            and height < _RAISED_FRAGMENT_HEIGHT * true_height
+        )
+    ]
+    return min(body) if body else frame_top
+
+
 def _snap_line_pitch(planes: list[dict[str, Any]]) -> None:
     """Snap plane tops onto the group's uniform line grid (see the _PITCH_SNAP_* rationale).
     Mutates only each frame's ymin — the erase quads keep hugging the true ink; only the
@@ -464,6 +509,7 @@ def _plan_group(
     for quads in clusters:
         true_height = median(geo.line_height(quad) for quad in quads)
         x_axis, y_axis, xmin, xmax, ymin, ymax = geo.oriented_frame(quads, angle)
+        ymin = _body_top(quads, angle, true_height, ymin, island_erase_quads)
         plane = {
             "quads": quads,
             "tokens": _plane_source_tokens(quads, group_quads, quad_tokens),
