@@ -1039,3 +1039,53 @@ def test_tex_gate_strips_decoration_but_preserves_formula_heavy_prose(monkeypatc
     # Formula-heavy: the stripped remainder would duplicate dropped-line content — preserve.
     assert out[1].translated_text == ""
     assert out[1].translation_route.endswith("_tex_leak")
+
+
+def test_a_drifted_sentence_tail_is_handed_back_to_its_own_line() -> None:
+    # The structured route maps one hint line to one output line, but the model can move the
+    # break: the tail of the next line's sentence is left on the previous line and that line
+    # opens mid-clause. The renderer then places those words faithfully in the wrong paragraph.
+    from app.translation.translate import TranslatedUnit
+    from app.translation.translate import _repair_drifted_sentence_boundary
+
+    def unit(uid, source, translated):
+        return TranslatedUnit(unit_id=uid, source_text=source, translated_text=translated,
+                              translator_model="m", translation_route="route")
+
+    drifted = [
+        unit(1, "since it can be implemented using highly optimized matrix multiplication code.",
+             "aangezien het kan worden geimplementeerd met matrixvermenigvuldigingscode. "
+             "Hoewel voor kleine waarden"),
+        unit(2, "While for small values of the two mechanisms perform similarly, additive",
+             "van de twee mechanismen vergelijkbaar presteren, additieve"),
+    ]
+    out = _repair_drifted_sentence_boundary(list(drifted))
+    assert out[0].translated_text.endswith("matrixvermenigvuldigingscode.")
+    assert out[1].translated_text.startswith("Hoewel voor kleine waarden van de twee")
+    assert out[1].translation_route.endswith("_boundary_repaired")
+
+    def unchanged(pair):
+        out = _repair_drifted_sentence_boundary(list(pair))
+        return [u.translated_text for u in out] == [u.translated_text for u in pair]
+
+    # The line ends its sentence: nothing drifted.
+    assert unchanged([
+        unit(1, "matrix multiplication code.", "matrixvermenigvuldigingscode."),
+        unit(2, "While for small values", "Hoewel voor kleine waarden"),
+    ])
+    # The next line opens its own sentence: a capital is not a continuation.
+    assert unchanged([
+        unit(1, "matrix multiplication code.", "matrixvermenigvuldigingscode. Hoewel voor kleine"),
+        unit(2, "While for small values", "Waarden van de twee mechanismen"),
+    ])
+    # An island token belongs to the unit whose cells hold its pixels — never moved.
+    assert unchanged([
+        unit(1, "matrix multiplication code.", "matrixvermenigvuldigingscode. Hoewel ⟦M8⟧ waarden"),
+        unit(2, "While for small values", "van de twee mechanismen"),
+    ])
+    # A whole clause is a different mapping, not a boundary slip.
+    long_tail = " ".join(f"woord{n}" for n in range(20))
+    assert unchanged([
+        unit(1, "matrix multiplication code.", f"matrixvermenigvuldigingscode. {long_tail}"),
+        unit(2, "While for small values", "van de twee mechanismen"),
+    ])

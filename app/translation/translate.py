@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from dataclasses import replace
 from typing import Any
 
 import httpx
@@ -352,7 +353,7 @@ def translate_units(
                 field_translations=batch_fields.get(unit.id),
             )
         )
-    return results
+    return _repair_drifted_sentence_boundary(results)
 
 
 def _log_failed_call(
@@ -813,6 +814,54 @@ def _strip_tex_markup(translated: str) -> str:
     out = _TEX_COMMAND_RE.sub(" ", out)
     out = re.sub(r"\s+([,.;:!?)\]])", r"\1", re.sub(r"\s+", " ", out)).strip()
     return out
+
+
+# The structured route maps one hint line to one output line, and the model mostly honours that
+# — but it translates prose, and where a sentence runs on it sometimes moves the break: the tail
+# of one line's sentence is left on the PREVIOUS line and the next line opens mid-sentence. The
+# renderer then places those words faithfully in the wrong paragraph, which reads as a paragraph
+# ending in a dangling fragment and the next one starting halfway through a clause (measured on
+# a paper: "...matrix multiplication code. While for small values" / "of d_k the two mechanisms").
+# The source knows where the boundary is — it ends that line on a full stop — so the drift is
+# recognisable and the tail can be handed back to the line it belongs to.
+_SENTENCE_END_RE = re.compile(r"[.!?:;]['\"’”\)\]]*\s*$")
+_SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])['\"’”\)\]]*\s+")
+# A drifted tail is the last clause of a sentence, not a paragraph: beyond this it is not a
+# boundary slip but a genuinely different mapping, and moving it would do more harm than good.
+_DRIFT_MAX_TAIL_WORDS = 14
+
+
+def _repair_drifted_sentence_boundary(results: list[TranslatedUnit]) -> list[TranslatedUnit]:
+    """Hand a drifted sentence tail back to the unit whose sentence it starts."""
+    for index in range(len(results) - 1):
+        first, second = results[index], results[index + 1]
+        head_text, tail_text = str(first.translated_text or ""), str(second.translated_text or "")
+        if not head_text or not tail_text:
+            continue
+        # The SOURCE ends its sentence here and the translation does not: the boundary moved.
+        if not _SENTENCE_END_RE.search(str(first.source_text or "")):
+            continue
+        if _SENTENCE_END_RE.search(head_text):
+            continue
+        # ...and the next line opens mid-sentence where its source opens a new one.
+        if not tail_text[:1].islower() or not str(second.source_text or "")[:1].isupper():
+            continue
+        pieces = _SENTENCE_SPLIT_RE.split(head_text)
+        if len(pieces) < 2:
+            continue
+        tail = pieces[-1].strip()
+        if not tail or len(tail.split()) > _DRIFT_MAX_TAIL_WORDS:
+            continue
+        # An island token belongs to the unit whose cells hold its pixels — never move one.
+        if _ISLAND_TOKEN_RE.search(tail):
+            continue
+        results[index] = replace(first, translated_text=head_text[: head_text.rindex(tail)].strip())
+        results[index + 1] = replace(
+            second,
+            translated_text=f"{tail} {tail_text}",
+            translation_route=f"{second.translation_route}_boundary_repaired",
+        )
+    return results
 
 
 # Markdown emphasis in a TRANSLATION whose source has none is the model's formatting, never
