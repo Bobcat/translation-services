@@ -79,7 +79,7 @@ _STRAY_LINE_WIDTH_RATIO = 0.5
 # noise stays under ~0.04x the line height, genuinely offset designs start at ~0.18x —
 # the gate sits in the gap. (The ratio is against the plane target = 0.9x line height.)
 _CENTER_SNAP_MAX_RATIO = 0.12
-# "extend" width fit: a line may widen into clean background to its right by at most its
+# "extend_to_margin" width fit: a line may widen into clean background to its right by at most its
 # own original width (so a short item on an empty page cannot balloon into a banner). The
 # pixel gates, not this cap, are the safety: extension stops at the first ink, protected
 # cell or surface change. Near the image border a typographic margin of one line height

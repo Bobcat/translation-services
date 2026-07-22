@@ -22,8 +22,8 @@ _CONDENSE_FLOOR = 0.75
 # unless the line genuinely cannot fit the box within the slack.
 _WIDTH_SLACK = 1.04
 # ...but the slack is only spendable over VERIFIED clean background: on axis-aligned flat
-# groups the planner measures the pixels right of each plane (same scan as the "extend" width
-# fit) and stores the verified run as ``plane["slack_px"]`` — a colour step (a newsletter's
+# groups the planner measures the pixels right of each plane (same scan as the
+# "extend_to_margin" width fit) and stores the verified run as ``plane["slack_px"]`` — a colour step (a newsletter's
 # sidebar panel), another unit's cell or any ink caps it. Without that evidence (tilt, centered
 # groups, planes built in tests) the plain 4% stands: 4% of a page-wide line is tens of pixels,
 # which crossed visibly into an adjacent layout panel the original kept a margin to.

@@ -492,9 +492,9 @@ def test_clean_right_extension_stops_at_ink_protected_cells_and_the_cap() -> Non
 
 def test_width_fit_extend_keeps_size_on_free_ground_and_footprint_when_blocked(tmp_path) -> None:
     # A short list item whose translation is much longer: "footprint" condenses/shrinks it
-    # into the original width; "extend" verifies the page right of it is clean background
-    # and keeps the size, rendering wider. With an obstacle directly right of the line the
-    # guards fail and "extend" must render exactly like "footprint".
+    # into the original width; "extend_to_margin" verifies the page right of it is clean
+    # background and keeps the size, rendering wider. With an obstacle directly right of the
+    # line the guards fail and it must render exactly like "footprint".
     def make(path, with_obstacle):
         img = Image.new("RGB", (400, 80), (255, 255, 255))
         draw = ImageDraw.Draw(img)
@@ -511,7 +511,7 @@ def test_width_fit_extend_keeps_size_on_free_ground_and_footprint_when_blocked(t
     free = tmp_path / "free.png"
     make(free, with_obstacle=False)
     footprint = render_translated_image(free, [dict(unit)], width_fit_mode="footprint")
-    extend = render_translated_image(free, [dict(unit)], width_fit_mode="extend")
+    extend = render_translated_image(free, [dict(unit)], width_fit_mode="extend_to_margin")
     assert footprint != extend
     ink_cols = lambda png: np.nonzero(  # noqa: E731
         (np.asarray(Image.open(BytesIO(png)).convert("L")) < 128).any(axis=0)

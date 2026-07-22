@@ -62,15 +62,13 @@ class RequestPayload(BaseModel):
     # without either, requests must pass "flat" explicitly.
     erase_fill_mode: Literal["flat", "inpaint"] = "inpaint"
     # How a translation wider than its original line is fitted. "footprint" keeps it inside
-    # the original line's width (condense in x, then shrink pt); "extend" first widens the
-    # usable width into VERIFIED clean background right of the line (never over other text,
-    # ink or a surface change), so a short list item's longer translation keeps its size.
-    # "extend_to_margin" is that same growth with one added ceiling: the right margin of the
-    # text band the line sits in (a document's own margin, and each column's gutter on a
-    # multi-column page). Plain "extend" knows only the image edge, which is the right frame
-    # for a photo or sign — where a line SHOULD be free to grow into empty design space —
-    # and the wrong one for a document, where it grows across the gutter or into the margin.
-    width_fit_mode: Literal["footprint", "extend", "extend_to_margin"] = "footprint"
+    # the original line's width (condense in x, then shrink pt); "extend_to_margin" first
+    # widens the usable width into VERIFIED clean background right of the line (never over
+    # other text, ink or a surface change), bounded by the right margin of the text band the
+    # line sits in — the document's own margin, and each column's gutter on a multi-column
+    # page — so a short list item's longer translation keeps its size without crossing into
+    # its neighbour.
+    width_fit_mode: Literal["footprint", "extend_to_margin"] = "footprint"
     # Where a line's SOURCE SIZE comes from. "extent" (default) sizes from the OCR
     # polygon's full ink extent; "band" clamps each line to its strong ink band scaled
     # by the document's own extent/band norm, so sparse tall glyphs (parentheses — as a
