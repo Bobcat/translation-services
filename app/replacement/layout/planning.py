@@ -271,6 +271,17 @@ def _planes_justified(planes: list[dict[str, Any]]) -> bool:
     return soft <= soft_budget
 
 
+def _edge_spread(planes: list[dict[str, Any]], widths: list[float]) -> float:
+    """How far the block's rendered right edges scatter, given a candidate width per plane.
+
+    Each line is drawn from its plane's own left edge, so the flush margin a justified block is
+    judged on is ``xmin + width`` — not the width, which legitimately differs where a line is
+    indented. The LAST line is excluded: it ends ragged by design, so its edge carries no
+    evidence about the margin."""
+    edges = [plane["frame"][2] + width for plane, width in zip(planes, widths)][:-1]
+    return (max(edges) - min(edges)) if len(edges) > 1 else 0.0
+
+
 def _justify_feasible(font: Any, line: str, target_w: float) -> bool:
     """Whether ``line`` can end flush at ``target_w``: within the per-gap stretch/shrink
     bounds, or too long but within the overhang-squeeze floor (it then renders condensed
@@ -657,29 +668,35 @@ def _plan_group(
                 if spans:
                     plane["target"] = max(8, int(round(median(spans) / ink_per_pt)))
 
-    # "extend" width fit: widen each plane's usable width into VERIFIED clean background to
-    # its right before fitting, so a longer translation of a short line (a list item) keeps
-    # its size instead of condensing/shrinking. Strictly additive: every guard that fails
-    # leaves the plane at its footprint width, i.e. exactly the "footprint" behaviour. Only
-    # for axis-aligned groups (the scan is axis-aligned — same honest limit as the ink
+    # "extend_to_margin" width fit: widen each plane's usable width into VERIFIED clean
+    # background to its right before fitting, so a longer translation of a short line (a list
+    # item) keeps its size instead of condensing/shrinking. Strictly additive: every guard that
+    # fails leaves the plane at its footprint width, i.e. exactly the "footprint" behaviour.
+    # Only for axis-aligned groups (the scan is axis-aligned — same honest limit as the ink
     # sweep) and never for centered ones (growing right would break the centring).
-    # "extend_to_margin" adds ONE ceiling on top of that scan: the right margin of the text
-    # band the line is set in (layout/bands.py). The scan itself cannot see a margin — it
-    # stops at ~1 em from the IMAGE edge, which is the only frame a photo or sign has and
-    # the wrong one for a document. Without the ceiling a line grows across a two-column
-    # page's gutter into its neighbour, or ~260px past a paper's own right margin.
-    if width_fit_mode in ("extend", "extend_to_margin") and angle == 0.0 and not centered:
-        for plane, (bg, _fg) in zip(planes, colors):
-            extension = _clean_right_extension(base_arr, plane, bg, protected_boxes or [])
-            if width_fit_mode == "extend_to_margin" and text_bands:
-                _x_axis, _y_axis, xmin, _xmax, ymin, ymax = plane["frame"]
-                margin = band_margin_at(text_bands, float(xmin), (float(ymin) + float(ymax)) / 2.0)
-                if margin is not None:
-                    extension = min(extension, max(0.0, margin - float(plane["frame"][3])))
-            plane["width"] += extension
-    elif angle == 0.0 and not centered:
-        # Footprint mode: the 4% width slack (wrap._WIDTH_SLACK) must not carry a line INTO an
-        # adjacent panel — clamp it at a WALL: a colour step inside the slack window that stays
+    # The growth is bounded by ONE ceiling: the right margin of the text band the line is set
+    # in (layout/bands.py). The scan itself cannot see a margin — it stops at ~1 em from the
+    # IMAGE edge — so without the ceiling a line grows across a two-column page's gutter into
+    # its neighbour, or ~260px past a paper's own right margin. (A ceiling-less variant existed
+    # as "extend"; it was removed after measuring exactly that bleed on two-column papers.)
+    #
+    # ON DEMAND: the extension is applied only after a footprint fit turns out to SQUEEZE the
+    # text (below). Room is what keeps type uniform — a line that has to condense renders at a
+    # different width than its unsqueezed siblings, and in a list of one-line items that reads
+    # as a broken face — so a group that is being squeezed gets every px it can reach, and a
+    # group whose text already fits its own footprint asks for nothing and gets nothing (a
+    # justified block is the one exception, and asks on its own ground — see the gate below).
+    #
+    # The second half is what the demand gate buys: widening a plane that did not need it hands
+    # the balanced fill a wider measure and it re-typesets a block that was fine. Measured over
+    # the testset, growing unconditionally re-wrapped 89 of the 185 multi-line groups whose size
+    # never changed — an address at condense 1.18 (comfortably fitting) reflowed from
+    # "Voorbeeldstraat 12, / Ergensdorp" into "Voorbeeldstraat / 12, Ergensdorp".
+    extendable = width_fit_mode == "extend_to_margin" and angle == 0.0 and not centered
+    if angle == 0.0 and not centered:
+        # The first fit is a FOOTPRINT fit in every mode, so its 4% width slack
+        # (wrap._WIDTH_SLACK) must not carry a line INTO an adjacent panel — clamp it at a WALL:
+        # a colour step inside the slack window that stays
         # non-background through the window's end (a newsletter's sidebar panel). Ink that clears
         # again within the window (a neighbour column's glyph, a thin frame line) does not clamp,
         # so signage/receipt behaviour is untouched. Tilted and centered groups keep the plain 4%
@@ -726,6 +743,48 @@ def _plan_group(
         plane_widths = [plane["width"] for plane in planes]
         font, lines = _fit_group(joined, size=size, plane_widths=plane_widths, family=family, weight=weight, italic=italic,
                                  islands=group_islands)
+    # The footprint fit does not fit: the text is being squeezed, and past the floor the next
+    # step is spending pt. THIS is what the extend fits are for, so grow now and re-fit. A group
+    # whose text fits its own footprint asks for nothing and stays exactly as footprint renders
+    # it. The trigger is ANY squeeze, not the floor: gating on the floor let condensation absorb
+    # the whole demand and a bullet list came out at 0.76/0.83/0.92/1.0 glyph widths at one pt.
+    # A JUSTIFIED block asks for room on a second ground: its lines must end on ONE margin,
+    # and the source planes are OCR boxes that wobble (measured: 18px over a 5-line paragraph).
+    # Only the growth pulls them onto a shared ceiling, so such a block asks even when nothing
+    # is squeezed — its demand is flushness, not looseness.
+    if extendable and ((cramped := _raw_condense(font, lines, planes)) < 1.0 or justified):
+        footprint_state = [(plane["width"], plane.get("slack_px")) for plane in planes]
+        _extend_planes(planes, colors, base_arr, protected_boxes, text_bands)
+        plane_widths = [plane["width"] for plane in planes]
+        grown_font, grown_lines = _fit_group(joined, size=size, plane_widths=plane_widths, family=family,
+                                             weight=weight, italic=italic, islands=group_islands)
+        # Growth is not monotone: wider planes let the balanced fill move a long token onto a
+        # line that then needs MORE of its width than before, and the group leaves the loop
+        # below the size the footprint fit would have taken (measured: 19 groups). So keep the
+        # extension only where it actually loosens the group — or, for a justified block, where
+        # it actually flattens the block's right edge. Each mode keeps the growth when it
+        # delivers the thing that mode asked for; the two are measured separately because they
+        # point APART here: on all 7 justified blocks in the testset that grow, condensation
+        # drops (0.875 -> 0.841 on a 5-line paragraph — a wider measure lets the balanced fill
+        # pack more words per line), so the looseness test alone rolls every one of them back
+        # to a ragged edge. The flushness test is not a licence either: it rejects the growth
+        # on a 31-line block whose edge spread goes 8 -> 579px (the scan finds a clean run past
+        # the column and the margin does not bound it) — the same two-column bleed extend was
+        # measured to have on papers.
+        looser = _raw_condense(grown_font, grown_lines, planes) > cramped
+        flusher = justified and _edge_spread(planes, plane_widths) < _edge_spread(
+            planes, [width for width, _slack in footprint_state]
+        )
+        if looser or flusher:
+            font, lines = grown_font, grown_lines
+        else:
+            for plane, (width, slack) in zip(planes, footprint_state):
+                plane["width"] = width
+                if slack is None:
+                    plane.pop("slack_px", None)
+                else:
+                    plane["slack_px"] = slack
+            plane_widths = [plane["width"] for plane in planes]
     source_size = size
     while size > _MIN_RENDER_SIZE and _raw_condense(font, lines, planes) < _CONDENSE_FLOOR:
         size -= 1
@@ -997,6 +1056,44 @@ def _wall_bounded_slack(
     strip = base_px[y0:y1, x0:x1].astype(np.int16)
     non_bg = (np.abs(strip - np.asarray(bg, dtype=np.int16)).max(axis=2) >= _INK_DELTA).all(axis=0)
     return 0.0 if len(non_bg) and non_bg[-1] else window_px
+
+
+def _extend_planes(
+    planes: list[dict[str, Any]],
+    colors: list[tuple[tuple[int, int, int], tuple[int, int, int]]],
+    base_arr: np.ndarray,
+    protected_boxes: list[dict[str, Any]] | None,
+    text_bands: list[dict[str, float]] | None,
+) -> None:
+    """Widen every plane into the room the band margin allows, in place.
+
+    Called only once a footprint fit has failed to hold the source size, so the growth is
+    always spent on the size it was meant for. The slack each plane carries was measured at
+    its OLD right edge and is stale afterwards, so it is replaced with the room left between
+    the new edge and the margin — the margin bounds the overrun too, or the 4% would walk
+    straight past the ceiling (measured on a newsletter column: 24px past the source margin,
+    of which 20 were the slack). Without bands at all (a page whose boxes and regions yield
+    none) there is no ceiling to read, so the plain 4% stands."""
+    for plane, (bg, _fg) in zip(planes, colors):
+        extension = _clean_right_extension(base_arr, plane, bg, protected_boxes or [])
+        if text_bands:
+            _x_axis, _y_axis, xmin, _xmax, ymin, ymax = plane["frame"]
+            margin = band_margin_at(text_bands, float(xmin), (float(ymin) + float(ymax)) / 2.0)
+            if margin == float("-inf"):
+                # An artwork band: there is no column here, so this width fit does not apply to
+                # this plane. FALL BACK by leaving it exactly as the footprint pass set it —
+                # source width, wall-bounded slack. Arithmetic on -inf would instead derive a
+                # STRICTER mode than footprint (slack 0 on 27 of 28 such planes), which is not
+                # what a veto on growth should mean.
+                continue
+            if margin is not None:
+                extension = min(extension, max(0.0, margin - float(plane["frame"][3])))
+                plane["slack_px"] = max(0.0, margin - (float(plane["frame"][3]) + extension))
+            else:
+                plane.pop("slack_px", None)
+        else:
+            plane.pop("slack_px", None)
+        plane["width"] += extension
 
 
 def _clean_right_extension(

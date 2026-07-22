@@ -32,6 +32,8 @@ from typing import Any
 import numpy as np
 
 from app.layout import COLUMN_LABELS
+from app.layout import PRESERVE_LABELS
+from app.replacement.pixels import _INK_DELTA
 
 
 # A region below this confidence is not evidence. Matches the cell->region assignment gate in
@@ -47,15 +49,56 @@ _GUTTER_MIN_WIDTH = 25
 
 
 def text_bands(
-    boxes: list[dict[str, Any]], regions: list[dict[str, Any]] | None = None
+    boxes: list[dict[str, Any]],
+    regions: list[dict[str, Any]] | None = None,
+    base_px: np.ndarray | None = None,
 ) -> list[dict[str, float]]:
     """The page's text bands: ``{"left", "right", "top", "bottom", "margin"}`` in image pixels.
 
     Region bands come FIRST, so a line inside a labelled body column takes that column's
     margin; the projection bands that follow cover everything the regions leave unclaimed
-    (they span the full page height, so a lookup always lands somewhere they apply)."""
+    (they span the full page height, so a lookup always lands somewhere they apply).
+
+    Given ``base_px``, a region band's margin is pulled back onto its rightmost INK. A cell box
+    is wider than the glyphs inside it — measured over 181 bands: median 3px past the ink, mean
+    3.4, p90 6, up to 11, and 92% of bands sit wide — and a margin is a promise about where the
+    text ends, not about where a box ends."""
     body = _body_boxes(boxes, regions or [])
-    return _region_bands(boxes, regions or []) + _projection_bands(boxes, body)
+    return (
+        _artwork_bands(regions or [])
+        + _region_bands(boxes, regions or [], base_px)
+        + _projection_bands(boxes, body)
+    )
+
+
+def _artwork_bands(regions: list[dict[str, Any]]) -> list[dict[str, float]]:
+    """A band per image/chart region, with NO room at all (``margin`` at negative infinity, so
+    every caller's ``margin - right_edge`` is a growth of zero).
+
+    Text sitting on artwork — a book cover's title, a poster's line, a chart's axis label — has
+    no text column to grow into: the space beside it is design, not margin. Where it goes wrong
+    is the evidence gap: on a cover template the title's own region scored 0.53 and fell under
+    the score gate, the 15px gap between cover and side column stayed under the gutter width, so
+    the projection handed that line the margin of a bullet list on the other side of the page.
+
+    Since the extend fits grow ON DEMAND (planning._extend_planes) this veto carries less: a
+    line that holds its size never asks for room, and the cover TITLE is now one of those. What
+    it still stops is the design label that genuinely hits the condense floor and would then
+    take its growth across the artwork — measured over the testset, 3 of 43 images still differ
+    without it (a cover's "750px x 1100px" widens 102 -> 149px and gains 2pt, straight over the
+    panel it is set on)."""
+    bands: list[dict[str, float]] = []
+    for region in regions:
+        if str(region.get("label") or "") not in PRESERVE_LABELS:
+            continue
+        coordinate = list(region.get("coordinate") or [])
+        if len(coordinate) != 4:
+            continue
+        x0, y0, x1, y1 = (float(value) for value in coordinate)
+        bands.append({
+            "left": x0, "right": x1, "top": y0, "bottom": y1, "margin": float("-inf"),
+        })
+    return bands
 
 
 def _body_boxes(
@@ -80,11 +123,14 @@ def _body_boxes(
 
 
 def _region_bands(
-    boxes: list[dict[str, Any]], regions: list[dict[str, Any]]
+    boxes: list[dict[str, Any]],
+    regions: list[dict[str, Any]],
+    base_px: np.ndarray | None = None,
 ) -> list[dict[str, float]]:
     """One band per body-column region that actually holds text, its margin the rightmost box
-    inside it. A region holding no box is not evidence about any line and is skipped — which
-    is what keeps a stray detection from bounding anything."""
+    inside it — pulled back onto the rightmost ink when the pixels are available. A region
+    holding no box is not evidence about any line and is skipped, which is what keeps a stray
+    detection from bounding anything."""
     bands: list[dict[str, float]] = []
     for region in regions:
         if str(region.get("label") or "") not in COLUMN_LABELS:
@@ -98,14 +144,34 @@ def _region_bands(
         inside = [b for b in boxes if b and b.get("width") and _centre_in(b, x0, y0, x1, y1)]
         if not inside:
             continue
+        margin = max(float(b["left"]) + float(b["width"]) for b in inside)
         bands.append({
             "left": x0,
             "right": x1,
             "top": y0,
             "bottom": y1,
-            "margin": max(float(b["left"]) + float(b["width"]) for b in inside),
+            "margin": _ink_margin(base_px, x0, y0, margin, y1) if base_px is not None else margin,
         })
     return bands
+
+
+def _ink_margin(
+    base_px: np.ndarray, left: float, top: float, margin: float, bottom: float
+) -> float:
+    """``margin`` pulled back onto the rightmost ink between ``left`` and it. Ink is anything
+    that differs from the band's own background — sampled as the median of the strip, so a
+    coloured panel is as readable as white paper. Falls back to ``margin`` when the strip holds
+    no ink at all (nothing to pull back onto)."""
+    height, width = base_px.shape[:2]
+    x0, x1 = max(0, int(left)), min(width, int(margin) + 1)
+    y0, y1 = max(0, int(top)), min(height, int(bottom) + 1)
+    if x1 - x0 < 2 or y1 - y0 < 2:
+        return margin
+    strip = base_px[y0:y1, x0:x1].astype(np.int16)
+    background = np.median(strip.reshape(-1, strip.shape[-1]), axis=0)
+    ink = (np.abs(strip - background).max(axis=2) >= _INK_DELTA).any(axis=0)
+    columns = np.nonzero(ink)[0]
+    return float(columns.max() + x0) if len(columns) else margin
 
 
 def _centre_in(box: dict[str, Any], x0: float, y0: float, x1: float, y1: float) -> bool:

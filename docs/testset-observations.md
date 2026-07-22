@@ -452,6 +452,24 @@ fixed together and verified over every fixture + the wash-out controls:
   residual as the stray-ink sweep. Verified: the list renders at uniform full size under
   "extend" with every marker kept; with an obstacle directly right of a line, "extend"
   renders byte-identical to "footprint" (pinned by test).
+- **On demand** (2026-07-21): both extend modes widen a plane only when the footprint fit is
+  SQUEEZING the text (raw condense < 1.0). A group whose translation fits its own footprint
+  asks for nothing and renders exactly as footprint does.
+  - What the gate buys: growing unconditionally re-typeset blocks that were fine. Measured over
+    the 43 images with the mode as the only variable (same frozen translations), 89 of the 185
+    multi-line groups whose size never changed were re-wrapped purely because every plane had
+    been widened to a uniform measure for the balanced fill — an address sitting at condense
+    1.18, comfortably fitting, reflowed from "Voorbeeldstraat 12, / Ergensdorp" into "Voorbeeldstraat /
+    12, Ergensdorp". Those groups are now untouched.
+  - What the trigger must NOT be: an earlier version gated on the condense FLOOR (0.75, i.e.
+    "would the group lose pt?"). That let condensation absorb the whole demand, and a bullet
+    list rendered with its items at 0.76, 0.83, 0.92 and 1.0 — same pt, visibly different glyph
+    widths down one list. Uniform type is the point of the fit, so any squeeze is demand.
+  - Result: 67 groups take a larger size (9%), 0 take a smaller one — growth is not monotone,
+    wider planes can hand the fill a token that needs more of its line, so an extension that
+    does not loosen the group is rolled back. Against the old unconditional growth the type is
+    no narrower: 622 of 751 groups condense identically, 112 condense LESS, 17 more (median
+    1.1%, max 9.5%).
 - Both modes stay permanently: the user picks per request (workbench Render section); a
   future heuristic may choose per job, the way the hybrid inpaint fill chose flat/model.
 - Named limit (parked): the SOURCE SIZE comes from the OCR polygon's full ink extent, and
