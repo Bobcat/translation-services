@@ -2190,3 +2190,35 @@ def test_a_raised_math_fragment_stops_dragging_its_line_anchor_up() -> None:
     # An ordinary line (nothing raised) is untouched even with math on it.
     plain = [quad(240, 1158, 20, 22), quad(300, 1158, 300, 22)]
     assert _body_top(plain, 0.0, 22.2, 1158.0, {id(plain[1]): [{"left": 0, "top": 0}]}) == 1158.0
+
+
+def test_pipe_fields_stacked_under_each_other_are_not_a_table_row() -> None:
+    # The grouping VLM put a field separator inside a wrapped address ("<street> | <number>,
+    # <town>"). Honouring it would give the second half the narrow plane of the short second
+    # line, where it cannot fit at any condensation — the address then renders in two different
+    # sizes. Fields stacked at one left margin are wrapped text, not columns: reflow.
+    stacked = {
+        "field_translations": [("Bezorgd op", "Delivered to"),
+                               ("Voorbeeldstraat 12, Ergensdorp", "Example Street 12, Sometown")],
+        "members": [
+            {"text": "Bezorgd op Voorbeeldstraat 12,", "translate": True,
+             "bbox": {"left": 248, "top": 1643, "width": 605, "height": 54}},
+            {"text": "Ergensdorp", "translate": True,
+             "bbox": {"left": 247, "top": 1716, "width": 278, "height": 51}},
+        ],
+    }
+    assert _split_table_row(stacked) is None
+
+    # A genuine row — the same two fields side by side, sharing their line — still splits.
+    row = {
+        "field_translations": [("Bezorgd op", "Delivered to"),
+                               ("Voorbeeldstraat 12", "Example Street 12")],
+        "members": [
+            {"text": "Bezorgd op", "translate": True,
+             "bbox": {"left": 248, "top": 1643, "width": 260, "height": 54}},
+            {"text": "Voorbeeldstraat 12", "translate": True,
+             "bbox": {"left": 700, "top": 1645, "width": 300, "height": 54}},
+        ],
+    }
+    cells = _split_table_row(row)
+    assert cells is not None and len(cells) == 2

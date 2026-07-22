@@ -119,7 +119,37 @@ def _split_table_row(
         )
         cell["field_translations"] = None  # already split — don't re-enter
         cells.append(cell)
+    if _cells_are_wrapped_lines(cells):
+        return None
     return _merge_close_table_cells(cells)
+
+
+def _cells_are_wrapped_lines(cells: list[dict[str, Any]]) -> bool:
+    """Whether the "columns" are really the wrapped lines of ONE running text.
+
+    A ``|`` is a claim about columns: fields side by side on one row. When the members bound to
+    the fields sit UNDER each other at the same left margin, that claim is false — the hint put
+    a separator inside a wrapped sentence, and honouring it hands each half a line's own plane.
+    Measured on a two-line delivery address the grouping VLM emitted as "<street> | <number>,
+    <town>": the second field landed on the narrow 278px plane of the short second line, could
+    not fit at any condensation, and the group dropped from 45pt to a fraction of it while its
+    own first line stayed full size — one address in two sizes. Roughly 1 live run in 15.
+
+    Deliberately narrow. Both signatures must hold for EVERY neighbouring pair: no vertical
+    overlap at all (a real row's columns share their band, even when one column is taller), and
+    left edges within half a line (wrapped text hangs on one margin, columns start at their own
+    x). A single cell is not a row either way, so it never reaches this."""
+    if len(cells) < 2:
+        return False
+    ordered = sorted(cells, key=lambda cell: _cell_axis_box(cell)[1])
+    for upper, lower in zip(ordered, ordered[1:]):
+        top_box, bottom_box = _cell_axis_box(upper), _cell_axis_box(lower)
+        line_height = max(_median_member_height(upper), _median_member_height(lower), 1.0)
+        if min(top_box[3], bottom_box[3]) - max(top_box[1], bottom_box[1]) > 0:
+            return False
+        if abs(top_box[0] - bottom_box[0]) > 0.5 * line_height:
+            return False
+    return True
 
 # A straddling member: OCR jammed the line-1 text of TWO adjacent columns into one box
 # ("video classification" + "Performance improvements over" with a garble at the seam). Both
