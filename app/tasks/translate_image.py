@@ -261,6 +261,7 @@ def run_translate_image_pipeline(
         preserve_unchanged_text=preserve_unchanged_text,
         image_category=image_category,
         layout_regions=layout_regions,
+        target_lang=target_lang,
     )
     replacement_wall_ms = _elapsed_ms(replacement_started)
 

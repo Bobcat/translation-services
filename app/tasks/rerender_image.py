@@ -82,6 +82,7 @@ def run_rerender_image_pipeline(
         preserve_unchanged_text=preserve_unchanged_text,
         image_category=str(source_grouping.get("category") or ""),
         layout_regions=source_grouping.get("layout_regions") or [],
+        target_lang=str(request.get("target_lang_code") or ""),
     )
     replacement_wall_ms = _elapsed_ms(replacement_started)
 

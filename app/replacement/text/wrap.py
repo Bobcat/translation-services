@@ -49,16 +49,19 @@ def _fit_group(
     italic: bool = False,
     islands: dict[str, Any] | None = None,
     justified: bool = False,
+    hyphenator: Any = None,
 ) -> tuple[Any, list[str]]:
     """Render at the source ``size`` (true line height) in the unit's VLM font ``family`` /
     ``weight``, wrapped so each line fits the width of the plane it lands on (``plane_widths``).
     The font is NOT reduced to fit width — the source size, and thus the header/body hierarchy,
     is preserved; width is matched by horizontal condensation in the caller. ``islands`` wraps
-    the font so ⟦Mn⟧ pixel-island tokens measure (and later draw) at their source width."""
+    the font so ⟦Mn⟧ pixel-island tokens measure (and later draw) at their source width.
+    ``hyphenator`` (justified only) breaks a long compound at a line boundary — see
+    ``_greedy_wrap``."""
     font = load_font(max(6, min(int(size), 160)), text, family=family, weight=weight, italic=italic)
     if islands:
         font = IslandFont(font, islands)
-    return font, _wrap_to_planes(font, text, plane_widths, justified=justified)
+    return font, _wrap_to_planes(font, text, plane_widths, justified=justified, hyphenator=hyphenator)
 
 def _raw_condense(font: Any, lines: list[str], planes: list[dict[str, Any]]) -> float:
     """Unclamped horizontal scale needed to bring every line within its plane width + slack.
@@ -83,7 +86,7 @@ def _condense_scale(font: Any, lines: list[str], planes: list[dict[str, Any]]) -
     return max(_CONDENSE_FLOOR, min(1.0, _raw_condense(font, lines, planes)))
 
 def _wrap_to_planes(
-    font: Any, text: str, plane_widths: list[float], *, justified: bool = False
+    font: Any, text: str, plane_widths: list[float], *, justified: bool = False, hyphenator: Any = None
 ) -> list[str]:
     """Wrap so each rendered line fits the width of the PLANE it lands on, in order, and the words
     are BALANCED across those lines — not greedily dumped.
@@ -115,7 +118,7 @@ def _wrap_to_planes(
         # instead; under a narrow serif face that pushed many lines past the per-gap
         # stretch cap and flipped whole justified blocks to ragged (measured: 7 of 23
         # lines infeasible, tail to 3.5x the space width).
-        return _greedy_wrap(font, pieces, plane_widths)
+        return _greedy_wrap(font, pieces, plane_widths, hyphenator=hyphenator)
     line_count = len(_greedy_wrap(font, pieces, plane_widths))  # fewest lines at natural plane width
     caps = plane_widths[:line_count]
     # Smallest scale on the plane widths that still packs the pieces into ``line_count`` lines: this
@@ -129,28 +132,88 @@ def _wrap_to_planes(
             lo = mid
     return _greedy_wrap(font, pieces, [cap * hi for cap in caps])
 
-def _greedy_wrap(font: Any, pieces: list[tuple[str, str]], line_caps: list[float]) -> list[str]:
+# The shortest word worth breaking. pyphen keeps 2 letters either side of a break, so a 5-letter
+# word can only break 2|3; below that a hyphen buys almost no width and reads as noise.
+_HYPHEN_MIN_WORD = 6
+
+
+def _hyphen_head(font: Any, word: str, room: float, hyphenator: Any) -> tuple[str, str] | None:
+    """``(head, tail)`` for the LARGEST hyphenated head of ``word`` whose ink (with the hyphen)
+    fits ``room`` — or ``None`` when the word does not break (too short, no letter core) or no
+    break fits. Largest-that-fits so the head fills as much of the line's remaining room as it
+    can without overrunning; the tail flows on as the next line's start.
+
+    Breaks the word's ALPHABETIC CORE, ignoring surrounding punctuation: a caption's
+    "literatuuronderzoekstabellen:" (trailing colon) or a citation's "(Kwiatkowski" (leading
+    paren) must still break — the punctuation just travels with the head or the tail. The core
+    must be all letters, so a token with an internal hyphen ("vision-artikelen"), digits
+    ("2.228") or a lone marker ("(2)") is left whole."""
+    start, end = 0, len(word)
+    while start < end and not word[start].isalpha():
+        start += 1
+    while end > start and not word[end - 1].isalpha():
+        end -= 1
+    core = word[start:end]
+    if len(core) < _HYPHEN_MIN_WORD or not core.isalpha():
+        return None
+    chosen = None
+    for position in hyphenator.positions(core):
+        cut = start + position
+        if font.getlength(f"{word[:cut]}-") <= room:
+            chosen = cut
+    if chosen is None:
+        return None
+    return word[:chosen] + "-", word[chosen:]
+
+
+def _greedy_wrap(
+    font: Any, pieces: list[tuple[str, str]], line_caps: list[float], hyphenator: Any = None
+) -> list[str]:
     """Greedy fill: line ``i`` takes pieces while they fit ``line_caps[i]``; the LAST cap carries
     every remaining piece (so the result never exceeds ``len(line_caps)`` lines). A piece that alone
     exceeds its cap still starts the line (never an empty line) — the caller condenses/shrinks it.
     Each piece carries the ``glue`` (a space for Latin words, empty for CJK chars) re-inserted only
-    when it is not at a line start."""
+    when it is not at a line start.
+
+    Given a ``hyphenator`` (justified blocks only), a word that will not fit the current line is
+    BROKEN there instead of wrapping whole: its head (up to the last break that fits) stays on the
+    line and its tail becomes the next line's first piece, which then keeps filling. Doing this
+    inside the single forward fill is what makes it re-flow — the words after the break move up to
+    fill the tail's line, so a hard boundary (a long Dutch/German compound) no longer leaves a gap
+    the justify cannot close. Only breaks a plain word (``_hyphen_head``); punctuation and the last
+    line are left whole."""
     lines: list[str] = []
     current = ""
     index = 0
     last = len(line_caps) - 1
-    for piece, glue in pieces:
+    queue = list(pieces)
+    position = 0
+    while position < len(queue):
+        piece, glue = queue[position]
         sep = glue if current else ""
-        if index >= last:
+        if index >= last:  # the last line carries the remainder, ragged by design — never break
             current = current + sep + piece
+            position += 1
             continue
-        trial = current + sep + piece
-        if current and font.getlength(trial) > line_caps[index]:
+        if current and font.getlength(current + sep + piece) > line_caps[index]:
+            split = (
+                _hyphen_head(font, piece, line_caps[index] - font.getlength(current + sep), hyphenator)
+                if hyphenator is not None
+                else None
+            )
+            if split is not None:
+                head, tail = split
+                lines.append(current + sep + head)
+                current = ""
+                index += 1
+                queue[position] = (tail, glue)  # re-processed as the next line's start
+                continue
             lines.append(current)
             current = piece
             index += 1
         else:
-            current = trial
+            current = current + sep + piece
+        position += 1
     lines.append(current)
     return lines
 

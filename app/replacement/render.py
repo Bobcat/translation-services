@@ -55,6 +55,7 @@ from app.replacement.jobs import _Job
 from app.replacement.layout.bands import text_bands
 from app.replacement.layout.groups import _groups
 from app.replacement.layout.planning import _plan_group
+from app.replacement.text.hyphenation import make_hyphenator
 from app.replacement.text.angle import _document_angle_field
 from app.replacement.text.angle import _image_is_flat
 from app.replacement.text.size import _document_band_ratio
@@ -92,6 +93,7 @@ def render_translated_image(
     preserve_unchanged_text: bool = False,
     image_category: str = "",
     layout_regions: list[dict[str, Any]] | None = None,
+    target_lang: str = "",
 ) -> bytes:
     opened = Image.open(input_path)
     # Carry the source's ICC colour profile onto the output. ``convert("RGB")`` keeps the raw pixel
@@ -137,6 +139,10 @@ def render_translated_image(
         if width_fit_mode == "extend_to_margin"
         else None
     )
+    # One dictionary for the whole page: a justified block breaks a long compound to fill a short
+    # line. None for CJK / an unknown code — those blocks are then left ragged (correctly: CJK
+    # does not soft-hyphen).
+    hyphenator = make_hyphenator(target_lang)
     for group in groups:
         jobs.extend(
             _plan_group(
@@ -154,6 +160,7 @@ def render_translated_image(
                 protected_boxes=protected_boxes,
                 document_member_texts=document_member_texts,
                 preserve_unchanged_text=preserve_unchanged,
+                hyphenator=hyphenator,
             )
         )
 

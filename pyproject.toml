@@ -14,6 +14,10 @@ dependencies = [
   "paddleocr==3.6.0",
   "paddlex[ocr]==3.6.1",
   "pillow>=10",
+  # Soft-hyphen break points (TeX/LibreOffice dictionaries, ~45 Latin-script languages) so a
+  # justified block's long compound can fill a line instead of leaving a gap no flush margin
+  # can absorb — see app/replacement/text/hyphenation.py.
+  "pyphen>=0.15",
   # translate_pdf: page census/rasterization at intake and raster-page PDF assembly (AGPL;
   # internal service). Also the planned native write-back backend (redact + re-typeset).
   "pymupdf>=1.26",

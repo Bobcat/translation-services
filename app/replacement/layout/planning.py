@@ -282,6 +282,73 @@ def _edge_spread(planes: list[dict[str, Any]], widths: list[float]) -> float:
     return (max(edges) - min(edges)) if len(edges) > 1 else 0.0
 
 
+# How far a line's left ink may sit from the block's consensus and still count as the SAME
+# margin, as a fraction of the line height. Scale-relative on purpose: box error is a few px
+# while a paragraph indent is an em or more. Measured on a two-column paper (line height 27px):
+# the source ink of a 31-line abstract scattered 2px, its first-line indent was 34px — the
+# threshold lands in a gap with 6x headroom below and 2.6x above. Same ratio the right-edge
+# evidence uses (_JUSTIFY_EDGE_RATIO).
+_LEFT_SNAP_RATIO = 0.5
+
+
+def _snap_left_margin(
+    planes: list[dict[str, Any]], base_arr: np.ndarray | None, angle: float
+) -> None:
+    """Put every line that sits on the block's shared left margin on ONE origin, in place.
+
+    A line is drawn from its own plane's left edge, and that edge comes from the source box —
+    which is unreliable on the left: measured on a born-digital paper, the boxes of a 31-line
+    abstract ran 258..268 while the actual source ink stood flush at 269 on every line, so the
+    render inherited a 10px wobble the original does not have (one line a whole letter out).
+    The INK is the evidence, not the box — the same reasoning bands.py already applies to the
+    right margin.
+
+    Only lines whose ink is within ``_LEFT_SNAP_RATIO`` of a line height from the block's
+    median are moved; anything further is deliberate (a paragraph indent, a hanging marker) and
+    is left exactly as it was. Nothing happens at all unless a MAJORITY of the lines cluster on
+    one margin, which is what keeps centred text, a table cell or a two-level list out of it.
+    Every line's own right edge is preserved (the width absorbs the shift), so the flush margin
+    and the justify target do not move. Axis-aligned groups only: the frame of a tilted line is
+    in its own rotated space and cannot index the image — the same honest limit as the ink and
+    slack scans. Strictly additive: a line that does not qualify keeps today's placement."""
+    if angle != 0.0 or base_arr is None or len(planes) < 3:
+        return
+    measured = [(index, _ink_left(base_arr, plane)) for index, plane in enumerate(planes)]
+    measured = [(index, left) for index, left in measured if left is not None]
+    if len(measured) < 3:
+        return
+    line_height = median(plane["frame"][5] - plane["frame"][4] for plane in planes)
+    tolerance = _LEFT_SNAP_RATIO * max(1.0, line_height)
+    consensus = median(left for _index, left in measured)
+    on_margin = [index for index, left in measured if abs(left - consensus) <= tolerance]
+    if len(on_margin) * 2 <= len(planes):  # no shared margin — leave the block alone
+        return
+    for index in on_margin:
+        plane = planes[index]
+        x_axis, y_axis, xmin, xmax, ymin, ymax = plane["frame"]
+        right = xmin + float(plane["width"])
+        plane["frame"] = (x_axis, y_axis, consensus, xmax, ymin, ymax)
+        plane["width"] = max(1.0, right - consensus)
+
+
+def _ink_left(base_px: np.ndarray, plane: dict[str, Any]) -> float | None:
+    """The leftmost INK column inside a line's own box, or ``None`` when the band holds none.
+
+    Ink is anything that differs from the band's own background — sampled as the median of the
+    strip, so a coloured panel reads as readily as white paper (same measure as bands._ink_margin)."""
+    _x_axis, _y_axis, xmin, xmax, ymin, ymax = plane["frame"]
+    height, width = base_px.shape[:2]
+    x0, x1 = max(0, int(xmin)), min(width, int(xmax) + 1)
+    y0, y1 = max(0, int(ymin)), min(height, int(ymax) + 1)
+    if x1 - x0 < 2 or y1 - y0 < 2:
+        return None
+    strip = base_px[y0:y1, x0:x1].astype(np.int16)
+    background = np.median(strip.reshape(-1, strip.shape[-1]), axis=0)
+    ink = (np.abs(strip - background).max(axis=2) >= _INK_DELTA).any(axis=0)
+    columns = np.nonzero(ink)[0]
+    return float(columns.min() + x0) if len(columns) else None
+
+
 def _justify_feasible(font: Any, line: str, target_w: float) -> bool:
     """Whether ``line`` can end flush at ``target_w``: within the per-gap stretch/shrink
     bounds, or too long but within the overhang-squeeze floor (it then renders condensed
@@ -362,6 +429,7 @@ def _plan_group(
     sweep_ok: bool | None = None,
     document_member_texts: list[tuple[Any, str]] | None = None,
     preserve_unchanged_text: bool = False,
+    hyphenator: Any = None,
 ) -> list[_Job]:
     # The read-only pixel view is materialised ONCE per render (in render_translated_image)
     # and threaded in: np.asarray(base) copies the whole frame, and _plan_group runs per
@@ -568,6 +636,8 @@ def _plan_group(
         ):
             for plane in planes:
                 plane["center_x"] = axis
+    if not centered:
+        _snap_left_margin(planes, base_arr, angle)
 
     # One element usually sits on one surface: when the per-plane background samples
     # are near-equal (texture noise), snap them to their median so the erase planes
@@ -820,54 +890,56 @@ def _plan_group(
         body = [
             (lines[i], planes[i]) for i in range(min(last_text_index, len(planes))) if lines[i]
         ]
-        feasible = sum(
-            _justify_feasible(font, line, float(plane["width"]) / max(condense, 0.01))
+        ragged = sum(
+            not _justify_feasible(font, line, float(plane["width"]) / max(condense, 0.01))
             for line, plane in body
         )
-        # Count-based, not a hard fraction: ONE unattainable line is always tolerated (a
-        # 4-line block with one bad line sat at 75% and flipped the whole block ragged on
-        # live-run translation wobble), beyond that ~a fifth of the block.
-        if body and (len(body) - feasible) > max(1, len(body) // _JUSTIFY_SOFT_FRACTION):
-            # GREEDY RETRY before giving up on the flush margin. The balanced fill spreads
-            # the block's leftover over EVERY line; under a face narrower than the fit was
-            # calibrated on (the academic serif mapping) that pushes many lines past the
-            # per-gap stretch cap at once (measured: 7 of 23 lines, tail 3.5x the space
-            # width). Justified setting wants the opposite — every line as full as its
-            # plane allows, the remainder on the last (ragged-by-design) line — so re-wrap
-            # greedily and re-evaluate. Only runs when balanced FAILED the consistency
-            # gate: every block the balanced fill serves well stays byte-identical.
-            retry_size = _group_size(planes, render_size_mode)
+        # GREEDY + HYPHENATION alternative. The balanced fill spreads the block's leftover over
+        # EVERY line, leaving interior lines short of their plane — a gap justify cannot close,
+        # so the line falls back ragged (measured: a line at 524px against a 675px plane while
+        # the next word "zoals" would have fit). A greedy fill packs each line full and breaks a
+        # long compound at the boundary, and the words after the break flow up to fill — the
+        # re-flow a post-hoc pass cannot do. It is tried for EVERY justified block but KEPT only
+        # when it ends up with fewer ragged lines: a block the balanced fill already serves (a
+        # uniform-token list where greedy would strand a short trailing line) stays balanced and
+        # byte-identical, while a prose column moves to the greedy+hyphenation flush.
+        retry_size = _group_size(planes, render_size_mode)
+        rfont, rlines = _fit_group(
+            joined, size=retry_size, plane_widths=plane_widths, family=family,
+            weight=weight, italic=italic, islands=group_islands, justified=True, hyphenator=hyphenator,
+        )
+        while retry_size > _MIN_RENDER_SIZE and _raw_condense(rfont, rlines, planes) < _CONDENSE_FLOOR:
+            retry_size -= 1
             rfont, rlines = _fit_group(
                 joined, size=retry_size, plane_widths=plane_widths, family=family,
-                weight=weight, italic=italic, islands=group_islands, justified=True,
+                weight=weight, italic=italic, islands=group_islands, justified=True, hyphenator=hyphenator,
             )
-            while retry_size > _MIN_RENDER_SIZE and _raw_condense(rfont, rlines, planes) < _CONDENSE_FLOOR:
-                retry_size -= 1
-                rfont, rlines = _fit_group(
-                    joined, size=retry_size, plane_widths=plane_widths, family=family,
-                    weight=weight, italic=italic, islands=group_islands, justified=True,
-                )
-            adopted = False
-            fits = _raw_condense(rfont, rlines, planes) >= _CONDENSE_FLOOR
-            if fits and all(plane.get("exact_size") for plane in planes):
-                fits = retry_size >= max(
-                    _MIN_RENDER_SIZE, int(round(_SQUEEZE_PRESERVE_FLOOR * source_size))
-                )
-            if fits:
-                rcondense = _condense_scale(rfont, rlines, planes)
-                rlast = max((i for i, l in enumerate(rlines) if l), default=-1)
-                rbody = [(rlines[i], planes[i]) for i in range(min(rlast, len(planes))) if rlines[i]]
-                rfeasible = sum(
-                    _justify_feasible(rfont, line, float(plane["width"]) / max(rcondense, 0.01))
-                    for line, plane in rbody
-                )
-                if rbody and (len(rbody) - rfeasible) <= max(1, len(rbody) // _JUSTIFY_SOFT_FRACTION):
-                    size, font, lines = retry_size, rfont, rlines
-                    condense, last_text_index = rcondense, rlast
-                    ascent, descent = font.getmetrics()
-                    adopted = True
-            if not adopted:
-                justified = False
+        fits = _raw_condense(rfont, rlines, planes) >= _CONDENSE_FLOOR
+        if fits and all(plane.get("exact_size") for plane in planes):
+            fits = retry_size >= max(
+                _MIN_RENDER_SIZE, int(round(_SQUEEZE_PRESERVE_FLOOR * source_size))
+            )
+        if fits:
+            rcondense = _condense_scale(rfont, rlines, planes)
+            rlast = max((i for i, l in enumerate(rlines) if l), default=-1)
+            rbody = [(rlines[i], planes[i]) for i in range(min(rlast, len(planes))) if rlines[i]]
+            rragged = sum(
+                not _justify_feasible(rfont, line, float(plane["width"]) / max(rcondense, 0.01))
+                for line, plane in rbody
+            )
+            if rbody and rragged < ragged:
+                size, font, lines = retry_size, rfont, rlines
+                condense, last_text_index = rcondense, rlast
+                ascent, descent = font.getmetrics()
+                ragged = rragged
+                body = rbody
+        # Block consistency: if the chosen wrap STILL leaves more than a small minority ragged,
+        # stretching that feasible majority gives gaps without an achieved flush margin — worse
+        # than consistent ragged-left, so drop the whole block to ragged. Count-based: ONE bad
+        # line is always tolerated (a 4-line block with one flipped the whole block on live-run
+        # wobble), beyond that ~a fifth.
+        if body and ragged > max(1, len(body) // _JUSTIFY_SOFT_FRACTION):
+            justified = False
 
     # After every consumer of the measured frames (colour sampling, slack/extend scans,
     # justify evidence): regularise the RENDER anchors onto the source's uniform line grid.

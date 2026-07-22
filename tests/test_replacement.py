@@ -17,9 +17,13 @@ from app.replacement.ground.inpaint import budget_scale
 from app.replacement.ground.inpaint import context_window
 from app.replacement.ground.inpaint import work_scale
 from app.replacement.layout.planning import _justified_text_image
+from app.replacement.layout.planning import _snap_left_margin
 from app.replacement.layout.planning import _justify_feasible
 from app.replacement.layout.planning import _justify_overhang_width
 from app.replacement.layout.planning import _planes_justified
+from app.replacement.text.hyphenation import make_hyphenator
+from app.replacement.text.wrap import _greedy_wrap
+from app.replacement.text.fit import break_pieces
 from app.replacement.text.fit import _dominant_script
 from app.replacement.text.fit import fit_text
 from app.replacement.text.fit import load_font
@@ -522,8 +526,180 @@ def test_width_fit_extend_keeps_size_on_free_ground_and_footprint_when_blocked(t
     blocked = tmp_path / "blocked.png"
     make(blocked, with_obstacle=True)
     assert render_translated_image(
-        blocked, [dict(unit)], width_fit_mode="extend"
+        blocked, [dict(unit)], width_fit_mode="extend_to_margin"
     ) == render_translated_image(blocked, [dict(unit)], width_fit_mode="footprint")
+
+
+def test_width_fit_extend_leaves_a_group_that_already_holds_its_size_alone(tmp_path) -> None:
+    # Growth exists to hold the source size. A two-line block whose translation fits at the
+    # source size has nothing to gain from it, and widening both lines to a uniform measure
+    # would let the balanced fill re-break them (an address's house number dropping to the
+    # next line). With clean ground to the right — so every growth guard would PASS —
+    # "extend_to_margin" must render exactly like footprint.
+    img = Image.new("RGB", (900, 140), (255, 255, 255))
+    draw = ImageDraw.Draw(img)
+    for x in range(20, 380, 12):  # a long first line
+        draw.rectangle((x, 30, x + 5, 50), fill=(0, 0, 0))
+    for x in range(20, 140, 12):  # a short second line, the whole page clean to its right
+        draw.rectangle((x, 80, x + 5, 100), fill=(0, 0, 0))
+
+    source = tmp_path / "block.png"
+    img.save(source)
+    unit = {
+        "translated_text": "Bezorgd op Voorbeeldstraat 12, Ergensdorp",
+        "members": [
+            {"cell_id": 1, "text": "Delivered to the long Example Street 12,", "translate": True,
+             "bbox": {"left": 20, "top": 30, "width": 360, "height": 20}},
+            {"cell_id": 2, "text": "Sometown", "translate": True,
+             "bbox": {"left": 20, "top": 80, "width": 120, "height": 20}},
+        ],
+    }
+    footprint = render_translated_image(source, [dict(unit)], width_fit_mode="footprint")
+    assert render_translated_image(
+        source, [dict(unit)], width_fit_mode="extend_to_margin"
+    ) == footprint
+
+
+def test_width_fit_extend_pulls_a_justified_block_onto_one_margin(tmp_path) -> None:
+    # The counterpart of the test above: a block that already holds its size normally asks for
+    # no growth, but a JUSTIFIED one does — on its own ground. Its lines are set to end on one
+    # margin, and the source planes are OCR boxes that wobble (18px over these four lines), so
+    # without the growth every line is justified to its OWN right edge and the block renders
+    # ragged. Growth is what pulls them onto a shared ceiling.
+    rights = [612, 630, 618, 624, 300]  # flush within tolerance; the last line ends ragged
+    img = Image.new("RGB", (900, 340), (255, 255, 255))
+    draw = ImageDraw.Draw(img)
+    members = []
+    for index, right in enumerate(rights):
+        top = 30 + index * 60
+        for x in range(20, right - 6, 14):
+            draw.rectangle((x, top, x + 3, top + 20), fill=(0, 0, 0))
+        members.append({
+            "cell_id": index + 1, "translate": True, "text": f"source line {index} " + "word " * 8,
+            "bbox": {"left": 20, "top": top, "width": right - 20, "height": 20},
+        })
+    source = tmp_path / "justified.png"
+    img.save(source)
+    unit = {"translated_text": " ".join(["vertaalde tekst voor deze regel van het blok"] * 9),
+            "members": members}
+
+    def right_edges(png: bytes) -> list[int]:
+        arr = np.asarray(Image.open(BytesIO(png)).convert("L"))
+        edges = []
+        for index in range(len(rights) - 1):  # the last line is ragged by design
+            band = arr[22 + index * 60: 58 + index * 60]
+            columns = np.nonzero((band < 128).any(axis=0))[0]
+            edges.append(int(columns.max()))
+        return edges
+
+    footprint = right_edges(render_translated_image(
+        source, [dict(unit)], width_fit_mode="footprint"))
+    extended = right_edges(render_translated_image(
+        source, [dict(unit)], width_fit_mode="extend_to_margin"))
+    assert max(footprint) - min(footprint) > 15  # every line on its own edge
+    assert max(extended) - min(extended) <= 2    # one margin, within antialiasing
+
+
+def test_left_margin_snaps_to_the_measured_ink_but_keeps_a_paragraph_indent() -> None:
+    # Lines are drawn from their own source box, and that box is unreliable on the left: on a
+    # born-digital paper the boxes of one paragraph ran 258..268 while the source ink stood flush
+    # at 269, so the render inherited a wobble the original does not have. The INK decides.
+    from app.replacement.layout.planning import _snap_left_margin
+
+    ink_left, line_h = 100, 20
+    img = Image.new("RGB", (600, 200), (255, 255, 255))
+    draw = ImageDraw.Draw(img)
+    tops = [10, 40, 70, 100]
+    for index, top in enumerate(tops):
+        left = ink_left + (30 if index == 0 else 0)  # line 0 is a real paragraph indent
+        for x in range(left, 460, 14):  # glyph-like strokes: ink stays the minority of the strip
+            draw.rectangle((x, top, x + 4, top + line_h), fill=(0, 0, 0))
+    base = np.asarray(img)
+
+    # Boxes deliberately start left of the ink, by a different amount per line (the defect).
+    box_lefts = [ink_left + 30 - 4, ink_left - 11, ink_left - 2, ink_left - 5]
+    planes = [
+        {"frame": (1.0, 0.0, float(box_lefts[i]), 500.0, float(tops[i]), float(tops[i] + line_h)),
+         "width": 500.0 - box_lefts[i]}
+        for i in range(len(tops))
+    ]
+    rights = [p["frame"][2] + p["width"] for p in planes]
+
+    _snap_left_margin(planes, base, 0.0)
+
+    # The three body lines now share one origin, on the ink; the indented line is untouched.
+    body = [p["frame"][2] for p in planes[1:]]
+    assert max(body) - min(body) == 0 and abs(body[0] - ink_left) <= 1
+    assert planes[0]["frame"][2] == box_lefts[0]  # paragraph indent survives
+    # Each line keeps its own right edge — the flush margin must not move.
+    assert [p["frame"][2] + p["width"] for p in planes] == rights
+
+
+def test_left_margin_snap_leaves_a_block_without_a_shared_margin_alone() -> None:
+    # Centred text, a table cell, a two-level list: no majority sits on one margin, so nothing
+    # is moved. The pass is strictly additive — it only ever tightens a real margin.
+    img = Image.new("RGB", (400, 200), (255, 255, 255))
+    draw = ImageDraw.Draw(img)
+    lefts = [40, 120, 200, 80]  # scattered: no shared left
+    for left, top in zip(lefts, (10, 40, 70, 100)):
+        for x in range(left, left + 60, 14):
+            draw.rectangle((x, top, x + 4, top + 20), fill=(0, 0, 0))
+    planes = [
+        {"frame": (1.0, 0.0, float(left) - 3, 340.0, float(top), float(top + 20)),
+         "width": 340.0 - (left - 3)}
+        for left, top in zip(lefts, (10, 40, 70, 100))
+    ]
+    before = [p["frame"] for p in planes]
+    _snap_left_margin(planes, np.asarray(img), 0.0)
+    assert [p["frame"] for p in planes] == before
+
+
+def test_make_hyphenator_skips_scripts_that_do_not_soft_hyphen() -> None:
+    # A Latin-script target gets a dictionary; CJK and an empty code get None, which the render
+    # reads as "leave the block ragged" — correct, those scripts do not break with a hyphen.
+    assert make_hyphenator("nl") is not None
+    assert make_hyphenator("en") is not None
+    assert make_hyphenator("de_DE") is not None
+    assert make_hyphenator("zh") is None
+    assert make_hyphenator("") is None
+
+
+def test_greedy_wrap_hyphenates_a_long_compound_at_the_line_boundary() -> None:
+    # A justified block wraps greedily WITH hyphenation: a long compound that will not fit the
+    # current line is broken there (head + hyphen stays, tail flows on) instead of wrapping whole
+    # and leaving the line short. Words after the break move up to fill the tail's line — the
+    # re-flow that a post-hoc fill cannot do.
+    hyphenator = make_hyphenator("nl")
+    font = load_font(40, "abc")
+    text = "de korte regel eindigt hier literatuuronderzoekstabellen zijn heel erg nuttig voor werk"
+    pieces = break_pieces(text)
+    # A first plane too narrow to hold the compound whole, forcing a boundary break.
+    cap = font.getlength("de korte regel eindigt hier literatuur")
+    out_plain = _greedy_wrap(font, pieces, [cap, cap, cap])
+    out_hyph = _greedy_wrap(font, pieces, [cap, cap, cap], hyphenator=hyphenator)
+
+    assert out_plain[0].endswith("hier")  # plain greedy wraps the compound whole -> short line 0
+    assert out_hyph[0].endswith("-")      # hyphenated greedy breaks it to fill line 0
+    head = out_hyph[0].rsplit(" ", 1)[-1][:-1]  # the head after the last space, minus the hyphen
+    assert "literatuuronderzoekstabellen".startswith(head) and len(head) >= 6
+    assert out_hyph[1].startswith("literatuuronderzoekstabellen"[len(head):])  # tail flows on
+
+    # No text lost: rejoin, dropping a soft hyphen at a line end, and compare word sequences.
+    def words(rendered: list[str]) -> list[str]:
+        joined = ""
+        for index, line in enumerate(rendered):
+            joined += line[:-1] if (line.endswith("-") and index < len(rendered) - 1) else line + " "
+        return joined.split()
+
+    assert words(out_hyph) == text.split()
+
+
+def test_greedy_wrap_without_a_hyphenator_never_breaks_a_word() -> None:
+    # Non-justified groups (and CJK, where hyphenator is None) must wrap whole words only.
+    font = load_font(40, "abc")
+    text = "de korte regel eindigt hier literatuuronderzoekstabellen zijn nuttig"
+    out = _greedy_wrap(font, break_pieces(text), [font.getlength("de korte regel eindigt hier x")] * 3)
+    assert not any(line.endswith("-") for line in out[:-1])
 
 
 def test_centered_group_lines_snap_to_one_axis_when_the_spread_is_noise(tmp_path) -> None:
