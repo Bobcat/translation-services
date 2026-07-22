@@ -70,10 +70,19 @@ from app.replacement.ground.erase import _swallow_erase_residue
 
 
 # Image categories (the VLM's free-text classification) whose unchanged units preserve by
-# default. Keyword match, not exact string — the wording drifts run to run ("academic
-# paper", "Academic paper page") but the discriminating word is stable. Extend as
-# categories prove themselves.
-_PRESERVE_UNCHANGED_CATEGORY_HINTS = ("academic",)
+# default. Keyword match, not exact string — the wording drifts run to run and the model likes
+# to append a suffix, but the discriminating word is stable. Measured over 80 classifications of
+# one academic paper (sequential and at concurrency 4 and 8): "scientific research paper" 50x,
+# "academic paper page" 16x, "academic paper" 13x, "scientific paper" 1x — four spellings, all
+# carrying "academic" or "scientific". On this one keyword hangs the author/affiliation block:
+# without a match it is re-typeset instead of kept as source pixels.
+#
+# "paper" is deliberately NOT a keyword on its own: a NEWSPAPER page would match it. "research
+# paper" is matched as a phrase for the same reason. "scientific" does stand alone — a stray
+# match (a "scientific poster") is cheap, because preserving only skips units whose translation
+# is word-for-word the source anyway, so the worst case is original glyphs where we would
+# otherwise have re-typeset identical text.
+_PRESERVE_UNCHANGED_CATEGORY_HINTS = ("academic", "scientific", "research paper")
 
 
 def _category_preserves_unchanged(category: str) -> bool:

@@ -654,6 +654,22 @@ def test_left_margin_snap_leaves_a_block_without_a_shared_margin_alone() -> None
     assert [p["frame"] for p in planes] == before
 
 
+def test_paper_categories_preserve_unchanged_text_but_a_newspaper_does_not() -> None:
+    # The author/affiliation block of a paper is kept as SOURCE pixels only when the VLM's
+    # free-text category matches. That wording drifts run to run — measured over 80 runs of one
+    # paper: "scientific research paper", "academic paper page", "academic paper", "scientific
+    # paper" — so the match is on the discriminating keyword, not the whole string.
+    from app.replacement.render import _category_preserves_unchanged as preserves
+
+    for category in ("scientific research paper", "academic paper page", "academic paper",
+                     "scientific paper", "research paper"):
+        assert preserves(category), category
+    # "paper" alone is never the keyword: a newspaper page must NOT start preserving.
+    for category in ("newspaper front page", "Newsletter cover page", "infographic report page",
+                     "Official government letter", ""):
+        assert not preserves(category), category
+
+
 def test_make_hyphenator_skips_scripts_that_do_not_soft_hyphen() -> None:
     # A Latin-script target gets a dictionary; CJK and an empty code get None, which the render
     # reads as "leave the block ragged" — correct, those scripts do not break with a hyphen.
