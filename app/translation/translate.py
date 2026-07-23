@@ -24,6 +24,7 @@ or OCR noise (a pictogram read as "i") are skipped.
 from __future__ import annotations
 
 import re
+import time
 from dataclasses import dataclass
 from dataclasses import replace
 from typing import Any
@@ -162,6 +163,29 @@ def translate_units(
                 call_log=call_log,
             )
 
+    # An island unit never takes the hint-based batch (see the result loop): the hint lines carry
+    # the VLM's TeX reading of the math, not our ⟦Mn⟧ tokens, so the token gate would reject every
+    # one. That left ONE CALL PER ISLAND UNIT — measured on a 15-page paper: 42 of 250 units, so
+    # 42 round trips, each resending the whole system prompt.
+    #
+    # They batch fine on their OWN cell text, where the tokens are present. One numbered call
+    # covers them all, and every per-line gate below still judges each unit separately: a reply
+    # that loses or invents a token falls back to that unit's own call exactly as before. The
+    # batch also gives an island unit the sibling context an isolated call cannot have, which is
+    # what keeps terminology consistent across the paragraphs of one page.
+    island_batch: dict[int, str] = {}
+    island_items = [(uid, text) for uid, text in translatable if _ISLAND_TOKEN_RE.search(text)]
+    if len(island_items) > 1 and decision.translator_mode != "translategemma":
+        island_batch = _translate_batch(
+            settings=settings,
+            model=decision.translator_model,
+            items=island_items,
+            target_lang_code=target_lang_code,
+            category=category,
+            call_log=call_log,
+            role="translation_island_batch",
+        )
+
     # Per-hint-line fallback for hinted units the batch left untranslated (a wobbled block, a
     # rejected numbered reply, or a failed translategemma window): translate the clean VLM LINE —
     # full-sentence context, mapped exactly like the structured path — instead of leaving the
@@ -182,6 +206,7 @@ def translate_units(
                     category=category,
                     prompt=prompt or BUILTIN_PROMPTS[IMAGE_DEFAULT_ID],
                     call_log=call_log,
+                    role="translation_hint_line",
                 ).strip()
             except TranslationError:
                 line = ""  # degrade to skipped: original pixels stay, the failed call is logged
@@ -211,14 +236,15 @@ def translate_units(
                 )
             )
             continue
-        # An island unit (⟦Mn⟧ tokens in its cell text) must translate from that CELL
-        # text: the structured/hint paths translate the VLM's hint lines, which carry the
-        # VLM's own reading of the math (TeX), never our tokens — the gate below would
-        # reject every one of them. Measured on the live paper: all island units degraded
-        # to preserve through the hint fallback. Per-unit translation carries the tokens.
+        # An island unit (⟦Mn⟧ tokens in its cell text) must translate from that CELL text,
+        # never from a hint line: the hint carries the VLM's own TeX reading of the math, not
+        # our tokens, so the gate below would reject every one of them. Measured on the live
+        # paper: all island units degraded to preserve through the hint fallback. So they take
+        # the island batch above (cell text, tokens intact), and any unit whose reply fails a
+        # gate drops to its own call further down — the hint path stays closed to them.
         has_islands = bool(_ISLAND_TOKEN_RE.search(source_text))
-        translated = None if has_islands else batch.get(unit.id)
-        route = f"{decision.translation_route}_batch"
+        translated = island_batch.get(unit.id) if has_islands else batch.get(unit.id)
+        route = f"{decision.translation_route}_island_batch" if has_islands else f"{decision.translation_route}_batch"
         if translated is not None and _batch_line_mismatch(source_text, translated):
             # Measured failure mode: on degenerate short input ('A " A- A-') the
             # batch answer carried ANOTHER line's translation, erasing the source
@@ -263,6 +289,9 @@ def translate_units(
                         category=category,
                         prompt=prompt or BUILTIN_PROMPTS[IMAGE_DEFAULT_ID],
                         call_log=call_log,
+                        # Only a BATCHED run can fall back; an unbatched one is the single-unit
+                        # path taking its normal route, and must not read as a failure.
+                        role="translation_batch_fallback" if batched else "translation_single_unit",
                     )
                 except TranslationError:
                     # One transient HTTP failure on a fallback unit must not discard the whole
@@ -357,12 +386,18 @@ def translate_units(
 
 
 def _log_failed_call(
-    call_log: list[dict[str, Any]] | None, *, role: str, payload: dict[str, Any], error: str
+    call_log: list[dict[str, Any]] | None,
+    *,
+    role: str,
+    payload: dict[str, Any],
+    error: str,
+    wall_ms: float | None = None,
 ) -> None:
     """Record a FAILED llm-pool call before raising, so the persisted ``llm_calls`` artifact
-    shows what died — not only the calls that succeeded."""
+    shows what died — not only the calls that succeeded. A failed call still spent wall time;
+    without it the per-call timings would not add up to the stage."""
     if call_log is not None:
-        call_log.append({"role": role, "payload": payload, "error": error})
+        call_log.append({"role": role, "payload": payload, "error": error, "wall_ms": wall_ms})
 
 
 def _post_responses(
@@ -380,6 +415,10 @@ def _post_responses(
     the tests fake."""
     payload = {**payload, "allow_remote": False}
     url = f"{settings.llm_pool.base_url}{_RESPONSES_PATH}"
+    # Wall time per call, logged with the call. The stage total only says "translation took
+    # 62s"; attributing that to the one batch call versus the per-unit tail needs the split.
+    started = time.perf_counter()
+    elapsed = lambda: round((time.perf_counter() - started) * 1000.0, 1)  # noqa: E731
     try:
         response = httpx.post(url, json=payload, timeout=settings.llm_pool.request_timeout_s)
         response.raise_for_status()
@@ -387,16 +426,16 @@ def _post_responses(
     except httpx.HTTPStatusError as exc:
         body = exc.response.text.strip()
         message = f"llm-pool /v1/responses HTTP {exc.response.status_code}: {body or exc}"
-        _log_failed_call(call_log, role=role, payload=payload, error=message)
+        _log_failed_call(call_log, role=role, payload=payload, error=message, wall_ms=elapsed())
         raise TranslationError(message) from exc
     except httpx.HTTPError as exc:
         message = f"llm-pool /v1/responses unavailable: {exc}"
-        _log_failed_call(call_log, role=role, payload=payload, error=message)
+        _log_failed_call(call_log, role=role, payload=payload, error=message, wall_ms=elapsed())
         raise TranslationError(message) from exc
     if not isinstance(data, dict):
         raise TranslationError("llm-pool /v1/responses returned a non-object response")
     if call_log is not None:
-        call_log.append({"role": role, "payload": payload, "response": data})
+        call_log.append({"role": role, "payload": payload, "response": data, "wall_ms": elapsed()})
     return data
 
 
@@ -422,6 +461,7 @@ def _translate_batch(
     target_lang_code: str,
     category: str,
     call_log: list[dict[str, Any]] | None = None,
+    role: str = "translation_main_numbered",
 ) -> dict[int, str]:
     """Translate every item in one call; return ``{unit_id: translation}`` (may be partial)."""
     if not str(model or "").strip():
@@ -434,7 +474,7 @@ def _translate_batch(
         "stream": False,
         "decoding": {"top_k": 1, "top_p": 1, "temperature": 0.0, "repetition_penalty": 1.0, "max_tokens": 4096},
     }
-    data = _post_responses(settings, payload, role="translation_main_numbered", call_log=call_log)
+    data = _post_responses(settings, payload, role=role, call_log=call_log)
     if _reply_truncated(data, payload):
         return {}  # tail items lost -> per-unit handling decides, never a partial mis-mapping
 
@@ -480,7 +520,11 @@ def _translate_one(
     category: str = "",
     prompt: PromptEntry | None = None,
     call_log: list[dict[str, Any]] | None = None,
+    role: str = "translation_single_unit",
 ) -> str:
+    """One unit (or one hint line) in its own call. ``role`` names WHY this call exists —
+    the log is read to attribute stage time, and "fallback" on a call that never fell back
+    sends that reading wrong."""
     if not str(model or "").strip():
         raise TranslationError("translator_model is required to translate a unit")
     payload: dict[str, Any] = {
@@ -516,7 +560,7 @@ def _translate_one(
         payload["instructions"] = render_template(prompt.system, variables)
     else:
         payload["instructions"] = _system_prompt(target_lang_code, category)
-    data = _post_responses(settings, payload, role=f"translation_fallback: {text[:40]!r}", call_log=call_log)
+    data = _post_responses(settings, payload, role=f"{role}: {text[:40]!r}", call_log=call_log)
     if _reply_truncated(data, payload):
         return ""  # a cut-off line is not a translation; empty degrades to original pixels
     return str(data.get("output_text") or "").strip()
