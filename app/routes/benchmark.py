@@ -27,6 +27,7 @@ from app.benchmark.overlay import overlay_png
 from app.benchmark.scoring import anchor_details
 from app.benchmark.scoring import score_measurement
 from app.benchmark.store import default_data_root
+from app.benchmark.store import delete_cell
 from app.benchmark.store import find_run
 from app.benchmark.store import runs_index
 from app.benchmark.store import save_run
@@ -158,6 +159,17 @@ def register(app: FastAPI, *, settings: AppSettings, runtime: RequestRuntime) ->
         return JSONResponse(status_code=200, content={
             "doc_id": run.doc_id, "system": run.system, "run_id": run.run_id, "scores": scores,
         })
+
+    @app.delete("/v1/benchmark/runs/{doc_id}/{system}")
+    async def benchmark_delete_cell(doc_id: str, system: str) -> JSONResponse:
+        """Drop every stored run for one matrix cell. The comparison view removes a
+        now-empty column client-side once the cell is gone from the results index."""
+        removed = await anyio.to_thread.run_sync(
+            lambda: delete_cell(benchmark_root, doc_id=doc_id, system=system)
+        )
+        if removed == 0:
+            return _error(404, code="BENCHMARK_RUN_NOT_FOUND", message="no stored run for this document/system", retryable=False)
+        return JSONResponse(status_code=200, content={"removed": removed})
 
     @app.get("/v1/benchmark/runs/{doc_id}/{system}/{run_id}/anchors")
     async def benchmark_anchors(doc_id: str, system: str, run_id: str) -> JSONResponse:

@@ -11,6 +11,7 @@ from dataclasses import dataclass
 import hashlib
 import json
 from pathlib import Path
+import shutil
 import time
 from typing import Any
 
@@ -103,6 +104,22 @@ def find_run(data_root: Path, *, doc_id: str, system: str, run_id: str | None = 
         and (run_id is None or run.run_id == run_id)
     ]
     return candidates[-1] if candidates else None
+
+
+def delete_cell(data_root: Path, *, doc_id: str, system: str) -> int:
+    """Remove every stored run for one (doc, system) matrix cell, then prune the
+    now-empty system directory (and the doc directory if it holds no more systems).
+    Returns the number of run directories removed."""
+    doc_dir = (data_root / safe_token(doc_id)).resolve()
+    system_dir = (doc_dir / safe_token(system)).resolve()
+    system_dir.relative_to(data_root.resolve())  # path-safety, same guard as save_run
+    if not system_dir.is_dir():
+        return 0
+    removed = sum(1 for path in system_dir.iterdir() if path.is_dir())
+    shutil.rmtree(system_dir)
+    if doc_dir.is_dir() and not any(doc_dir.iterdir()):
+        doc_dir.rmdir()
+    return removed
 
 
 def runs_index(data_root: Path) -> list[dict[str, Any]]:
