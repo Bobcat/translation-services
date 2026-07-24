@@ -78,8 +78,10 @@ def run_rerender_pdf_pipeline(
                     (page_dir / f"{name}.json").write_text(
                         json.dumps(debug[name], ensure_ascii=False, indent=2), encoding="utf-8"
                     )
-            replacement_wall_ms += float(result.metrics.get("replacement_wall_ms") or 0.0)
+            page_replacement_ms = float(result.metrics.get("replacement_wall_ms") or 0.0)
+            replacement_wall_ms += page_replacement_ms
         else:
+            page_replacement_ms = None
             # Nothing was cached for this page (an image-only page): its previous render is
             # the page, and no render flag can change it.
             previous = source_dir / "rendered.png"
@@ -87,8 +89,23 @@ def run_rerender_pdf_pipeline(
                 previous.read_bytes() if previous.exists() else page_png.read_bytes()
             )
 
+        # A re-render makes no model calls — it reuses the cached grouping and translation. Carry
+        # the source run's per-page call log forward so the "Prompts & responses" view survives a
+        # render-flag flip, same as the grouping/translation it is rendered from.
+        page_artifacts = {"input": str(page_png), "rendered": str(rendered_path)}
+        source_calls = source_dir / "llm_calls.json"
+        if source_calls.exists():
+            calls_path = page_dir / "llm_calls.json"
+            calls_path.write_text(source_calls.read_text(encoding="utf-8"), encoding="utf-8")
+            page_artifacts["llm_calls"] = str(calls_path)
+
         summary = {key: value for key, value in page.items() if key != "artifacts"}
-        summary["artifacts"] = {"input": str(page_png), "rendered": str(rendered_path)}
+        summary["artifacts"] = page_artifacts
+        # The per-page metrics are the source run's — its grouping/translation times are the honest
+        # provenance of these unchanged translations. Only render re-ran, so overwrite just that
+        # one with this run's measured value; the timings view then reflects the current flags.
+        if page_replacement_ms is not None:
+            summary["metrics"] = {**(page.get("metrics") or {}), "replacement_wall_ms": page_replacement_ms}
         page_summaries.append(summary)
         assembled_pages.append(
             PageImage(

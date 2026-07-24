@@ -31,6 +31,7 @@ def run_rerender_image_pipeline(
     source_translation: list[dict[str, Any]],
     request: dict[str, Any],
     checkpoint: Callable[[], None] = lambda: None,
+    source_llm_calls: list[dict[str, Any]] | None = None,
 ) -> TranslateImageResult:
     del settings
     started_at = time.perf_counter()
@@ -103,6 +104,9 @@ def run_rerender_image_pipeline(
         },
         "grouping": source_grouping,
         "translation": source_translation,
+        # A re-render makes no calls of its own; carrying the source run's log forward keeps the
+        # prompts/responses visible after a render-flag flip (and this run a valid re-render source).
+        "llm_calls": list(source_llm_calls or []),
     }
 
     metadata = {

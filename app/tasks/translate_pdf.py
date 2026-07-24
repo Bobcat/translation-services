@@ -135,8 +135,9 @@ def run_translate_pdf_pipeline(
                         json.dumps(debug[name], ensure_ascii=False, indent=2), encoding="utf-8"
                     )
             calls = debug.get("llm_calls") or []
+            calls_path = page_dir / "llm_calls.json"
             if calls:
-                (page_dir / "llm_calls.json").write_text(
+                calls_path.write_text(
                     json.dumps(calls, ensure_ascii=False, indent=2), encoding="utf-8"
                 )
 
@@ -157,6 +158,10 @@ def run_translate_pdf_pipeline(
                     "artifacts": {
                         "input": str(page_png),
                         "rendered": str(rendered_path),
+                        # Only when the page actually made calls: a page whose text was all
+                        # preserved makes none, and an artifact entry pointing at a file that
+                        # was never written would 404 on fetch.
+                        **({"llm_calls": str(calls_path)} if calls else {}),
                     },
                 }
             )

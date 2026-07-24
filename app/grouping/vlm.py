@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import base64
 import copy
+import time
 from io import BytesIO
 from pathlib import Path
 from typing import Any
@@ -208,22 +209,30 @@ def _call_llm_pool(
     role: str = "grouping_vlm",
 ) -> str:
     url = f"{base_url}{_RESPONSES_PATH}"
+    # Wall time per call, logged with it, same as the translation calls: the grouping call is
+    # 38-50s of a run, and a per-page call log that timed everything but this one would not add up.
+    started = time.perf_counter()
+    elapsed = lambda: round((time.perf_counter() - started) * 1000.0, 1)  # noqa: E731
     try:
         response = httpx.post(url, json=payload, timeout=timeout)
         response.raise_for_status()
         data = response.json()
     except httpx.HTTPStatusError as exc:
         body = exc.response.text.strip()
-        raise GroupingHintError(
-            f"llm-pool /v1/responses HTTP {exc.response.status_code}: {body or exc}"
-        ) from exc
+        message = f"llm-pool /v1/responses HTTP {exc.response.status_code}: {body or exc}"
+        if call_log is not None:
+            call_log.append({"role": role, "payload": _redact_payload(payload), "error": message, "wall_ms": elapsed()})
+        raise GroupingHintError(message) from exc
     except httpx.HTTPError as exc:
-        raise GroupingHintError(f"llm-pool /v1/responses unavailable: {exc}") from exc
+        message = f"llm-pool /v1/responses unavailable: {exc}"
+        if call_log is not None:
+            call_log.append({"role": role, "payload": _redact_payload(payload), "error": message, "wall_ms": elapsed()})
+        raise GroupingHintError(message) from exc
 
     if not isinstance(data, dict):
         raise GroupingHintError("llm-pool /v1/responses returned a non-object response")
     if call_log is not None:
-        call_log.append({"role": role, "payload": _redact_payload(payload), "response": data})
+        call_log.append({"role": role, "payload": _redact_payload(payload), "response": data, "wall_ms": elapsed()})
     output_text = str(data.get("output_text") or "").strip()
     if not output_text:
         raise GroupingHintError("llm-pool /v1/responses returned empty output_text")

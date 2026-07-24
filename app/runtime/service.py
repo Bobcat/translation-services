@@ -42,6 +42,21 @@ def _json_hash(obj: Any) -> str:
     return json.dumps(obj, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
 
 
+def _load_source_llm_calls(calls_dir: Path) -> list[dict[str, Any]]:
+    """The image run's call log, reassembled from its per-call files (``NN_role.json``) in
+    call order. Empty when the dir is absent (an older run, or one that made no calls) — a
+    re-render then simply shows nothing rather than failing."""
+    if not calls_dir.is_dir():
+        return []
+    calls: list[dict[str, Any]] = []
+    for path in sorted(calls_dir.glob("*.json")):
+        try:
+            calls.append(json.loads(path.read_text(encoding="utf-8")))
+        except (OSError, json.JSONDecodeError):
+            continue
+    return calls
+
+
 class RequestRuntime:
     def __init__(self, *, settings: AppSettings) -> None:
         self._settings = settings
@@ -526,6 +541,7 @@ class RequestRuntime:
             source_translation=source_translation,
             request=request,
             checkpoint=self._cancel_checkpoint_for(request_id),
+            source_llm_calls=_load_source_llm_calls(source_root / "llm_calls"),
         )
         return self._persist_result(request_id, request, input_path, str(image.get("mime_type") or "image/png"), result)
 
@@ -624,9 +640,17 @@ class RequestRuntime:
         }
         for page in result.document.get("pages") or []:
             page_no = int(page.get("page") or 0)
-            rendered_page = str(dict(page.get("artifacts") or {}).get("rendered") or "")
+            page_artifacts = dict(page.get("artifacts") or {})
+            rendered_page = str(page_artifacts.get("rendered") or "")
             if page_no and rendered_page:
                 artifacts[f"page-{page_no:03d}"] = {"path": rendered_page, "mime_type": "image/png"}
+            # The page's call log is referenced, never inlined: fetching one page at a time is
+            # what keeps the document response small (see the empty "llm_calls" below).
+            calls_page = str(page_artifacts.get("llm_calls") or "")
+            if page_no and calls_page:
+                artifacts[f"page-{page_no:03d}-llm-calls"] = {
+                    "path": calls_page, "mime_type": "application/json"
+                }
         return {
             "task": request["task"],
             "artifacts": artifacts,
