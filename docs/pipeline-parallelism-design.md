@@ -14,13 +14,13 @@ instead of taking one call each, and every llm-pool call is timed.
 
 ## The problem
 
-The model pool admits 4 inference requests at a time (`target_inflight`). One
-user submitting one document uses 1 of those 4. `translate_pdf` walks its pages
-in a loop, and each page waits for its own model calls before the next page
+The model pool admits several inference requests at a time (`target_inflight`).
+One user submitting one document uses a single slot. `translate_pdf` walks its
+pages in a loop, and each page waits for its own model calls before the next page
 starts.
 
-The runtime already runs 2 request slots, so two *requests* overlap. Within a
-request nothing does.
+The runtime already runs more than one request slot, so separate *requests*
+overlap. Within a request nothing does.
 
 ## Baseline
 
@@ -65,102 +65,26 @@ thread, and the harder input did not change their weight. LaMa sits inside
 **Page cost varies a lot.** In the born-digital run the slowest page took 11.1s,
 the median 8.2s and the fastest 1.0s. Serial execution pays that spread in full.
 
-The scanned run being faster is not evidence that OCR is cheaper than reading the
-text layer. It does less: OCR flattens formulas into plain characters, the batch
-carries them, and the TeX gate strips them. The same paragraph translated from
-the text layer keeps `⟦M1⟧ ⟦M2⟧ ⟦M3⟧`, so the formula pixels are transplanted
-back; from OCR it came out with the maths simply gone. The two columns are not
-the same job.
+The scanned run is faster but not a cheaper route: OCR does less than the
+text-layer path — it flattens the formulas that path carries as island tokens —
+so the two right-hand columns are not the same job.
 
-### Measurement hygiene
+## Two sources of parallelism
 
-Model-call time is stable. Rare single calls are not, and one of them dominates
-whatever stage it lands in.
+Per page the translator makes batched calls — one over the page's hint lines, one
+over any inline-maths units — plus a short tail of per-unit calls for what the
+batches could not place. Per-call timing puts nearly all the time in the batches:
+over the born-digital run the 13 main batch calls took 43.8s (73% of the
+translation stage) and the island batches another 14.5s, against a per-unit tail
+of under two seconds in total.
 
-The pool answers an identical payload within 4%: 15 replays of one call ranged
-5.10s to 5.30s, with no warm-up curve — the first three averaged 5.17s and the
-last five 5.18s. Replaying a whole run's payloads reproduces them: 10 of 11 came
-back within 4% of what they took originally.
+So there are two independent places to parallelise:
 
-The eleventh had taken 64.2s and came back in 7.6s. That one call was 48% of its
-stage. The same shape appeared on the other document: median call 3.3s in both a
-"fast" and a "slow" run, with one 51.3s outlier making the difference between
-43.8s and 90.9s.
-
-So read the per-call distribution, not the stage total. A stage total that looks
-like a 50% regression is usually one stalled call and ten normal ones.
-
-The cause is not established. Three explanations were measured and ruled out: the
-model had been resident for 16 hours across every measurement, so no load or
-eviction; the pool answers an identical payload within 4% with no warm-up curve;
-and the payload that stalled for 64.2s replayed in 7.6s. Contention on the
-multi-tenant GPU would fit the shape, but the operator reports the neighbouring
-services were idle at the time.
-
-So: rare, unexplained, and worth watching as more runs accumulate. The per-call
-timings now in the log are what will catch the next one.
-
-It does not need proving to design against. Whatever starves a call, the pipeline
-has to survive it.
-
-## Translation is not one call per page
-
-Per page the translator makes one batched call, then one call per unit the batch
-could not place. Over the born-digital run: 15 grouping calls, 13 batched
-translation calls, and **50 per-unit fallback calls**. Page 1 alone made 11.
-
-A unit carrying an island token never took that batch. The hint lines the batch
-translates carry the VLM's own TeX reading of the maths, not our `⟦Mn⟧` tokens,
-so the token gate would reject every one — measured earlier, they all degraded to
-untranslated. Each island unit therefore got its own call: on this paper, 42 of
-250 units, so 42 round trips, each resending the whole system prompt.
-
-Island units batch fine on their **own cell text**, where the tokens are present.
-That is now what happens: one numbered-list call per page over the island units,
-with every per-line gate still judging each unit, and any rejected line dropping
-to its own call as before. It also gives an island unit the sibling context an
-isolated call cannot have.
-
-| | before | after |
-|---|---|---|
-| batched calls | 13 | 13 |
-| island batch | — | 9 |
-| genuine fallbacks | **48** | **7** |
-| single-unit (not a fallback) | 2 | 2 |
-| total translation calls | 63 | 31 |
-
-The call count halved. The stage time did not move: 62.7s before, 59.7s and 60.2s
-after. Those fallbacks were short calls — the saving is round-trip overhead, not
-work.
-
-Per-call timing (added with this change) says where the time actually is:
-
-```
-13x translation_main         43.8s   ← 73% of the stage
- 9x translation_island_batch 14.5s
- 6x translation_hint_line     0.9s
- 2x translation_single_unit   0.7s
- 1x translation_batch_fallback 0.3s
-```
-
-**The 13 page-level batch calls are the cost.** The call count that looked
-alarming was not. Anything aimed at cutting translation time has to target those.
-
-The change stays, for two reasons that are not wall clock: 31 round trips instead
-of 63 frees inflight slots once pages run concurrently, and island units now
-translate with their neighbours in view.
-
-Those fallbacks run one after another inside the page. Each pays a full round
-trip, and they are independent of each other — one unit's translation does not
-depend on another's.
-
-So there are two independent sources of parallelism, not one:
-
-- **across pages** — pages share nothing until the PDF is assembled.
-- **within a page** — the fallback calls can be issued together.
-
-The second one matters for single-page image requests too, which page-level
-concurrency alone would not help.
+- **across pages** — pages share nothing until the PDF is assembled, so their
+  batch calls can be in flight together. This is the main win.
+- **within a page** — the tail calls do not depend on each other and can be
+  issued together. This is the only source that also helps a single-page image
+  request, where there are no other pages to overlap with.
 
 ## Resource classes
 
@@ -240,6 +164,13 @@ runs when.
 - PDF assembly keeps page order regardless of completion order.
 - per-page progress becomes a count of finished pages.
 - `checkpoint()` and cancellation need a defined meaning with N pages in flight.
+- each page's model calls carry a timeout and one retry, so a stalled call frees
+  its shared admission slot instead of throttling the fan-out — a 64.2s call
+  replayed in 7.6s, a 51.3s one against a 3.3s median.
+- the timeout is measured from admission, not submission, so a deep queue does
+  not trip it spuriously; phase 1's `wait`/`work` split marks admission.
+- the PDF regression harness stays green; page output is per-page, so concurrency
+  must not change it.
 
 ### Phase 3 — the remaining tail
 
@@ -247,7 +178,7 @@ The island batch already removed most of the per-unit calls. What is left per
 page is a handful of hint-line and fallback calls, issued in sequence. Fanning
 those out is the only work here that also speeds up a single-page image request,
 where there are no other pages to overlap with — but the measured tail is now
-under a second per document, so this is last, not first.
+under two seconds per document, so this is last, not first.
 
 ### Phase 4 — tune
 
@@ -259,17 +190,15 @@ against single-stream calls is tuned against a situation that no longer exists.
 ## Fewer calls pulls against more parallelism
 
 The 13 page-level batch calls could be merged across pages — fewer, larger calls.
-That serialises the pages this design wants to overlap. Four pages in flight gives
-four concurrent batch calls: good use of the admission limit, more calls.
+That serialises the pages this design wants to overlap. Pages in flight give that
+many concurrent batch calls: good use of the admission limit, more calls.
 
 Which way to lean depends on contention. For one client the pool has spare
 capacity and parallelism wins. For several clients capacity is the scarce thing,
 and fewer, longer calls are the better neighbour: each call carries fixed prompt
 and scheduling overhead, and many short ones fragment the server's batching.
 
-That is a reason to make page concurrency a setting rather than a constant. It is
-also why the call-count reduction above is kept even though it saved no wall
-clock.
+That is a reason to make page concurrency a setting rather than a constant.
 
 ## Expected gain
 
@@ -282,23 +211,3 @@ If model time divides by 4 and in-process work overlaps with it, the floor is
 Both land near 4x, which is the pool's admission limit. Closing the page-cost
 spread adds utilisation on top. This is arithmetic on the baseline, not a
 measurement.
-
-## Risks
-
-- **Memory.** N pages in flight means N rasters and N renders held at once. The
-  bound is what keeps that predictable.
-- **Failure containment.** Firing every page's calls at once removes the
-  backpressure a bounded client gives. A generous upper bound is cheap insurance
-  against a stalled pool parking every thread.
-- **Timeouts.** With a deep queue a call's latency is queue wait plus inference.
-  A deadline that starts at admission rather than submission keeps the tail from
-  failing spuriously; that belongs in the pool, and matches the `wait`/`work`
-  split measured here.
-- **A stalled call must not hold a slot.** Measured twice: one call took 64.2s
-  where its replay took 7.6s, and another 51.3s against a 3.3s median. Serially
-  that is a slow document. With N pages in flight it is worse — the call occupies
-  one of the four admissions for a minute while the other pages queue behind it.
-  A timeout with one retry bounds the damage to that page; without one, page
-  concurrency makes a rare stall more expensive, not less.
-- **Fixtures.** Pages are independent, so the PDF harness should be unaffected.
-  That needs checking, not assuming.
