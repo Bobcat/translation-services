@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import shutil
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -46,11 +47,67 @@ class CaptureError(ValueError):
 TESTSET_PDF_ROOT = Path("testset/pdf")
 
 
+def _iter_source_pdfs(testset_root: Path) -> "Iterator[Path]":
+    """Every source PDF under ``testset_root`` at any depth, pruning ``_``-prefixed dirs
+    (``_regression`` holds fixtures, not sources). Mirrors the image harness's source walk."""
+    if not testset_root.is_dir():
+        return
+    stack = [testset_root]
+    while stack:
+        for child in stack.pop().iterdir():
+            if child.is_dir():
+                if not child.name.startswith("_"):
+                    stack.append(child)
+            elif child.suffix.lower() == ".pdf":
+                yield child
+
+
+def find_testset_pdfs(name: str, *, testset_root: Path = TESTSET_PDF_ROOT) -> list[Path]:
+    """All source PDFs whose stem is ``name``. More than one violates the unique-stem invariant."""
+    return sorted(p for p in _iter_source_pdfs(testset_root) if p.stem == name)
+
+
+def testset_pdf(name: str, *, testset_root: Path = TESTSET_PDF_ROOT) -> Path | None:
+    """The source PDF for ``name`` anywhere in the testset tree, or ``None``. Stems are unique
+    across the tree, so the first match is it."""
+    matches = find_testset_pdfs(name, testset_root=testset_root)
+    return matches[0] if matches else None
+
+
+def source_reldir(name: str, *, testset_root: Path = TESTSET_PDF_ROOT) -> str:
+    """The dir of ``name``'s source PDF relative to the testset root (``''`` = flat root), so a
+    fixture can mirror it under ``_regression``. Raises ``ValueError`` when the stem is not unique;
+    returns ``''`` when the source is not in the testset yet."""
+    matches = find_testset_pdfs(name, testset_root=testset_root)
+    if len(matches) > 1:
+        joined = ", ".join(str(p.relative_to(testset_root)) for p in matches)
+        raise ValueError(f"stem {name!r} is not unique in the testset ({joined})")
+    if not matches:
+        return ""
+    rel = str(matches[0].parent.relative_to(testset_root))
+    return "" if rel == "." else rel
+
+
+def list_subdirs(*, testset_root: Path = TESTSET_PDF_ROOT) -> list[str]:
+    """Existing non-underscore subdirectories under the testset root (relative paths, any depth),
+    for the Add-to-testset destination picker. Empty dirs are included so a fresh PDF can be filed."""
+    out: list[str] = []
+    if not testset_root.is_dir():
+        return out
+    stack = [testset_root]
+    while stack:
+        for child in stack.pop().iterdir():
+            if child.is_dir() and not child.name.startswith("_"):
+                out.append(str(child.relative_to(testset_root)))
+                stack.append(child)
+    return sorted(out)
+
+
 def testset_name_for(source_pdf: Path, *, testset_root: Path = TESTSET_PDF_ROOT) -> str | None:
     """The testset stem whose bytes match the uploaded source — the natural fixture name.
     Shared by the CLI and the capture endpoint so both default identically."""
     digest = fx.sha256(source_pdf.read_bytes())
-    for candidate in sorted(testset_root.glob("*.pdf")):
+    for candidate in _iter_source_pdfs(testset_root):
         if fx.sha256(candidate.read_bytes()) == digest:
             return candidate.stem
     return None
@@ -143,7 +200,15 @@ def capture_document(
         raise CaptureError("run's assembled pdf is inconsistent: " + "; ".join(assembled_diffs))
 
     lang = target_lang or "unknown"
-    lang_dir = root / name / lang
+    # Nest the fixture to mirror the source PDF's subdir in the testset (docpack/07_… ->
+    # _regression/docpack/07_…), exactly like the image harness. Falls back to the flat root when
+    # the source is not in the testset (a name was typed for a PDF that was never added).
+    try:
+        reldir = source_reldir(name)
+    except ValueError:
+        reldir = ""
+    name_dir = (root / reldir / name) if reldir else (root / name)
+    lang_dir = name_dir / lang
     resolved_variant = variant or _next_variant(lang_dir)
     variant_path = lang_dir / resolved_variant
 

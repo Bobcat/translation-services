@@ -22,10 +22,12 @@ from fastapi.responses import JSONResponse
 from app.core.config import AppSettings
 from app.core.util import safe_token
 from app.regression.pdf import fixture as dfx
+from app.regression.pdf import capture as pdf_capture
 from app.regression.pdf.capture import CaptureError
 from app.regression.pdf.capture import capture_document
 from app.regression.pdf.capture import delete_variant
 from app.regression.pdf.capture import testset_name_for
+from app.regression.pdf.capture import testset_pdf
 from app.regression.pdf.run import accept_document
 from app.regression.pdf.run import run_document
 from app.routes.common import error_response as _error
@@ -44,13 +46,21 @@ def register(app: FastAPI, *, settings: AppSettings, runtime: RequestRuntime) ->
     root = dfx.PDF_REGRESSION_ROOT
 
     def _variant_path(name: str, lang: str, variant: str) -> Path | None:
-        """Resolved ``<root>/<name>/<lang>/<vN>``, or None when the path escapes the root."""
-        candidate = (root / name / lang / variant).resolve()
+        """The fixture dir for ``(name, lang, variant)``. None only when a component would escape
+        the root (a caller passing ``..``) — the invalid-path case. When the components are safe but
+        no fixture exists, a non-existent path is returned so the caller's ``document.json`` check
+        reports not-found. The name dir may be nested under a subset subdir mirroring its source, so
+        the actual path is looked up by walking; the flat ``<root>/<name>/<lang>/<vN>`` is only the
+        fallback shape for the not-found case."""
+        flat = (root / name / lang / variant).resolve()
         try:
-            candidate.relative_to(root.resolve())
+            flat.relative_to(root.resolve())
         except ValueError:
             return None
-        return candidate
+        for fx_name, fx_lang, fx_variant, path in dfx.variant_dirs(root):
+            if fx_name == name and fx_lang == lang and fx_variant == variant:
+                return path.resolve()
+        return flat
 
     @app.get("/v1/pdf-regression/fixtures")
     async def pdf_regression_list() -> JSONResponse:
@@ -77,9 +87,63 @@ def register(app: FastAPI, *, settings: AppSettings, runtime: RequestRuntime) ->
                 for doc in dfx.list_documents():
                     if doc["name"] == name:
                         langs.setdefault(doc["target_lang"], []).append(doc["variant"])
-            return {"request_id": request_id, "name": name, "in_testset": name is not None, "langs": langs}
+            reldir = pdf_capture.source_reldir(name) if name else ""
+            return {
+                "request_id": request_id, "name": name, "in_testset": name is not None,
+                "reldir": reldir, "langs": langs,
+            }
 
         return JSONResponse(status_code=200, content=await anyio.to_thread.run_sync(_status))
+
+    @app.get("/v1/pdf-regression/subdirs")
+    async def pdf_regression_subdirs() -> JSONResponse:
+        """Existing testset subdirs, for the Add-to-testset destination picker (image parity)."""
+        return JSONResponse(status_code=200, content={"subdirs": await anyio.to_thread.run_sync(pdf_capture.list_subdirs)})
+
+    @app.post("/v1/pdf-regression/add-testset")
+    async def pdf_regression_add_testset(body: dict[str, Any] = Body(default_factory=dict)) -> JSONResponse:
+        """Copy a completed run's source PDF into ``testset/pdf/<subdir>/<name>.pdf`` — the PDF twin
+        of ``/regression/add-testset``. A capture then mirrors that subdir. The content-hash match
+        already lets a source that is ALREADY in the testset skip this step; this is for a fresh PDF."""
+        request_id = str(body.get("request_id") or "").strip()
+        name = str(body.get("name") or "").strip()
+        subdir = str(body.get("subdir") or "").strip().strip("/")
+        if not request_id or not name:
+            return _error(400, code="REGRESSION_BAD_REQUEST", message="request_id and name are required", retryable=False)
+        # name/subdir land in a filesystem path — the same resolve/relative_to guard the sibling
+        # endpoints use, so "../" or an absolute name cannot write outside the testset.
+        testset_root = pdf_capture.TESTSET_PDF_ROOT.resolve()
+        rel = f"{subdir}/{name}" if subdir else name
+        try:
+            (pdf_capture.TESTSET_PDF_ROOT / f"{rel}.pdf").resolve().relative_to(testset_root)
+        except ValueError:
+            return _error(400, code="REGRESSION_BAD_NAME", message="name must stay inside the testset", retryable=False)
+        # Unique-stem invariant: a stem lives at exactly one place, else the fixture mirror is
+        # ambiguous. The workbench disables Add when already in the testset; this is the guard.
+        existing = await anyio.to_thread.run_sync(lambda: testset_pdf(name))
+        if existing is not None:
+            return _error(409, code="REGRESSION_DUPLICATE_STEM",
+                          message=f"stem {name!r} is already in the testset at {existing}", retryable=False)
+        status_code, input_art = await runtime.artifact_path(request_id=request_id, artifact_name="input")
+        if int(status_code) != 200:
+            return JSONResponse(status_code=int(status_code), content=input_art)
+        if str(input_art.get("mime_type")) != "application/pdf":
+            return _error(409, code="REGRESSION_NOT_A_PDF_RUN", message="request is not a translate_pdf run", retryable=False)
+        source_pdf = Path(str(input_art["path"]))
+        if not source_pdf.exists():
+            return _error(404, code="REGRESSION_INPUT_MISSING", message="input artifact not available", retryable=False)
+        dest = pdf_capture.TESTSET_PDF_ROOT / f"{rel}.pdf"
+
+        def _copy() -> dict[str, Any]:
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_bytes(source_pdf.read_bytes())
+            langs: dict[str, list[str]] = {}
+            for doc in dfx.list_documents():
+                if doc["name"] == name:
+                    langs.setdefault(doc["target_lang"], []).append(doc["variant"])
+            return {"name": name, "in_testset": True, "reldir": subdir, "langs": langs}
+
+        return JSONResponse(status_code=200, content=await anyio.to_thread.run_sync(_copy))
 
     @app.post("/v1/pdf-regression/capture")
     async def pdf_regression_capture(body: dict[str, Any] = Body(default_factory=dict)) -> JSONResponse:

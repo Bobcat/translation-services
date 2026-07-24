@@ -208,6 +208,43 @@ def test_document_fixture_roundtrip_and_discovery(tmp_path: Path) -> None:
     }]
 
 
+def test_variant_dirs_finds_a_fixture_nested_under_a_subdir(tmp_path: Path) -> None:
+    # A fixture may mirror its source's testset subdir (docpack/07_… -> _regression/docpack/07_…),
+    # so discovery must recurse — the last three path components are always name/lang/variant.
+    root = tmp_path / "_regression"
+    flat = root / "01_flat" / "nl" / "v1"
+    nested = root / "docpack" / "07_paper" / "en" / "v2"
+    for path, lang in ((flat, "nl"), (nested, "en")):
+        dfx.save_document(path, dfx.DocumentFixture(
+            source_sha256="ab" * 32, analysis_dpi=160, target_lang=lang,
+            census=[{"page": 1, "width_pt": 595.0, "height_pt": 842.0, "cell_source": "ocr"}],
+        ))
+    found = {(name, variant) for name, _lang, variant, _p in dfx.variant_dirs(root)}
+    assert found == {("01_flat", "v1"), ("07_paper", "v2")}
+
+
+def test_pdf_source_reldir_mirrors_subdir_and_enforces_unique_stem(tmp_path: Path) -> None:
+    from app.regression.pdf import capture as pdf_capture
+
+    testset = tmp_path / "pdf"
+    (testset / "docpack").mkdir(parents=True)
+    (testset / "01_root.pdf").write_bytes(b"%PDF-1.4 root")
+    (testset / "docpack" / "07_nested.pdf").write_bytes(b"%PDF-1.4 nested")
+
+    assert pdf_capture.source_reldir("01_root", testset_root=testset) == ""
+    assert pdf_capture.source_reldir("07_nested", testset_root=testset) == "docpack"
+    assert pdf_capture.source_reldir("absent", testset_root=testset) == ""  # not filed yet -> root
+    assert sorted(pdf_capture.list_subdirs(testset_root=testset)) == ["docpack"]
+
+    # A stem at two places breaks the mirror — source_reldir refuses rather than guess.
+    (testset / "docpack" / "01_root.pdf").write_bytes(b"%PDF-1.4 dupe")
+    try:
+        pdf_capture.source_reldir("01_root", testset_root=testset)
+        assert False, "expected ValueError on duplicate stem"
+    except ValueError:
+        pass
+
+
 def test_page_dirs_only_yields_page_fixtures(tmp_path: Path) -> None:
     variant = tmp_path / "v1"
     good = dfx.page_dir(variant, 1)

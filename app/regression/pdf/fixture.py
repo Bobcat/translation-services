@@ -128,13 +128,13 @@ def save_accepted_scores(variant_path: Path, scores: dict[str, Any]) -> None:
 
 
 def variant_dirs(root: Path = PDF_REGRESSION_ROOT) -> list[tuple[str, str, str, Path]]:
-    """``(name, lang, variant, path)`` for every document fixture under ``root``. The tree is
-    always exactly ``<stem>/<lang>/<vN>/document.json`` (PDF stems are unique in ``testset/pdf``,
-    no subset nesting like the image tree)."""
+    """``(name, lang, variant, path)`` for every document fixture under ``root``. The last three
+    path components are always ``<stem>/<lang>/<vN>``; a fixture may sit under a subset subdir that
+    mirrors its source's testset location (``docpack/07_…/nl/v1``), so the walk recurses."""
     out: list[tuple[str, str, str, Path]] = []
     if not root.is_dir():
         return out
-    for doc_file in sorted(root.glob("*/*/*/document.json")):
+    for doc_file in sorted(root.rglob("document.json")):
         variant_path = doc_file.parent
         out.append((variant_path.parent.parent.name, variant_path.parent.name, variant_path.name, variant_path))
     return out
