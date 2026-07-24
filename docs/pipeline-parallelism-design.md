@@ -14,69 +14,82 @@ instead of taking one call each, and every llm-pool call is timed.
 
 ## The problem
 
-The model pool admits several inference requests at a time (`target_inflight`).
-One user submitting one document uses a single slot. `translate_pdf` walks its
-pages in a loop, and each page waits for its own model calls before the next page
-starts.
+Grouping (a VLM) and translation (an LLM) run in a separate process — the *model
+pool* — which serves inference requests and admits only a few at a time
+(`target_inflight`). `translate_pdf` runs in this service, not in the pool; it
+calls the pool for the grouping and translation of each page.
 
-The runtime already runs more than one request slot, so separate *requests*
-overlap. Within a request nothing does.
+It works through a document one page at a time, and within a page it makes its
+calls in sequence: grouping, then the translation batch, then the per-line calls
+the batch could not place. Nothing in one document is issued to the pool
+concurrently, so a document occupies at most one of the pool's slots at any moment
+and the rest sit idle. Separate *requests* already overlap — the runtime runs more
+than one — but within a request nothing does.
+
+A document's pages share no data until the PDF is assembled, so their model calls
+could be in flight together instead of in sequence. That idle pool capacity is the
+headroom.
 
 ## Baseline
 
-`translate_pdf`, one page at a time. Three runs:
+`translate_pdf`, one page at a time. Three documents, each run five times:
 
 - a 15-page paper, born-digital (text layer, OCR skipped)
-- a 200 dpi raster of that same paper, so it takes the OCR route on identical
-  content — but it is a clean re-render of a digital PDF, not a real scan: no
-  sensor noise, no skew, no compression artefacts, so OCR has it easier than it
-  would in the field
+- a 200 dpi raster of that same paper — the OCR route on identical content. It is
+  a clean re-render, not a real scan (no sensor noise, skew, or compression
+  artefacts), so OCR has it easier than it would in the field
 - an 11-page 1974 conference paper, a genuine scan (image coverage 1.00 on every
   page) with an untrusted OCR text layer, classified `hybrid` and therefore
   routed through OCR
 
 | stage | born-digital | raster of it | 1974 scan |
 |---|---|---|---|
-| grouping (VLM) | 38.4s | 37.3s | 48.8s |
-| translation (LLM) | 60.2s | 46.4s | 78.4s* |
-| **out-of-process** | **98.6s (88%)** | **83.8s (83%)** | **127.2s (84%)** |
-| OCR | 0s | 5.1s | 3.5s |
-| render | 10.6s | 10.2s | 15.6s |
-| align | 1.9s | 1.8s | 4.9s |
-| layout | 0.5s | 0.5s | 0.4s |
-| **in-process** | **13.1s (12%)** | **17.7s (17%)** | **24.4s (16%)** |
+| grouping (VLM) | 38.0 (37.8-38.6) | 38.1 (37.5-38.3) | 50.6 (50.2-52.5) |
+| translation (LLM) | 71.4 (69.9-78.0) | 52.4 (51.9-56.1) | 81.2 (80.6-93.8)* |
+| **out-of-process** | **109.6 (108.5-115.9), 89%** | **90.4 (89.4-94.2), 85%** | **132.5 (130.8-146.3), 84%** |
+| OCR | 0 | 3.7 (3.7-4.7) | 3.5 (3.3-3.9) |
+| render | 10.6 (10.4-10.7) | 10.1 (9.7-10.8) | 16.4 (16.0-17.2) |
+| align | 1.9 (1.9-2.0) | 1.9 (1.8-1.9) | 4.9 (4.9-5.0) |
+| layout | 0.5 (0.5-4.4) | 0.5 | 0.4 |
+| **in-process** | **13.1 (12.8-17.0), 11%** | **16.2 (15.8-17.3), 15%** | **25.6 (24.8-25.9), 16%** |
 | pages | 15 | 15 | 11 |
 
-\* the 1974 run's stage total was 88.6s; 78.4s is the batch calls alone, the rest
-per-unit calls for a page whose block structure did not come back intact.
+Seconds, as median (min-max) over the five runs. They cluster tightly — most stage
+totals within ~6%. The spread comes from how many lines the grouping hint leaves
+for the per-line tail, and from the odd slow call.
+
+\* the upper end of the 1974 translation range (93.8s) is the one run where a
+page's block structure did not come back intact and its lines fell to per-line
+calls; the other four sat near 80.6s.
 
 Three things follow.
 
 **The pipeline mostly waits.** 84-89% of the time is spent on calls to another
 process. That is the headroom.
 
-**Our own GPU work is small, on a real scan too.** OCR costs 0.34s per page on
-the clean raster and 0.32s per page on the 1974 scan. The in-process GPU models
+**Our own GPU work is small, on a real scan too.** OCR costs 0.25s per page on
+the clean raster and 0.31s per page on the 1974 scan. The in-process GPU models
 (Paddle det/rec, doclayout, LaMa) are the stages that cannot run on more than one
 thread, and the harder input did not change their weight. LaMa sits inside
 `render` and is not timed separately, so the GPU share is measured only for OCR;
 `render` also contains CPU work.
 
-**Page cost varies a lot.** In the born-digital run the slowest page took 11.1s,
-the median 8.2s and the fastest 1.0s. Serial execution pays that spread in full.
+**Page cost varies a lot.** Across the born-digital runs the slowest page took
+15.0s, the median 10.1s and the fastest 1.0s. Serial execution pays that spread in
+full.
 
-The scanned run is faster but not a cheaper route: OCR does less than the
-text-layer path — it flattens the formulas that path carries as island tokens —
-so the two right-hand columns are not the same job.
+The raster run is faster, but not because OCR is cheaper. It does less: it flattens
+the formulas the text-layer path carries as island tokens. The two right-hand
+columns are not the same job.
 
 ## Two sources of parallelism
 
 Per page the translator makes batched calls — one over the page's hint lines, one
-over any inline-maths units — plus a short tail of per-unit calls for what the
-batches could not place. Per-call timing puts nearly all the time in the batches:
-over the born-digital run the 13 main batch calls took 43.8s (73% of the
-translation stage) and the island batches another 14.5s, against a per-unit tail
-of under two seconds in total.
+over any inline-maths units — plus a per-line tail for what the batches could not
+place. Over the born-digital document the 13 main batch calls took 45.1s (63% of
+the translation stage) and the 9 island batches another 14.6s. The per-line tail
+ran 10-19s across the five runs, varying with how many lines the grouping hint
+left unplaced.
 
 So there are two independent places to parallelise:
 
@@ -94,13 +107,15 @@ rule.
 | class | stages | rule |
 |---|---|---|
 | out-of-process | grouping VLM, translation | issue freely; the pool owns capacity |
-| in-process GPU | Paddle det/rec, doclayout, LaMa | one lock, strictly serial |
+| in-process GPU | Paddle det/rec, doclayout, LaMa | per-engine `threading.Lock`; serial |
 | CPU | align, wrap/fit, compositing | parallel, as far as the GIL allows |
 
-The GPU models are not thread-safe. A single lock around them is the correctness
-guarantee, and the baseline says it costs almost nothing: 4s of lock-held time
-against ~110s of work. If that changes, a replica pool behind the same lock is a
-local change.
+The GPU engines are not thread-safe, but each already serialises itself on a
+`threading.Lock` — `_PREDICT_LOCK` in layout, the per-engine locks in
+`app/ocr/paddleocr.py`, `_LOCK` in inpaint. So page-parallel threads are already
+safe; correctness needs no new lock. Lock-held time is small — a few seconds
+against ~110s of model work. Whether to add one umbrella lock, so the engines never
+overlap on the card, is a contention question for phase 4.
 
 The per-page chain and its classes:
 
@@ -151,16 +166,20 @@ Changes:
   every span.
 - a `timeline.json` artifact per request.
 
-Out of scope in phase 1: concurrency, the lock, the config parameter.
+Out of scope in phase 1: concurrency and the config parameter.
 
 ### Phase 2 — page concurrency
 
-A bounded worker pool over pages. Each page keeps its own serial chain; the mix
-of stages in flight falls out of the staggering, so no scheduler decides what
-runs when.
+A bounded thread pool over the `for page in profile.pages` loop in
+`run_translate_pdf_pipeline` (`app/tasks/translate_pdf.py`), where each page calls
+`run_translate_image_pipeline`. Threads, not asyncio: the pool calls are blocking
+`httpx.post`, so threads give real overlap while each page keeps its serial chain
+unchanged. The mix of stages in flight falls out of the staggering, so no scheduler
+decides what runs when.
 
 - page concurrency becomes a setting, not a constant.
-- one lock around the in-process GPU stages.
+- no new GPU lock — the in-process engines already self-serialise (see Resource
+  classes); page threads are safe as they are.
 - PDF assembly keeps page order regardless of completion order.
 - per-page progress becomes a count of finished pages.
 - `checkpoint()` and cancellation need a defined meaning with N pages in flight.
@@ -172,13 +191,14 @@ runs when.
 - the PDF regression harness stays green; page output is per-page, so concurrency
   must not change it.
 
-### Phase 3 — the remaining tail
+### Phase 3 — the within-page tail
 
-The island batch already removed most of the per-unit calls. What is left per
-page is a handful of hint-line and fallback calls, issued in sequence. Fanning
-those out is the only work here that also speeds up a single-page image request,
-where there are no other pages to overlap with — but the measured tail is now
-under two seconds per document, so this is last, not first.
+The per-line tail is not small — 10-19s on the born-digital document — but it is
+issued one call after another within a page. Under phase 2 one page's tail already
+overlaps the next page's batch, so for a multi-page PDF page concurrency absorbs
+most of it. Fanning the tail out within a page is what helps a single-page image
+request, where there is no next page to overlap with — so it comes after page
+concurrency, not before.
 
 ### Phase 4 — tune
 
@@ -205,8 +225,8 @@ That is a reason to make page concurrency a setting rather than a constant.
 If model time divides by 4 and in-process work overlaps with it, the floor is
 `max(model/4, in-process) + fixed overhead`:
 
-- born-digital: `max(24.7, 13.1) + 4 ≈ 29s`, from 116s.
-- scanned: `max(21.0, 17.7) + 5 ≈ 26s`, from 106s.
+- born-digital: `max(27.4, 13.1) + 4 ≈ 31s`, from 124s.
+- raster: `max(22.6, 16.2) + 5 ≈ 28s`, from 107s.
 
 Both land near 4x, which is the pool's admission limit. Closing the page-cost
 spread adds utilisation on top. This is arithmetic on the baseline, not a
